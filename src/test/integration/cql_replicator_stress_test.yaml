@@ -1,0 +1,62 @@
+keyspace: ks_test_cql_replicator
+keyspace_definition: |
+  CREATE KEYSPACE ks_test_cql_replicator WITH replication = {'class' : 'NetworkTopologyStrategy', 'datacenter1' : 1} AND durable_writes = true;
+
+table: test_cql_replicator
+table_definition: |
+  CREATE TABLE test_cql_replicator (
+    key            uuid,
+    col0           tinyint, 
+    col1           text,
+    col2           date,
+    col3           double,
+    col4           int,
+    col5           bigint,
+    col6           timestamp,
+    col7           float,
+    col8           blob,
+    PRIMARY KEY (key, col0)
+  )
+  WITH CLUSTERING ORDER BY (col0 ASC)
+
+columnspec:
+  - name: key
+    cluster: uniform(10..10000)
+  - name: col0
+    size: uniform(5..10)
+    population: uniform(1..30)
+    cluster: uniform(1..30)
+  - name: col1
+    size: uniform(10..100)
+    population: uniform(1..100B)
+  - name: col2
+    size: fixed(15)
+    population: uniform(1..1000000)
+  - name: col3
+    size: fixed(5)
+    population: uniform(1..4)
+  - name: col3
+    size: fixed(5)
+    population: uniform(1..4)
+  - name: col4
+    size: fixed(5)
+    population: uniform(1..4)
+  - name: col5
+    size: fixed(5)
+    population: uniform(1..4)
+  - name: col6
+    size: fixed(5)
+    population: uniform(1..4)
+  - name: col7
+    size: fixed(5)
+    population: uniform(1..4)
+  - name: col8
+    size: fixed(5)
+    population: uniform(1..4)
+
+insert:
+  partitions: fixed(1)
+
+queries:
+  simple1:
+    cql: select * from test_cql_replicator2 WHERE key = ? LIMIT 1

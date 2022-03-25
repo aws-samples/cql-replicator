@@ -12,14 +12,13 @@ import java.time.Duration;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
-
 /** Responsible for abstracting replication logic between source table and target table */
 public abstract class AbstractTask {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(AbstractTask.class);
 
-  public final void performTask(
-          Storage pkCache, Utils.CassandraTaskTypes taskName) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+  public final void performTask(Storage pkCache, Utils.CassandraTaskTypes taskName)
+      throws IOException, InterruptedException, ExecutionException, TimeoutException {
     long startTime = System.nanoTime();
     doPerformTask(pkCache, taskName);
     long elapsedTime = System.nanoTime() - startTime;
@@ -27,6 +26,6 @@ public abstract class AbstractTask {
         "Elapsed time is {} ms for task {}", Duration.ofNanos(elapsedTime).toMillis(), taskName);
   }
 
-  protected abstract void doPerformTask(
-          Storage pkCache, Utils.CassandraTaskTypes taskName) throws IOException, InterruptedException, ExecutionException, TimeoutException;
+  protected abstract void doPerformTask(Storage pkCache, Utils.CassandraTaskTypes taskName)
+      throws IOException, InterruptedException, ExecutionException, TimeoutException;
 }

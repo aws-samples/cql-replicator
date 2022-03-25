@@ -38,14 +38,10 @@ public class KeyspacesExtractor implements DataExtractor {
   public KeyspacesExtractor(Properties config) {
     RetryConfig retryConfig =
         RetryConfig.custom()
-            .maxAttempts(
-                Integer.parseInt(config.getProperty("REPLICATE_RETRY_MAXATTEMPTS","256") ))
+            .maxAttempts(Integer.parseInt(config.getProperty("REPLICATE_RETRY_MAXATTEMPTS", "256")))
             .intervalFunction(IntervalFunction.ofExponentialBackoff(30, 1.5))
             .retryOnException(
-                keyspacesExceptions ->
-                        keyspacesExceptions
-                        instanceof
-                                QueryConsistencyException)
+                keyspacesExceptions -> keyspacesExceptions instanceof QueryConsistencyException)
             .retryExceptions(
                 ReadFailureException.class,
                 ReadTimeoutException.class,
@@ -66,7 +62,8 @@ public class KeyspacesExtractor implements DataExtractor {
         keyspacesSession.prepare(
             "SELECT pk, cc from replicator.ledger_v4 where process_name=:process_name and tile=:tile AND keyspacename=:keyspacename and tablename=:tablename AND pk=:pk");
     psQueryLedgerItemByPk =
-        keyspacesSession.prepare("select * from replicator.ledger_v4 where process_name=:process_name AND tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk");
+        keyspacesSession.prepare(
+            "select * from replicator.ledger_v4 where process_name=:process_name AND tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk");
     psPartitionMetaData =
         keyspacesSession.prepare(
             "select cc from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk limit 1");

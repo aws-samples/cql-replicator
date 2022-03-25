@@ -3,6 +3,8 @@
 package com.amazon.aws.cqlreplicator.models;
 
 /** Defines retry metadata */
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+
 import java.time.LocalDate;
 
 public class RetryEntry {
@@ -55,24 +57,6 @@ public class RetryEntry {
 
   @Override
   public String toString() {
-    return "RetryEntry{"
-        + "partitionKey='"
-        + partitionKey
-        + '\''
-        + ", clusteringColumns='"
-        + clusteringColumns
-        + '\''
-        + ", keyspaceName='"
-        + keyspaceName
-        + '\''
-        + ", tableName='"
-        + tableName
-        + '\''
-        + ", ops='"
-        + ops
-        + '\''
-        + ", dt_retries="
-        + dt_retries
-        + '}';
+    return ReflectionToStringBuilder.toString(this);
   }
 }

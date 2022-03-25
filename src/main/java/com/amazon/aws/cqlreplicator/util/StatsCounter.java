@@ -10,33 +10,36 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class StatsCounter {
-    private final ConcurrentMap<String, AtomicInteger> map =
-            new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, AtomicInteger> map = new ConcurrentHashMap<>();
 
-    public StatsCounter() {}
+  public StatsCounter() {}
 
-    public void incrementStat(String key) {
-        AtomicInteger value = map.get(key);
-        if (value == null) {
-            value = new AtomicInteger(0);
-            AtomicInteger old = map.putIfAbsent(key, value);
-            if (old!=null) { value = old; }
-        }
-        value.incrementAndGet();
+  public void incrementStat(String key) {
+    AtomicInteger value = map.get(key);
+    if (value == null) {
+      value = new AtomicInteger(0);
+      AtomicInteger old = map.putIfAbsent(key, value);
+      if (old != null) {
+        value = old;
+      }
     }
+    value.incrementAndGet();
+  }
 
-    public Integer getStat(String key) {
-        AtomicInteger value = map.get(key);
-        return (value == null) ? 0 : value.get();
-    }
+  public Integer getStat(String key) {
+    AtomicInteger value = map.get(key);
+    return (value == null) ? 0 : value.get();
+  }
 
-    public void resetStat(String key) {
-        AtomicInteger value = map.get(key);
-        if (value == null) {
-            value = new AtomicInteger(0);
-            AtomicInteger old = map.putIfAbsent(key, value);
-            if (old!=null) { value = old; }
-        }
-        map.get(key).set(0);
+  public void resetStat(String key) {
+    AtomicInteger value = map.get(key);
+    if (value == null) {
+      value = new AtomicInteger(0);
+      AtomicInteger old = map.putIfAbsent(key, value);
+      if (old != null) {
+        value = old;
+      }
     }
+    map.get(key).set(0);
+  }
 }

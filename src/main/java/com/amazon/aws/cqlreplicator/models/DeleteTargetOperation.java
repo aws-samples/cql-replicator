@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.models;
 
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+
 import java.util.Arrays;
 import java.util.Map;
 
@@ -48,19 +50,6 @@ public class DeleteTargetOperation {
 
   @Override
   public String toString() {
-    return "DeleteTargetOperation{"
-        + "keyspaceName='"
-        + keyspaceName
-        + '\''
-        + ", tableName='"
-        + tableName
-        + '\''
-        + ", values="
-        + Arrays.toString(values)
-        + ", names="
-        + Arrays.toString(names)
-        + ", types="
-        + types
-        + '}';
+    return ReflectionToStringBuilder.toString(this);
   }
 }

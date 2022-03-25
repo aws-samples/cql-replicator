@@ -10,7 +10,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import com.fasterxml.jackson.dataformat.cbor.databind.CBORMapper;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.slf4j.Logger;
@@ -22,11 +21,8 @@ import java.math.BigDecimal;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-
-
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -95,8 +91,8 @@ public class Utils {
     return Collections.emptyList();
   }
 
-  public static Payload convertToJson(String rawData, String writeTimeColumns, String[] cls, String[] pks)
-       {
+  public static Payload convertToJson(
+      String rawData, String writeTimeColumns, String[] cls, String[] pks) {
     ObjectMapper objectMapper = new ObjectMapper();
 
     Payload payload = new Payload();
@@ -110,14 +106,15 @@ public class Utils {
     List<Long> writeTimeArray = new ArrayList<>();
 
     JsonNode rootNode = null;
-         try {
-           rootNode = objectMapper.readTree(rawData);
-         } catch (JsonProcessingException e) {
-           e.printStackTrace();
-           System.err.println(e.getMessage());
-         }
-         for (String writeColumn : writeTimeColumnsArray) {
-      JsonNode idNode = Objects.requireNonNull(rootNode).path(String.format("writetime(%s)", writeColumn));
+    try {
+      rootNode = objectMapper.readTree(rawData);
+    } catch (JsonProcessingException e) {
+      e.printStackTrace();
+      System.err.println(e.getMessage());
+    }
+    for (String writeColumn : writeTimeColumnsArray) {
+      JsonNode idNode =
+          Objects.requireNonNull(rootNode).path(String.format("writetime(%s)", writeColumn));
       writeTimeArray.add(idNode.asLong());
     }
     for (String cln : cls) {
@@ -129,7 +126,8 @@ public class Utils {
     }
 
     payload.setPk(partitionColumnsMapping.values().stream().collect(Collectors.joining("|")));
-    payload.setClusteringColumn(clusteringColumnMapping.values().stream().collect(Collectors.joining("|")));
+    payload.setClusteringColumn(
+        clusteringColumnMapping.values().stream().collect(Collectors.joining("|")));
     payload.setTimestamp(writeTimeArray.stream().max(Long::compare).get());
     payload.setClusteringColumns(clusteringColumnMapping);
 
@@ -147,8 +145,7 @@ public class Utils {
   }
 
   public static BoundStatementBuilder aggregateBuilder(
-      String cqlType, String columnName, String colValue, BoundStatementBuilder bound)
-    {
+      String cqlType, String columnName, String colValue, BoundStatementBuilder bound) {
 
     switch (cqlType) {
       case "blob":
@@ -202,7 +199,7 @@ public class Utils {
           InetAddress ipFixed = InetAddress.getByName(colValue.replace("/", ""));
           bound.setInetAddress(columnName, ipFixed);
         } catch (UnknownHostException e) {
-            throw new RuntimeException(e);
+          throw new RuntimeException(e);
         }
         break;
       default:

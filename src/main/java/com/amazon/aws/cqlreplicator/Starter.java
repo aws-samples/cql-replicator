@@ -17,7 +17,6 @@ import picocli.CommandLine;
 
 import java.io.IOException;
 import java.time.Instant;
-
 import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -37,18 +36,15 @@ public class Starter implements Callable<Integer> {
   private static final Logger LOGGER = LoggerFactory.getLogger(Starter.class);
   protected static Timer timer = new Timer("Timer");
   protected static TimerTask task;
-
-  @CommandLine.Option(
-          names = {"--pathToConfig"},
-          description = "Path to config.yaml file")
-  private static String pathToConfig = "";
-
   protected static Properties config;
-
+  @CommandLine.Option(
+      names = {"--pathToConfig"},
+      description = "Path to config.yaml file")
+  private static String pathToConfig = "";
   private static long replicationDelay;
   private static long statsDelay;
-  static private Storage pkCacheForClusteringKeys;
-  static private Storage pkCacheForPartitionKeys;
+  private static Storage pkCacheForClusteringKeys;
+  private static Storage pkCacheForPartitionKeys;
 
   @CommandLine.Option(
       names = {"--syncPartitionKeys"},
@@ -88,7 +84,7 @@ public class Starter implements Callable<Integer> {
     int arg = 0;
     for (String param : args) {
       if (param.equals("--pathToConfig")) {
-        pathToConfig = args[arg+1];
+        pathToConfig = args[arg + 1];
       }
       if (param.equals("--stats")) {
         isStats = true;
@@ -96,22 +92,25 @@ public class Starter implements Callable<Integer> {
       arg++;
     }
 
-    if (pathToConfig == "")
-      pathToConfig = System.getenv("CQLREPLICATOR_CONF");
+    if (pathToConfig == "") pathToConfig = System.getenv("CQLREPLICATOR_CONF");
 
     ConfigReader configReader = new ConfigReader(pathToConfig);
 
     try {
       config = configReader.getConfig();
     } catch (IOException e) {
-      LOGGER.error("Unable to read config.properties file due" , e);
+      LOGGER.error("Unable to read config.properties file due", e);
       System.exit(-1);
     }
 
-    replicationDelay = TimeUnit.SECONDS.toMillis(Long.parseLong(config.getProperty("REPLICATE_REFRESH_PERIOD_SEC")));
-    statsDelay = TimeUnit.SECONDS.toMillis(Long.parseLong(config.getProperty("STATS_REFRESH_PERIOD_SEC")));
+    replicationDelay =
+        TimeUnit.SECONDS.toMillis(
+            Long.parseLong(config.getProperty("REPLICATE_REFRESH_PERIOD_SEC")));
+    statsDelay =
+        TimeUnit.SECONDS.toMillis(Long.parseLong(config.getProperty("STATS_REFRESH_PERIOD_SEC")));
 
-    if (isStats) delay = statsDelay; else delay = replicationDelay;
+    if (isStats) delay = statsDelay;
+    else delay = replicationDelay;
 
     Runtime.getRuntime().addShutdownHook(new Stopper());
 
@@ -158,7 +157,7 @@ public class Starter implements Callable<Integer> {
           "Partition keys synchronization process with refreshPeriodSec {} started at {}",
           replicationDelay,
           Instant.now());
-       abstractTaskPartitionKeys.performTask(pkCacheForPartitionKeys, SYNC_DELETED_PARTITION_KEYS);
+      abstractTaskPartitionKeys.performTask(pkCacheForPartitionKeys, SYNC_DELETED_PARTITION_KEYS);
     }
     if (syncClusteringColumns) {
       if (abstractTaskClusteringKeys == null) {

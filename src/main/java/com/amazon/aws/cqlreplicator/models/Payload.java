@@ -5,6 +5,8 @@
 
 package com.amazon.aws.cqlreplicator.models;
 
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+
 import java.util.Map;
 
 public class Payload {
@@ -50,21 +52,6 @@ public class Payload {
 
   @Override
   public String toString() {
-    return "Payload{"
-        + "pk='"
-        + pk
-        + '\''
-        + ", cl='"
-        + cl
-        + '\''
-        + ", ts="
-        + ts
-        + ", payload='"
-        + payload
-        + '\''
-        + ", cls='"
-        + cls
-        + '\''
-        + '}';
+    return ReflectionToStringBuilder.toString(this);
   }
 }

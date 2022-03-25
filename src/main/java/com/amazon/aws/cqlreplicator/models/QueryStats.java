@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.models;
 
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+
 /** Defines metadata query in stats */
 public class QueryStats {
   private final String keyspaceName;
@@ -16,17 +18,7 @@ public class QueryStats {
 
   @Override
   public String toString() {
-    return "QueryStats{"
-        + "keyspaceName='"
-        + keyspaceName
-        + '\''
-        + ", tableName='"
-        + tableName
-        + '\''
-        + ", ops='"
-        + ops
-        + '\''
-        + '}';
+    return ReflectionToStringBuilder.toString(this);
   }
 
   public String getKeyspaceName() {

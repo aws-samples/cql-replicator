@@ -38,14 +38,10 @@ public class KeyspacesLoader implements DataLoader {
   public KeyspacesLoader(Properties config) {
     RetryConfig retryConfig =
         RetryConfig.custom()
-            .maxAttempts(
-                Integer.parseInt(config.getProperty("REPLICATE_RETRY_MAXATTEMPTS","256")))
+            .maxAttempts(Integer.parseInt(config.getProperty("REPLICATE_RETRY_MAXATTEMPTS", "256")))
             .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(30), 1.5))
             .retryOnException(
-                keyspacesExceptions ->
-                   keyspacesExceptions
-                        instanceof
-                           QueryConsistencyException)
+                keyspacesExceptions -> keyspacesExceptions instanceof QueryConsistencyException)
             .retryExceptions(
                 WriteFailureException.class,
                 WriteTimeoutException.class,
@@ -68,7 +64,8 @@ public class KeyspacesLoader implements DataLoader {
       PartitionMetaData partitionMetaData,
       BatchStatementBuilder batchableStatements) {
     PreparedStatement psDeletePkLedger =
-        keyspacesSession.prepare("delete from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk");
+        keyspacesSession.prepare(
+            "delete from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk");
     PreparedStatement psDeletePkPartitionKeys =
         keyspacesSession.prepare(
             "delete from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk and cc=:cc");
@@ -80,10 +77,7 @@ public class KeyspacesLoader implements DataLoader {
     BoundStatementBuilder bsInsertDeletedPartitions;
 
     // Let's check if a delete operation occurs
-    if (deleteTargetOperation != null
-        && deletePkLedger != null
-        && partitionMetaData != null
-        ) {
+    if (deleteTargetOperation != null && deletePkLedger != null && partitionMetaData != null) {
       // Deleting the row in the target table
       List<String> whereClause = new ArrayList<>();
       for (String col : deleteTargetOperation.getNames()) {
@@ -105,9 +99,9 @@ public class KeyspacesLoader implements DataLoader {
       int i = 0;
       for (String cl : deleteTargetOperation.getNames()) {
         String type = deleteTargetOperation.getTypes().get(cl);
-          bsDeleteTargetData =
-              Utils.aggregateBuilder(
-                  type, cl, deleteTargetOperation.getValues()[i], bsDeleteTargetData);
+        bsDeleteTargetData =
+            Utils.aggregateBuilder(
+                type, cl, deleteTargetOperation.getValues()[i], bsDeleteTargetData);
         i++;
       }
 
@@ -303,19 +297,19 @@ public class KeyspacesLoader implements DataLoader {
     RetryEntry finalRetryEntry = retryEntry;
 
     publisher.onError(
-            event -> {
-              keyspacesSession.execute(
-                      psRetryMetaData
-                              .boundStatementBuilder()
-                              .setLocalDate("dt_retries", finalRetryEntry.getDt_retries())
-                              .setString("pk", finalRetryEntry.getPartitionKey())
-                              .setString("cl", finalRetryEntry.getClusteringColumns())
-                              .setString("ops", finalRetryEntry.getOps())
-                              .setString("keyspacename", finalRetryEntry.getKeyspaceName())
-                              .setString("tablename", finalRetryEntry.getTableName())
-                              .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM)
-                              .build());
-              LOGGER.warn("Operation was failed on event {}", event.toString());
-            });
+        event -> {
+          keyspacesSession.execute(
+              psRetryMetaData
+                  .boundStatementBuilder()
+                  .setLocalDate("dt_retries", finalRetryEntry.getDt_retries())
+                  .setString("pk", finalRetryEntry.getPartitionKey())
+                  .setString("cl", finalRetryEntry.getClusteringColumns())
+                  .setString("ops", finalRetryEntry.getOps())
+                  .setString("keyspacename", finalRetryEntry.getKeyspaceName())
+                  .setString("tablename", finalRetryEntry.getTableName())
+                  .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM)
+                  .build());
+          LOGGER.warn("Operation was failed on event {}", event.toString());
+        });
   }
 }

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.models;
 
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+
 /** Defines multiple partitions' metadata */
 public class PartitionsMetaData {
 
@@ -17,16 +19,7 @@ public class PartitionsMetaData {
 
   @Override
   public String toString() {
-    return "PartitionsMetaData{"
-        + "tile="
-        + tile
-        + ", keyspaceName='"
-        + keyspaceName
-        + '\''
-        + ", tableName='"
-        + tableName
-        + '\''
-        + '}';
+    return ReflectionToStringBuilder.toString(this);
   }
 
   public int getTile() {

@@ -51,15 +51,15 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(PartitionDiscoveryTask.class);
   private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
+  private static final int REQUEST_PER_PARTITION = 1000;
+  private static final int RATE_LIMITER_TIMEOUT_MS = 1000;
+  private static final int ADVANCED_CACHE_SIZE = 1000;
   private static CassandraExtractor cassandraExtractor;
   private static KeyspacesExtractor keyspacesExtractor;
   private static KeyspacesLoader targetLoader;
   private static Map<String, LinkedHashMap<String, String>> metaData;
   private final Properties config;
   private StatsCounter statsCounter;
-  private static final int REQUEST_PER_PARTITION = 1000;
-  private static final int RATE_LIMITER_TIMEOUT_MS = 1000;
-  private static final int ADVANCED_CACHE_SIZE = 1000;
 
   /**
    * Constructor for PartitionDiscoveryTask.
@@ -77,32 +77,35 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
   /** Scan and compare partition keys. */
   private void scanAndCompare(
-          List<ImmutablePair<String, String>> rangeList,
-          Storage pkCache,
-          String[] pks) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+      List<ImmutablePair<String, String>> rangeList, Storage pkCache, String[] pks)
+      throws IOException, InterruptedException, ExecutionException, TimeoutException {
 
     AdvancedCache<String> advancedCache = null;
 
     if (pkCache instanceof MemcachedStorage) {
       advancedCache =
-              new AdvancedCache<>(ADVANCED_CACHE_SIZE, pkCache) {
-                @Override
-                protected void flush(List<String> payload, Storage storage) throws IOException, InterruptedException, ExecutionException, TimeoutException {
-                  String totalChunks = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
-                  int currentChunk = Integer.parseInt((String) storage.get(totalChunks));
-                  LOGGER.debug("{}:{}", totalChunks, currentChunk);
-                    byte[] cborPayload = Utils.cborEncoder(payload);
-                    byte[] compressedCborPayload = Utils.compress(cborPayload);
-                    String keyOfChunk = String.format("%s|%s|%s", "pksChunk",config.getProperty("TILE"), currentChunk);
-                    pkCache.put(keyOfChunk, compressedCborPayload);
-                    ((MemcachedStorage) pkCache).incrByOne(totalChunks);
-                }
-              };
+          new AdvancedCache<>(ADVANCED_CACHE_SIZE, pkCache) {
+            @Override
+            protected void flush(List<String> payload, Storage storage)
+                throws IOException, InterruptedException, ExecutionException, TimeoutException {
+              String totalChunks =
+                  String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
+              int currentChunk = Integer.parseInt((String) storage.get(totalChunks));
+              LOGGER.debug("{}:{}", totalChunks, currentChunk);
+              byte[] cborPayload = Utils.cborEncoder(payload);
+              byte[] compressedCborPayload = Utils.compress(cborPayload);
+              String keyOfChunk =
+                  String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), currentChunk);
+              pkCache.put(keyOfChunk, compressedCborPayload);
+              ((MemcachedStorage) pkCache).incrByOne(totalChunks);
+            }
+          };
     }
 
-    boolean totalChunksExist = pkCache.containsKey(String.format("%s|%s", config.getProperty("TILE"), "totalChunks"));
+    boolean totalChunksExist =
+        pkCache.containsKey(String.format("%s|%s", config.getProperty("TILE"), "totalChunks"));
     if (!totalChunksExist)
-    pkCache.put(String.format("%s|%s", config.getProperty("TILE"), "totalChunks"), "0");
+      pkCache.put(String.format("%s|%s", config.getProperty("TILE"), "totalChunks"), "0");
 
     RateLimiter rateLimiter = RateLimiter.create(REQUEST_PER_PARTITION);
     String pksStr = String.join(",", pks);
@@ -112,7 +115,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
       long rangeEnd = Long.parseLong(range.right);
 
       List<Row> resultSetRange =
-          cassandraExtractor.findPartitionsByTokenRange(pksStr, rangeStart,rangeEnd);
+          cassandraExtractor.findPartitionsByTokenRange(pksStr, rangeStart, rangeEnd);
 
       LOGGER.trace("Processing a range: {} - {}", rangeStart, rangeEnd);
       for (Row eachResult : resultSetRange) {
@@ -128,34 +131,39 @@ public class PartitionDiscoveryTask extends AbstractTask {
         boolean flag = pkCache.containsKey(res);
 
         if (!flag) {
-          pkCache.add(Integer.parseInt(config.getProperty("TILE")), res, Instant.now().toEpochMilli());
+          pkCache.add(
+              Integer.parseInt(config.getProperty("TILE")), res, Instant.now().toEpochMilli());
 
           PartitionMetaData partitionMetaData =
-                  new PartitionMetaData(
-                          Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), res);
+              new PartitionMetaData(
+                  Integer.parseInt(config.getProperty("TILE")),
+                  config.getProperty("TARGET_KEYSPACE"),
+                  config.getProperty("TARGET_TABLE"),
+                  res);
 
           RetryEntry retryEntry =
-                  new RetryEntry(
-                          String.format(
-                                  "%s|%s|%s",
-                                  Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE")),
-                          res,
-                          "replicator",
-                          "partitionkeys",
-                          "INSERT",
-                          java.time.LocalDate.now());
+              new RetryEntry(
+                  String.format(
+                      "%s|%s|%s",
+                      Integer.parseInt(config.getProperty("TILE")),
+                      config.getProperty("TARGET_KEYSPACE"),
+                      config.getProperty("TARGET_TABLE")),
+                  res,
+                  "replicator",
+                  "partitionkeys",
+                  "INSERT",
+                  java.time.LocalDate.now());
 
           syncPartitionKeys(partitionMetaData, retryEntry, rateLimiter);
 
-          if (advancedCache!=null)
-            advancedCache.put(partitionMetaData.getPk());
+          if (advancedCache != null) advancedCache.put(partitionMetaData.getPk());
 
           LOGGER.debug("Syncing a new partition key: {}", res);
         }
       }
     }
 
-    if (advancedCache!=null && advancedCache.getSize()>0) {
+    if (advancedCache != null && advancedCache.getSize() > 0) {
       LOGGER.info("Flushing remainders: {}", advancedCache.getSize());
       advancedCache.doFlush();
     }
@@ -163,20 +171,19 @@ public class PartitionDiscoveryTask extends AbstractTask {
     LOGGER.info("Comparing stage is running");
   }
 
-  private void syncPartitionKeys(PartitionMetaData partitionMetaData, RetryEntry retryEntry, RateLimiter rateLimiter) {
-      rateLimiter.tryAcquire(1, RATE_LIMITER_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-      targetLoader.load(retryEntry, partitionMetaData);
-
-
+  private void syncPartitionKeys(
+      PartitionMetaData partitionMetaData, RetryEntry retryEntry, RateLimiter rateLimiter) {
+    rateLimiter.tryAcquire(1, RATE_LIMITER_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+    targetLoader.load(retryEntry, partitionMetaData);
   }
 
-  private void removePartitions(String[] pks, Storage pkCache, int chunk) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+  private void removePartitions(String[] pks, Storage pkCache, int chunk)
+      throws IOException, InterruptedException, ExecutionException, TimeoutException {
     Collection<?> collection = null;
-
 
     if (pkCache instanceof MemcachedStorage) {
 
-      String keyOfChunk = String.format("%s|%s|%s", "pksChunk",config.getProperty("TILE"), chunk);
+      String keyOfChunk = String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), chunk);
       byte[] compressedPayload = (byte[]) pkCache.get(keyOfChunk);
       byte[] cborPayload;
       cborPayload = Utils.decompress(compressedPayload);
@@ -195,9 +202,8 @@ public class PartitionDiscoveryTask extends AbstractTask {
               BoundStatementBuilder boundStatementCassandraBuilder =
                   cassandraExtractor.getCassandraPreparedStatement().boundStatementBuilder();
               if (pkCache instanceof MemcachedStorage)
-
                 LOGGER.debug("Processing partition key: {}", key);
-                pk = REGEX_PIPE.split((String) key);
+              pk = REGEX_PIPE.split((String) key);
 
               if (pkCache instanceof SimpleConcurrentHashMapStorage)
                 pk = REGEX_PIPE.split((String) key);
@@ -252,16 +258,16 @@ public class PartitionDiscoveryTask extends AbstractTask {
                   List<Row> ledgerResultSet = keyspacesExtractor.extract(queryLedgerItemByPk);
                   ledgerResultSet.stream()
                       .forEach(
-                          deleteRow ->
-                          {
+                          deleteRow -> {
                             try {
                               pkCache.remove(
-                                   Integer.parseInt(config.getProperty("TILE")),
+                                  Integer.parseInt(config.getProperty("TILE")),
                                   "rd",
                                   String.format(
-                                      "%s|%s",
-                                      ((String) key), deleteRow.getString("cc")));
-                            } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                                      "%s|%s", ((String) key), deleteRow.getString("cc")));
+                            } catch (InterruptedException
+                                | ExecutionException
+                                | TimeoutException e) {
                               throw new RuntimeException(e);
                             }
                           });
@@ -304,18 +310,17 @@ public class PartitionDiscoveryTask extends AbstractTask {
                 statsCounter.incrementStat("DELETE");
               }
             });
-    if (pkCache instanceof MemcachedStorage && finalClonedCollection.size()<collection.size()) {
-        byte[] cborPayload = Utils.cborEncoder((List<String>) finalClonedCollection);
-        byte[] compressedPayload = Utils.compress(cborPayload);
-        String keyOfChunk = String.format("%s|%s|%s", "pksChunk",config.getProperty("TILE"), chunk);
-        pkCache.put(keyOfChunk, compressedPayload);
+    if (pkCache instanceof MemcachedStorage && finalClonedCollection.size() < collection.size()) {
+      byte[] cborPayload = Utils.cborEncoder((List<String>) finalClonedCollection);
+      byte[] compressedPayload = Utils.compress(cborPayload);
+      String keyOfChunk = String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), chunk);
+      pkCache.put(keyOfChunk, compressedPayload);
     }
 
-    if (pkCache instanceof MemcachedStorage && finalClonedCollection.size()==0) {
+    if (pkCache instanceof MemcachedStorage && finalClonedCollection.size() == 0) {
       String keyOfChunk = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
       ((MemcachedStorage) pkCache).decrByOne(keyOfChunk);
     }
-
   }
 
   /**
@@ -323,18 +328,17 @@ public class PartitionDiscoveryTask extends AbstractTask {
    *
    * @params rangeList, pkCache, pks the array to be sorted
    */
-  private void scanAndRemove(
-      Storage pkCache, String[] pks, Utils.CassandraTaskTypes taskName) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+  private void scanAndRemove(Storage pkCache, String[] pks, Utils.CassandraTaskTypes taskName)
+      throws IOException, InterruptedException, ExecutionException, TimeoutException {
 
     if (taskName.equals(Utils.CassandraTaskTypes.SYNC_DELETED_PARTITION_KEYS)) {
       LOGGER.info("Syncing deleted partition keys between C* and Amazon Keyspaces");
-      if (pkCache instanceof SimpleConcurrentHashMapStorage)
-      removePartitions(pks, pkCache, 0);
+      if (pkCache instanceof SimpleConcurrentHashMapStorage) removePartitions(pks, pkCache, 0);
       if (pkCache instanceof MemcachedStorage) {
         String totalChunks = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
         int totalChunk = Integer.parseInt((String) pkCache.get(totalChunks));
         // process each chunk of partition keys
-        for (int chunk=0; chunk<totalChunk; chunk++) {
+        for (int chunk = 0; chunk < totalChunk; chunk++) {
           removePartitions(pks, pkCache, chunk);
         }
       }
@@ -347,8 +351,8 @@ public class PartitionDiscoveryTask extends AbstractTask {
    * @param pkCache the array to be sorted
    */
   @Override
-  protected void doPerformTask(
-          Storage pkCache, Utils.CassandraTaskTypes taskName) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+  protected void doPerformTask(Storage pkCache, Utils.CassandraTaskTypes taskName)
+      throws IOException, InterruptedException, ExecutionException, TimeoutException {
 
     String[] pks = metaData.get("partition_key").keySet().toArray(new String[0]);
 
@@ -363,10 +367,11 @@ public class PartitionDiscoveryTask extends AbstractTask {
     List<List<ImmutablePair<String, String>>> res;
     List<List<ImmutablePair<String, String>>> tiles = new ArrayList<>();
     int tmpSize = tmpTiles.size();
-    for (int i=0; i<=tmpSize; i++) {
+    for (int i = 0; i <= tmpSize; i++) {
       res = alignRangesAndTiles(tmpTiles);
       tmpTiles = res;
-      if (Objects.requireNonNull(tmpTiles).size() == Integer.parseInt(config.getProperty("TILES"))) {
+      if (Objects.requireNonNull(tmpTiles).size()
+          == Integer.parseInt(config.getProperty("TILES"))) {
         tiles = tmpTiles;
         break;
       }
@@ -394,12 +399,17 @@ public class PartitionDiscoveryTask extends AbstractTask {
     scanAndRemove((Storage<String, Long>) pkCache, pks, taskName);
 
     StatsMetaData statsMetaDataInserts =
-            new StatsMetaData(
-                    Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), "DELETE");
+        new StatsMetaData(
+            Integer.parseInt(config.getProperty("TILE")),
+            config.getProperty("TARGET_KEYSPACE"),
+            config.getProperty("TARGET_TABLE"),
+            "DELETE");
     statsMetaDataInserts.setValue(statsCounter.getStat("DELETE"));
     targetLoader.load(statsMetaDataInserts);
     statsCounter.resetStat("DELETE");
     LOGGER.info("Caching and comparing stage is completed");
-    LOGGER.info("The number of pre-loaded elements in the cache is {} ", pkCache.getSize(Integer.parseInt(config.getProperty("TILE"))));
+    LOGGER.info(
+        "The number of pre-loaded elements in the cache is {} ",
+        pkCache.getSize(Integer.parseInt(config.getProperty("TILE"))));
   }
 }

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.models;
 
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+
 /** Defines stats metadata */
 public class StatsMetaData {
   private final int tile;
@@ -45,18 +47,6 @@ public class StatsMetaData {
 
   @Override
   public String toString() {
-    return "StatsMetaData{"
-        + "tile="
-        + tile
-        + ", keyspaceName='"
-        + keyspaceName
-        + '\''
-        + ", tableName='"
-        + tableName
-        + '\''
-        + ", ops='"
-        + ops
-        + '\''
-        + '}';
+    return ReflectionToStringBuilder.toString(this);
   }
 }

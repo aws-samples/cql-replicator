@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.models;
 
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+
 /** Defines stats query */
 public class StatsAggrQuery {
   private String description;
@@ -14,14 +16,7 @@ public class StatsAggrQuery {
 
   @Override
   public String toString() {
-    return "StatsAggrQuery{"
-        + "description='"
-        + description
-        + '\''
-        + ", partiQL='"
-        + partiQL
-        + '\''
-        + '}';
+    return ReflectionToStringBuilder.toString(this);
   }
 
   public String getDescription() {

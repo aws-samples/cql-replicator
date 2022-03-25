@@ -12,14 +12,7 @@ import com.datastax.oss.driver.api.core.metadata.token.TokenRange;
 import com.datastax.oss.driver.internal.core.metadata.token.Murmur3Token;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Properties;
+import java.util.*;
 
 /** Responsible for providing extracting logic from source cluster */
 public class CassandraExtractor implements DataExtractor {
@@ -37,7 +30,8 @@ public class CassandraExtractor implements DataExtractor {
     ConnectionFactory connectionFactory = new ConnectionFactory(config);
     this.cassandraSession = connectionFactory.getCassandraConnection("CassandraConnector.conf");
     this.psCassandra = cassandraSession.prepare(config.getProperty("SOURCE_CQL_QUERY"));
-    metaData = getColumns(config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"));
+    metaData =
+        getColumns(config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"));
   }
 
   public List<Row> findPartitionsByTokenRange(String pksStr, long startRange, long endRange) {
@@ -52,19 +46,21 @@ public class CassandraExtractor implements DataExtractor {
               .setLong("r2", endRange);
     } else if (startRange > endRange) {
       psPksbyRange =
-              getPartitionKeysByTokenRange(pksStr, startRange, endRange)
-                      .boundStatementBuilder()
-                      .setLong("r1", startRange);
+          getPartitionKeysByTokenRange(pksStr, startRange, endRange)
+              .boundStatementBuilder()
+              .setLong("r1", startRange);
     }
     BoundStatement boundStatement = psPksbyRange.build();
-    return cassandraSession.execute(boundStatement.setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM)).all();
+    return cassandraSession
+        .execute(boundStatement.setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM))
+        .all();
   }
 
   public List<ImmutablePair<String, String>> getTokenRanges() {
     List<ImmutablePair<String, String>> ranges = new ArrayList<>();
     Metadata metadata = cassandraSession.getMetadata();
     TokenMap tokenMap = metadata.getTokenMap().get();
-    Long start,end;
+    Long start, end;
 
     for (TokenRange range : tokenMap.getTokenRanges()) {
       start = ((Murmur3Token) range.getStart()).getValue();
@@ -85,18 +81,10 @@ public class CassandraExtractor implements DataExtractor {
     return resultSet.all();
   }
 
-  private PreparedStatement getPartitionKeysByTokenRange(String partitionKeyStr, long startRange, long endRange) {
+  private PreparedStatement getPartitionKeysByTokenRange(
+      String partitionKeyStr, long startRange, long endRange) {
 
-    String finalCqlStatement = String.format(
-            "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
-            partitionKeyStr,
-            config.getProperty("TARGET_KEYSPACE"),
-            config.getProperty("TARGET_TABLE"),
-            partitionKeyStr,
-            partitionKeyStr);
-
-    if (startRange<endRange) {
-    finalCqlStatement =
+    String finalCqlStatement =
         String.format(
             "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
             partitionKeyStr,
@@ -104,14 +92,25 @@ public class CassandraExtractor implements DataExtractor {
             config.getProperty("TARGET_TABLE"),
             partitionKeyStr,
             partitionKeyStr);
-    } else if (endRange<startRange) {
-    finalCqlStatement = String.format(
-            "select distinct %s from %s.%s where token(%s)>=:r1",
-            partitionKeyStr,
-            config.getProperty("TARGET_KEYSPACE"),
-            config.getProperty("TARGET_TABLE"),
-            partitionKeyStr,
-            partitionKeyStr);
+
+    if (startRange < endRange) {
+      finalCqlStatement =
+          String.format(
+              "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
+              partitionKeyStr,
+              config.getProperty("TARGET_KEYSPACE"),
+              config.getProperty("TARGET_TABLE"),
+              partitionKeyStr,
+              partitionKeyStr);
+    } else if (endRange < startRange) {
+      finalCqlStatement =
+          String.format(
+              "select distinct %s from %s.%s where token(%s)>=:r1",
+              partitionKeyStr,
+              config.getProperty("TARGET_KEYSPACE"),
+              config.getProperty("TARGET_TABLE"),
+              partitionKeyStr,
+              partitionKeyStr);
     }
 
     return cassandraSession.prepare(finalCqlStatement);
@@ -138,22 +137,23 @@ public class CassandraExtractor implements DataExtractor {
 
     for (Row row : resultSet) {
       if (Objects.requireNonNull(row.getString("kind")).equals("partition_key")) {
-        partitionKeysTemp.put(row.getInt("position"),
-                Collections.singletonMap(
-                row.getString("column_name"),
-                row.getString("type")));
+        partitionKeysTemp.put(
+            row.getInt("position"),
+            Collections.singletonMap(row.getString("column_name"), row.getString("type")));
       }
       if (Objects.requireNonNull(row.getString("kind")).equals("clustering")) {
         clusteringKeys.put(row.getString("column_name"), row.getString("type"));
       }
-      if (Objects.requireNonNull(row.getString("kind")).equals("regular") || Objects.requireNonNull(row.getString("kind")).equals("static")) {
+      if (Objects.requireNonNull(row.getString("kind")).equals("regular")
+          || Objects.requireNonNull(row.getString("kind")).equals("static")) {
         regularColumns.put(row.getString("column_name"), row.getString("type"));
       }
     }
 
     partitionKeysTemp.entrySet().stream()
-            .sorted(Map.Entry.comparingByKey())
-            .forEach(entry -> {
+        .sorted(Map.Entry.comparingByKey())
+        .forEach(
+            entry -> {
               String newKey = (String) entry.getValue().keySet().toArray()[0];
               String newValue = (String) entry.getValue().values().toArray()[0];
               partitionKeys.put(newKey, newValue);

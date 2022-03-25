@@ -92,7 +92,12 @@ public class Init {
   private static final File configFile =
       new File(String.format("%s/%s", pathToConfig, KEYSPACES_CONFIG_FILE));
   private static CountDownLatch latch = new CountDownLatch(5);
-
+  private static CqlSession cqlSession =
+      CqlSession.builder()
+          .addSchemaChangeListener(listener)
+          .withConfigLoader(DriverConfigLoader.fromFile(configFile))
+          .addTypeCodecs(TypeCodecs.ZONED_TIMESTAMP_UTC)
+          .build();
   private static final SchemaChangeListener listener =
       new SchemaChangeListenerBase() {
         @Override
@@ -121,12 +126,6 @@ public class Init {
             cqlSession.executeAsync(createKeyspaceOps[1]);
         }
       };
-    private static CqlSession cqlSession =
-            CqlSession.builder()
-                    .addSchemaChangeListener(listener)
-                    .withConfigLoader(DriverConfigLoader.fromFile(configFile))
-                    .addTypeCodecs(TypeCodecs.ZONED_TIMESTAMP_UTC)
-                    .build();
 
   public static void main(String[] args) throws InterruptedException {
     try {

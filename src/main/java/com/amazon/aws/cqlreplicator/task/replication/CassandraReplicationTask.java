@@ -6,9 +6,9 @@ import com.amazon.aws.cqlreplicator.extractor.CassandraExtractor;
 import com.amazon.aws.cqlreplicator.extractor.KeyspacesExtractor;
 import com.amazon.aws.cqlreplicator.loader.KeyspacesLoader;
 import com.amazon.aws.cqlreplicator.models.*;
+import com.amazon.aws.cqlreplicator.storage.IonEngine;
 import com.amazon.aws.cqlreplicator.storage.Storage;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
-import com.amazon.aws.cqlreplicator.storage.IonEngine;
 import com.amazon.aws.cqlreplicator.util.StatsCounter;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.ConsistencyLevel;
@@ -18,13 +18,18 @@ import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
 import com.datastax.oss.driver.shaded.guava.common.collect.MapDifference;
 import com.datastax.oss.driver.shaded.guava.common.collect.Maps;
-
 import com.datastax.oss.driver.shaded.guava.common.util.concurrent.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.ZonedDateTime;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -48,7 +53,6 @@ public class CassandraReplicationTask extends AbstractTask {
   private final Properties config;
   private StatsCounter statsCounter;
 
-
   public CassandraReplicationTask(Properties config) {
     this.config = config;
     cassandraExtractor = new CassandraExtractor(config);
@@ -62,222 +66,220 @@ public class CassandraReplicationTask extends AbstractTask {
     if (config.getProperty("TRANSFORM_INBOUND_REQUEST").equals("true")) {
       IonEngine ionEngine = new IonEngine();
       String res = ionEngine.query(config.getProperty("TRANSFORM_SQL"), input);
-      return res.substring( 1, res.length() - 1 );
-      }
+      return res.substring(1, res.length() - 1);
+    }
     return input;
   }
 
-  private void replicateCassandraRow(Row row, String[] pks, String[] cls, int timeoutRateLimiter,RateLimiter rateLimiter, Storage pkCache) {
+  private void replicateCassandraRow(
+      Row row,
+      String[] pks,
+      String[] cls,
+      int timeoutRateLimiter,
+      RateLimiter rateLimiter,
+      Storage pkCache) {
 
-      String[] pk = REGEX_PIPE.split(row.getString("cc"));
-      Map<String, Long> ledgerHashMap = new HashMap<>();
-      Map<String, Long> sourceHashMap = new HashMap<>();
-      Map<String, String> jsonColumnHashMapPerPartition = new HashMap<>();
+    String[] pk = REGEX_PIPE.split(row.getString("cc"));
+    Map<String, Long> ledgerHashMap = new HashMap<>();
+    Map<String, Long> sourceHashMap = new HashMap<>();
+    Map<String, String> jsonColumnHashMapPerPartition = new HashMap<>();
 
-      BoundStatementBuilder boundStatementCassandraBuilder =
-              cassandraExtractor.getCassandraPreparedStatement().boundStatementBuilder();
-      int i = 0;
-      for (String cl : pks) {
-          String type = cassandraSchemaMetadata.get("partition_key").get(cl);
-          boundStatementCassandraBuilder =
-                  aggregateBuilder(type, cl, pk[i], boundStatementCassandraBuilder);
-          i++;
-      }
-      List<Row> cassandraResult =
-              cassandraExtractor.extract(boundStatementCassandraBuilder);
+    BoundStatementBuilder boundStatementCassandraBuilder =
+        cassandraExtractor.getCassandraPreparedStatement().boundStatementBuilder();
+    int i = 0;
+    for (String cl : pks) {
+      String type = cassandraSchemaMetadata.get("partition_key").get(cl);
+      boundStatementCassandraBuilder =
+          aggregateBuilder(type, cl, pk[i], boundStatementCassandraBuilder);
+      i++;
+    }
+    List<Row> cassandraResult = cassandraExtractor.extract(boundStatementCassandraBuilder);
 
-      for (Row compareRow : cassandraResult) {
-          String query;
-          long ts;
-          Payload jsonPayload =
-                  Utils.convertToJson(
-                          compareRow.getString(0), config.getProperty("WRITETIME_COLUMNS"), cls, pks);
-          ts = jsonPayload.getTimestamp();
+    for (Row compareRow : cassandraResult) {
+      String query;
+      long ts;
+      Payload jsonPayload =
+          Utils.convertToJson(
+              compareRow.getString(0), config.getProperty("WRITETIME_COLUMNS"), cls, pks);
+      ts = jsonPayload.getTimestamp();
 
-          Map<String, String> clusteringColumnsMapping = jsonPayload.getClusteringColumns();
+      Map<String, String> clusteringColumnsMapping = jsonPayload.getClusteringColumns();
 
-          String payload = transformer(jsonPayload.getPayload(), config);
+      String payload = transformer(jsonPayload.getPayload(), config);
 
-          LOGGER.debug("PAYLOAD: {}", payload);
-          // Prepare the JSON CQL statement with "USING TIMESTAMP" from the source
-          if (config.getProperty("REPLICATE_WITH_TIMESTAMP").equals("true")) {
-              query =
-                      String.format(
-                              "INSERT INTO %s.%s JSON '%s' USING TIMESTAMP %s",
-                              config.getProperty("TARGET_KEYSPACE"),
-                              config.getProperty("TARGET_TABLE"),
-                              payload,
-                              ts);
-          } else {
-              query =
-                      String.format(
-                              "INSERT INTO %s.%s JSON '%s'",
-                              config.getProperty("TARGET_KEYSPACE"),
-                              config.getProperty("TARGET_TABLE"),
-                              payload);
-          }
-
-          List<String> clTmp = new ArrayList<>();
-          for (String cln : cls) {
-              if (!cln.equals(CLUSTERING_COLUMN_ABSENT)) {
-                  String val = clusteringColumnsMapping.get(cln);
-                  clTmp.add(val);
-              } else {
-                  clTmp.add(REPLICATION_NOT_APPLICABLE);
-              }
-          }
-          String cl = String.join("|", clTmp);
-          String hk = String.format("%s|%s", row.getString("cc"), cl);
-          // if hk is not in the global pk cache, add it
-          try {
-              if (!pkCache.containsKey(hk)) {
-                  sourceHashMap.put(cl, ts);
-                  pkCache.add(Integer.parseInt(config.getProperty("TILE")), hk, ts);
-              } else {
-                  // if hk is in the global pk cache, compare timestamps
-                  if (ts > (long) pkCache.get(hk)) {
-                      sourceHashMap.put(cl, ts);
-                      pkCache.put(hk, ts);
-                  }
-                  // if it's less than do nothing
-              }
-          } catch (InterruptedException | ExecutionException | TimeoutException e) {
-              throw new RuntimeException(e);
-          }
-          jsonColumnHashMapPerPartition.put(cl, query);
+      LOGGER.debug("PAYLOAD: {}", payload);
+      // Prepare the JSON CQL statement with "USING TIMESTAMP" from the source
+      if (config.getProperty("REPLICATE_WITH_TIMESTAMP").equals("true")) {
+        query =
+            String.format(
+                "INSERT INTO %s.%s JSON '%s' USING TIMESTAMP %s",
+                config.getProperty("TARGET_KEYSPACE"),
+                config.getProperty("TARGET_TABLE"),
+                payload,
+                ts);
+      } else {
+        query =
+            String.format(
+                "INSERT INTO %s.%s JSON '%s'",
+                config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), payload);
       }
 
-      if (sourceHashMap.size() > 0) {
-          QueryLedgerItemByPk queryLedgerItemByPk =
-                  new QueryLedgerItemByPk(
-                          row.getString("cc"),
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"));
-          List<Row> ledgerResultSet = keyspacesExtractor.extract(queryLedgerItemByPk);
-
-          for (Row ledgerRow : ledgerResultSet) {
-              Long lastRun =
-                      Objects.requireNonNull(
-                              ledgerRow.get("operation_ts", GenericType.ZONED_DATE_TIME))
-                              .toEpochSecond()
-                              * MILLISECONDS;
-              String cl = ledgerRow.getString("cc");
-              ledgerHashMap.put(cl, lastRun);
-          }
+      List<String> clTmp = new ArrayList<>();
+      for (String cln : cls) {
+        if (!cln.equals(CLUSTERING_COLUMN_ABSENT)) {
+          String val = clusteringColumnsMapping.get(cln);
+          clTmp.add(val);
+        } else {
+          clTmp.add(REPLICATION_NOT_APPLICABLE);
+        }
       }
+      String cl = String.join("|", clTmp);
+      String hk = String.format("%s|%s", row.getString("cc"), cl);
+      // if hk is not in the global pk cache, add it
+      try {
+        if (!pkCache.containsKey(hk)) {
+          sourceHashMap.put(cl, ts);
+          pkCache.add(Integer.parseInt(config.getProperty("TILE")), hk, ts);
+        } else {
+          // if hk is in the global pk cache, compare timestamps
+          if (ts > (long) pkCache.get(hk)) {
+            sourceHashMap.put(cl, ts);
+            pkCache.put(hk, ts);
+          }
+          // if it's less than do nothing
+        }
+      } catch (InterruptedException | ExecutionException | TimeoutException e) {
+        throw new RuntimeException(e);
+      }
+      jsonColumnHashMapPerPartition.put(cl, query);
+    }
 
-      MapDifference<String, Long> diff = Maps.difference(sourceHashMap, ledgerHashMap);
-      Map<String, MapDifference.ValueDifference<Long>> rowDiffering =
-              diff.entriesDiffering();
-      Map<String, Long> newItems = diff.entriesOnlyOnLeft();
+    if (sourceHashMap.size() > 0) {
+      QueryLedgerItemByPk queryLedgerItemByPk =
+          new QueryLedgerItemByPk(
+              row.getString("cc"),
+              Integer.parseInt(config.getProperty("TILE")),
+              config.getProperty("TARGET_KEYSPACE"),
+              config.getProperty("TARGET_TABLE"));
+      List<Row> ledgerResultSet = keyspacesExtractor.extract(queryLedgerItemByPk);
 
-      LOGGER.debug("Started scanning partition: {}", row.getString("cc"));
+      for (Row ledgerRow : ledgerResultSet) {
+        Long lastRun =
+            Objects.requireNonNull(ledgerRow.get("operation_ts", GenericType.ZONED_DATE_TIME))
+                    .toEpochSecond()
+                * MILLISECONDS;
+        String cl = ledgerRow.getString("cc");
+        ledgerHashMap.put(cl, lastRun);
+      }
+    }
 
-      // Updating existing Items
-      rowDiffering.forEach(
-              (k, v) -> {
-                  ZonedDateTime valueOnClient = ZonedDateTime.now();
-                  if (v.leftValue() > v.rightValue()) {
-                      LOGGER.info(
-                              "Update a row in the target table {} by partition key: {} and clustering column: {}",
-                              config.getProperty("TARGET_TABLE"),
-                              row.getString("cc"),
-                              k);
-                      SimpleStatement simpleStatement =
-                              SimpleStatement.newInstance(jsonColumnHashMapPerPartition.get(k))
-                                      .setIdempotent(true)
-                                      .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
+    MapDifference<String, Long> diff = Maps.difference(sourceHashMap, ledgerHashMap);
+    Map<String, MapDifference.ValueDifference<Long>> rowDiffering = diff.entriesDiffering();
+    Map<String, Long> newItems = diff.entriesOnlyOnLeft();
 
-                      LedgerMetaData ledgerMetaData =
-                              new LedgerMetaData(
-                                      row.getString("cc"),
-                                      k,
-                                      config.getProperty("TARGET_KEYSPACE"),
-                                      config.getProperty("TARGET_TABLE"),
-                                      Integer.parseInt(config.getProperty("TILE")),
-                                      valueOnClient,
-                                      v.leftValue());
-                      StatsMetaData statsMetaData =
-                              new StatsMetaData(
-                                      Integer.parseInt(config.getProperty("TILE")),
-                                      config.getProperty("TARGET_KEYSPACE"),
-                                      config.getProperty("TARGET_TABLE"),
-                                      "UPDATE");
+    LOGGER.debug("Started scanning partition: {}", row.getString("cc"));
 
-                      // Update target table
-                      RetryEntry retryEntry =
-                              new RetryEntry(
-                                      row.getString("cc"),
-                                      k,
-                                      config.getProperty("TARGET_KEYSPACE"),
-                                      config.getProperty("TARGET_TABLE"),
-                                      "INSERT",
-                                      java.time.LocalDate.now());
+    // Updating existing Items
+    rowDiffering.forEach(
+        (k, v) -> {
+          ZonedDateTime valueOnClient = ZonedDateTime.now();
+          if (v.leftValue() > v.rightValue()) {
+            LOGGER.info(
+                "Update a row in the target table {} by partition key: {} and clustering column: {}",
+                config.getProperty("TARGET_TABLE"),
+                row.getString("cc"),
+                k);
+            SimpleStatement simpleStatement =
+                SimpleStatement.newInstance(jsonColumnHashMapPerPartition.get(k))
+                    .setIdempotent(true)
+                    .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
 
-                      rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
+            LedgerMetaData ledgerMetaData =
+                new LedgerMetaData(
+                    row.getString("cc"),
+                    k,
+                    config.getProperty("TARGET_KEYSPACE"),
+                    config.getProperty("TARGET_TABLE"),
+                    Integer.parseInt(config.getProperty("TILE")),
+                    valueOnClient,
+                    v.leftValue());
+            StatsMetaData statsMetaData =
+                new StatsMetaData(
+                    Integer.parseInt(config.getProperty("TILE")),
+                    config.getProperty("TARGET_KEYSPACE"),
+                    config.getProperty("TARGET_TABLE"),
+                    "UPDATE");
 
-                      targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
+            // Update target table
+            RetryEntry retryEntry =
+                new RetryEntry(
+                    row.getString("cc"),
+                    k,
+                    config.getProperty("TARGET_KEYSPACE"),
+                    config.getProperty("TARGET_TABLE"),
+                    "INSERT",
+                    java.time.LocalDate.now());
 
-                      statsCounter.incrementStat("UPDATE");
+            rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
-                  }
-              });
+            targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
 
-      // Adding new Items
-      newItems.forEach(
-              (k, v) -> {
-                  LOGGER.debug(
-                          "Insert a row into the target table {} by partition key {} and clustering column {}",
-                          config.getProperty("TARGET_TABLE"),
-                          row.getString("cc"),
-                          k);
-                  ZonedDateTime valueOnClient = ZonedDateTime.now();
-                  SimpleStatement simpleStatement =
-                          SimpleStatement.newInstance(jsonColumnHashMapPerPartition.get(k))
-                                  .setIdempotent(true)
-                                  .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
+            statsCounter.incrementStat("UPDATE");
+          }
+        });
 
-                  LedgerMetaData ledgerMetaData =
-                          new LedgerMetaData(
-                                  row.getString("cc"),
-                                  k,
-                                  config.getProperty("TARGET_KEYSPACE"),
-                                  config.getProperty("TARGET_TABLE"),
-                                  Integer.parseInt(config.getProperty("TILE")),
-                                  valueOnClient,
-                                  v);
-                  StatsMetaData statsMetaData =
-                          new StatsMetaData(
-                                  Integer.parseInt(config.getProperty("TILE")),
-                                  config.getProperty("TARGET_KEYSPACE"),
-                                  config.getProperty("TARGET_TABLE"),
-                                  "INSERT");
+    // Adding new Items
+    newItems.forEach(
+        (k, v) -> {
+          LOGGER.debug(
+              "Insert a row into the target table {} by partition key {} and clustering column {}",
+              config.getProperty("TARGET_TABLE"),
+              row.getString("cc"),
+              k);
+          ZonedDateTime valueOnClient = ZonedDateTime.now();
+          SimpleStatement simpleStatement =
+              SimpleStatement.newInstance(jsonColumnHashMapPerPartition.get(k))
+                  .setIdempotent(true)
+                  .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
 
-                  // Update target table
-                  RetryEntry retryEntry =
-                          new RetryEntry(
-                                  row.getString("cc"),
-                                  k,
-                                  config.getProperty("TARGET_KEYSPACE"),
-                                  config.getProperty("TARGET_TABLE"),
-                                  "INSERT",
-                                  java.time.LocalDate.now());
+          LedgerMetaData ledgerMetaData =
+              new LedgerMetaData(
+                  row.getString("cc"),
+                  k,
+                  config.getProperty("TARGET_KEYSPACE"),
+                  config.getProperty("TARGET_TABLE"),
+                  Integer.parseInt(config.getProperty("TILE")),
+                  valueOnClient,
+                  v);
+          StatsMetaData statsMetaData =
+              new StatsMetaData(
+                  Integer.parseInt(config.getProperty("TILE")),
+                  config.getProperty("TARGET_KEYSPACE"),
+                  config.getProperty("TARGET_TABLE"),
+                  "INSERT");
 
-                  rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
+          // Update target table
+          RetryEntry retryEntry =
+              new RetryEntry(
+                  row.getString("cc"),
+                  k,
+                  config.getProperty("TARGET_KEYSPACE"),
+                  config.getProperty("TARGET_TABLE"),
+                  "INSERT",
+                  java.time.LocalDate.now());
 
-                  targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
+          rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
-                  statsCounter.incrementStat("INSERT");
+          targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
 
-              });
-      LOGGER.debug("Completed scanning rows in {}", row.getString("cc"));
-
+          statsCounter.incrementStat("INSERT");
+        });
+    LOGGER.debug("Completed scanning rows in {}", row.getString("cc"));
   }
 
   @Override
-  protected void doPerformTask(
-          Storage pkCache, Utils.CassandraTaskTypes taskName) throws InterruptedException, ExecutionException, TimeoutException {
+  protected void doPerformTask(Storage pkCache, Utils.CassandraTaskTypes taskName)
+      throws InterruptedException, ExecutionException, TimeoutException {
 
     int permits = Integer.parseInt(config.getProperty("RATELIMITER_PERMITS"));
     int timeoutRateLimiter = Integer.parseInt(config.getProperty("RATELIMITER_TIMEOUT_MS"));
@@ -285,31 +287,48 @@ public class CassandraReplicationTask extends AbstractTask {
 
     PartitionsMetaData partitionsMetaData =
         new PartitionsMetaData(
-            Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"));
+            Integer.parseInt(config.getProperty("TILE")),
+            config.getProperty("TARGET_KEYSPACE"),
+            config.getProperty("TARGET_TABLE"));
 
-    String[] partitionKeyNames = cassandraSchemaMetadata.get("partition_key").keySet().toArray(new String[0]);
-    String[] clusteringColumnNames = cassandraSchemaMetadata.get("clustering").keySet().toArray(new String[0]);
+    String[] partitionKeyNames =
+        cassandraSchemaMetadata.get("partition_key").keySet().toArray(new String[0]);
+    String[] clusteringColumnNames =
+        cassandraSchemaMetadata.get("clustering").keySet().toArray(new String[0]);
 
     // TODO: Read from the chunked cache instead from the Ledger
     List<Row> ledgerPks = keyspacesExtractor.extract(partitionsMetaData);
-    LOGGER.info("The number of pre-loaded elements in the cache is {} ", pkCache.getSize(Integer.parseInt(config.getProperty("TILE"))));
+    LOGGER.info(
+        "The number of pre-loaded elements in the cache is {} ",
+        pkCache.getSize(Integer.parseInt(config.getProperty("TILE"))));
 
     ledgerPks.parallelStream()
         .forEach(
             row ->
-                replicateCassandraRow(row, partitionKeyNames, clusteringColumnNames, timeoutRateLimiter, rateLimiter, pkCache)
-            );
+                replicateCassandraRow(
+                    row,
+                    partitionKeyNames,
+                    clusteringColumnNames,
+                    timeoutRateLimiter,
+                    rateLimiter,
+                    pkCache));
 
     StatsMetaData statsMetaDataInserts =
         new StatsMetaData(
-                Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), "INSERT");
+            Integer.parseInt(config.getProperty("TILE")),
+            config.getProperty("TARGET_KEYSPACE"),
+            config.getProperty("TARGET_TABLE"),
+            "INSERT");
     statsMetaDataInserts.setValue(statsCounter.getStat("INSERT"));
     targetLoader.load(statsMetaDataInserts);
 
     StatsMetaData statsMetaDataUpdates =
         new StatsMetaData(
-                Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), "UPDATE");
-      statsMetaDataUpdates.setValue(statsCounter.getStat("UPDATE"));
+            Integer.parseInt(config.getProperty("TILE")),
+            config.getProperty("TARGET_KEYSPACE"),
+            config.getProperty("TARGET_TABLE"),
+            "UPDATE");
+    statsMetaDataUpdates.setValue(statsCounter.getStat("UPDATE"));
     targetLoader.load(statsMetaDataUpdates);
 
     statsCounter.resetStat("INSERT");

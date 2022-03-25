@@ -30,7 +30,6 @@ public class Stats {
   public Stats(Properties config) {
     ConnectionFactory connectionFactory = new ConnectionFactory(config);
     this.keyspacesConnector = connectionFactory.getCassandraConnection("KeyspacesConnector.conf");
-
   }
 
   private String getStatsData(final String dbQuery) throws JsonProcessingException {

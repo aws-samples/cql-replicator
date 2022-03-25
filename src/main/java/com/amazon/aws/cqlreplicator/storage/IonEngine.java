@@ -43,20 +43,20 @@ public class IonEngine {
     try (IonReader ionReader = IonReaderBuilder.standard().build(originalData);
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
         IonWriter resultWriter = IonTextWriterBuilder.json().build(byteArrayOutputStream)) {
-        IonDatagram values = ion.getLoader().load(ionReader);
-        Function0<ExprValue> res = () -> pipeline.getValueFactory().newFromIonValue(values);
+      IonDatagram values = ion.getLoader().load(ionReader);
+      Function0<ExprValue> res = () -> pipeline.getValueFactory().newFromIonValue(values);
 
-        EvaluationSession session =
-            EvaluationSession.builder()
-                .globals(
-                    Bindings.<ExprValue>lazyBindingsBuilder()
-                        .addBinding("inputDocument", res)
-                        .build())
-                .build();
-        ExprValue selectAndFilterResult = selectAndFilter.eval(session);
+      EvaluationSession session =
+          EvaluationSession.builder()
+              .globals(
+                  Bindings.<ExprValue>lazyBindingsBuilder()
+                      .addBinding("inputDocument", res)
+                      .build())
+              .build();
+      ExprValue selectAndFilterResult = selectAndFilter.eval(session);
 
-        selectAndFilterResult.getIonValue().writeTo(resultWriter);
-        return byteArrayOutputStream.toString();
+      selectAndFilterResult.getIonValue().writeTo(resultWriter);
+      return byteArrayOutputStream.toString();
     } catch (IOException e) {
       System.err.printf("Unable to transform %s%n", e);
     }

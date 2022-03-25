@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.models;
 
+import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
+
 import java.time.ZonedDateTime;
 
 /** Defines ledger's metadata */
@@ -61,23 +63,6 @@ public class LedgerMetaData {
 
   @Override
   public String toString() {
-    return "LedgerMetaData{"
-        + "partitionKeys='"
-        + partitionKeys
-        + '\''
-        + ", clusteringColumns='"
-        + clusteringColumns
-        + '\''
-        + ", keyspaceName='"
-        + keyspaceName
-        + '\''
-        + ", tableName='"
-        + tableName
-        + '\''
-        + ", lastRun="
-        + lastRun
-        + ", lastWriteTime="
-        + lastWriteTime
-        + '}';
+    return ReflectionToStringBuilder.toString(this);
   }
 }

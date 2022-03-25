@@ -17,27 +17,28 @@ import java.util.Properties;
 
 public class ConnectionFactory {
 
-    private Properties config;
+  private Properties config;
 
-    public ConnectionFactory(Properties config) {
-        this.config = config;
+  public ConnectionFactory(Properties config) {
+    this.config = config;
+  }
 
-    }
+  public CqlSession getCassandraConnection(String applicationConfName) {
+    final File configFile =
+        new File(String.format("%s/%s", config.getProperty("PATH_TO_CONFIG"), applicationConfName));
 
-    public CqlSession getCassandraConnection(String applicationConfName) {
-        final File configFile = new File(String.format("%s/%s", config.getProperty("PATH_TO_CONFIG"), applicationConfName));
+    return CqlSession.builder()
+        .withConfigLoader(DriverConfigLoader.fromFile(configFile))
+        .addTypeCodecs(TypeCodecs.ZONED_TIMESTAMP_UTC)
+        .build();
+  }
 
-        return CqlSession.builder()
-                .withConfigLoader(DriverConfigLoader.fromFile(configFile))
-                .addTypeCodecs(TypeCodecs.ZONED_TIMESTAMP_UTC)
-                .build();
-    }
-
-    public MemcachedClient getMemcachedConnection() throws IOException {
-        MemcachedClient client = new MemcachedClient(
-                new InetSocketAddress(config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT"),
-                        Integer.parseInt(config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT"))));
-        return client;
-    }
-
+  public MemcachedClient getMemcachedConnection() throws IOException {
+    MemcachedClient client =
+        new MemcachedClient(
+            new InetSocketAddress(
+                config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT"),
+                Integer.parseInt(config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT"))));
+    return client;
+  }
 }

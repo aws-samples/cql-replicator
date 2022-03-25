@@ -1,6 +1,8 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-package com.amazon.aws.cqlreplicator.transform;
+/*
+ * // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * // SPDX-License-Identifier: Apache-2.0
+ */
+package com.amazon.aws.cqlreplicator.storage;
 
 import com.amazon.ion.IonDatagram;
 import com.amazon.ion.IonReader;

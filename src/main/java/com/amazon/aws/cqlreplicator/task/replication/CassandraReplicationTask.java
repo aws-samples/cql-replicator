@@ -8,7 +8,8 @@ import com.amazon.aws.cqlreplicator.loader.KeyspacesLoader;
 import com.amazon.aws.cqlreplicator.models.*;
 import com.amazon.aws.cqlreplicator.storage.Storage;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
-import com.amazon.aws.cqlreplicator.transform.IonEngine;
+import com.amazon.aws.cqlreplicator.storage.IonEngine;
+import com.amazon.aws.cqlreplicator.util.StatsCounter;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.ConsistencyLevel;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
@@ -22,10 +23,8 @@ import com.datastax.oss.driver.shaded.guava.common.util.concurrent.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -41,17 +40,13 @@ public class CassandraReplicationTask extends AbstractTask {
   private static final String REPLICATION_NOT_APPLICABLE = "replicationNotApplicable";
   private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
 
-  private static final int STATS_INIT_CAPACITY = 3000;
-  private static final float STATS_LOAD_FACTOR = 0.75f;
-  private static final int STATS_CONCUR = 4;
-
   private static final long MILLISECONDS = 1000000L;
   private static CassandraExtractor cassandraExtractor;
   private static KeyspacesExtractor keyspacesExtractor;
   private static KeyspacesLoader targetLoader;
   private static Map<String, LinkedHashMap<String, String>> cassandraSchemaMetadata;
   private final Properties config;
-  private Map<String, String> statsCollector;
+  private StatsCounter statsCounter;
 
 
   public CassandraReplicationTask(Properties config) {
@@ -60,7 +55,7 @@ public class CassandraReplicationTask extends AbstractTask {
     targetLoader = new KeyspacesLoader(config);
     cassandraSchemaMetadata = cassandraExtractor.getMetaData();
     keyspacesExtractor = new KeyspacesExtractor(config);
-    this.statsCollector = new ConcurrentHashMap<>(STATS_INIT_CAPACITY, STATS_LOAD_FACTOR, STATS_CONCUR);
+    statsCounter = new StatsCounter();
   }
 
   private static String transformer(String input, Properties config) {
@@ -223,16 +218,16 @@ public class CassandraReplicationTask extends AbstractTask {
                       rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
                       targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
-                      statsCollector.put(
-                              String.format("%s|%s", row.getString("cc"), k),
-                              String.format("%s|%s", "UPDATE", Instant.now().toEpochMilli()));
+
+                      statsCounter.incrementStat("UPDATE");
+
                   }
               });
 
       // Adding new Items
       newItems.forEach(
               (k, v) -> {
-                  LOGGER.info(
+                  LOGGER.debug(
                           "Insert a row into the target table {} by partition key {} and clustering column {}",
                           config.getProperty("TARGET_TABLE"),
                           row.getString("cc"),
@@ -273,9 +268,8 @@ public class CassandraReplicationTask extends AbstractTask {
 
                   targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
 
-                  statsCollector.put(
-                          String.format("%s|%s", row.getString("cc"), k),
-                          String.format("%s|%s", "INSERT", Instant.now().toEpochMilli()));
+                  statsCounter.incrementStat("INSERT");
+
               });
       LOGGER.debug("Completed scanning rows in {}", row.getString("cc"));
 
@@ -306,25 +300,19 @@ public class CassandraReplicationTask extends AbstractTask {
                 replicateCassandraRow(row, partitionKeyNames, clusteringColumnNames, timeoutRateLimiter, rateLimiter, pkCache)
             );
 
-    long inserts =
-            statsCollector.entrySet().stream()
-                    .filter(x -> x.getValue().startsWith("INSERT")).count();
-
-    long updates =
-            statsCollector.entrySet().stream()
-                    .filter(x -> x.getValue().startsWith("UPDATE")).count();
-
     StatsMetaData statsMetaDataInserts =
         new StatsMetaData(
                 Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), "INSERT");
-    statsMetaDataInserts.setValue(inserts);
+    statsMetaDataInserts.setValue(statsCounter.getStat("INSERT"));
     targetLoader.load(statsMetaDataInserts);
 
     StatsMetaData statsMetaDataUpdates =
         new StatsMetaData(
                 Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), "UPDATE");
-      statsMetaDataUpdates.setValue(updates);
+      statsMetaDataUpdates.setValue(statsCounter.getStat("UPDATE"));
     targetLoader.load(statsMetaDataUpdates);
-    statsCollector.clear();
+
+    statsCounter.resetStat("INSERT");
+    statsCounter.resetStat("UPDATE");
   }
 }

@@ -4,7 +4,7 @@ package com.amazon.aws.cqlreplicator;
 
 import com.amazon.aws.cqlreplicator.connector.ConnectionFactory;
 import com.amazon.aws.cqlreplicator.models.StatsAggrQuery;
-import com.amazon.aws.cqlreplicator.transform.IonEngine;
+import com.amazon.aws.cqlreplicator.storage.IonEngine;
 import com.datastax.oss.driver.api.core.ConsistencyLevel;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.ResultSet;

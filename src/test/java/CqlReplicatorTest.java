@@ -122,7 +122,7 @@ public class CqlReplicatorTest {
 
     @Test
     @Order(3)
-    void updateAssumption() {
+    void updateAssumption() throws InterruptedException {
         Select query = selectFrom(keyspaceName, tableName).columns("key", "col0");
         SimpleStatement statement = query.build();
         ResultSet rsSource = cassandraConnectorSession.execute(statement);
@@ -142,6 +142,7 @@ public class CqlReplicatorTest {
 
         });
         dataQualityAssumption();
+        Thread.sleep(60000);
     }
 
     /**
@@ -153,7 +154,6 @@ public class CqlReplicatorTest {
     @Test
     @Order(4)
     void deleteAssumption() throws InterruptedException{
-
         Select query = selectFrom(keyspaceName, tableName).columns("key", "col0");
         SimpleStatement statement = query.build();
         ResultSet rsTarget = keyspacesConnectorSession.execute(statement);

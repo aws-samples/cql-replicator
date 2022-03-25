@@ -11,6 +11,7 @@ import com.amazon.aws.cqlreplicator.storage.MemcachedStorage;
 import com.amazon.aws.cqlreplicator.storage.SimpleConcurrentHashMapStorage;
 import com.amazon.aws.cqlreplicator.storage.Storage;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
+import com.amazon.aws.cqlreplicator.util.StatsCounter;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
 import com.datastax.oss.driver.api.core.cql.Row;
@@ -22,8 +23,13 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -50,12 +56,10 @@ public class PartitionDiscoveryTask extends AbstractTask {
   private static KeyspacesLoader targetLoader;
   private static Map<String, LinkedHashMap<String, String>> metaData;
   private final Properties config;
+  private StatsCounter statsCounter;
   private static final int REQUEST_PER_PARTITION = 1000;
   private static final int RATE_LIMITER_TIMEOUT_MS = 1000;
   private static final int ADVANCED_CACHE_SIZE = 1000;
-  private static final int STATS_HASH_SIZE = 3000;
-  private static final float STATS_LOAD_FACTOR = 0.75f;
-  private static final int STATS_HASH_CONCUR = 4;
 
   /**
    * Constructor for PartitionDiscoveryTask.
@@ -68,14 +72,14 @@ public class PartitionDiscoveryTask extends AbstractTask {
     keyspacesExtractor = new KeyspacesExtractor(config);
     targetLoader = new KeyspacesLoader(config);
     metaData = cassandraExtractor.getMetaData();
+    statsCounter = new StatsCounter();
   }
 
   /** Scan and compare partition keys. */
   private void scanAndCompare(
-      List<ImmutablePair<String, String>> rangeList,
-      Storage pkCache,
-      String[] pks,
-      Utils.CassandraTaskTypes taskName) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+          List<ImmutablePair<String, String>> rangeList,
+          Storage pkCache,
+          String[] pks) throws IOException, InterruptedException, ExecutionException, TimeoutException {
 
     AdvancedCache<String> advancedCache = null;
 
@@ -166,7 +170,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
   }
 
-  private void removePartitions(String[] pks, Map<String, String> stats, Storage pkCache, int chunk) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+  private void removePartitions(String[] pks, Storage pkCache, int chunk) throws IOException, InterruptedException, ExecutionException, TimeoutException {
     Collection<?> collection = null;
 
 
@@ -286,7 +290,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
                   } catch (InterruptedException | ExecutionException | TimeoutException e) {
                     throw new RuntimeException(e);
                   }
-                  boolean rs = finalClonedCollection.remove(key);
+                  finalClonedCollection.remove(key);
                 }
 
                 if (pkCache instanceof SimpleConcurrentHashMapStorage) {
@@ -297,9 +301,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
                   }
                 }
 
-                stats.put(
-                    partitionMetaData.getPk(),
-                    String.format("%s|%s", "DELETE", Instant.now().toEpochMilli()));
+                statsCounter.incrementStat("DELETE");
               }
             });
     if (pkCache instanceof MemcachedStorage && finalClonedCollection.size()<collection.size()) {
@@ -322,18 +324,18 @@ public class PartitionDiscoveryTask extends AbstractTask {
    * @params rangeList, pkCache, pks the array to be sorted
    */
   private void scanAndRemove(
-      Storage pkCache, String[] pks, Utils.CassandraTaskTypes taskName, Map<String, String> stats) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+      Storage pkCache, String[] pks, Utils.CassandraTaskTypes taskName) throws IOException, InterruptedException, ExecutionException, TimeoutException {
 
     if (taskName.equals(Utils.CassandraTaskTypes.SYNC_DELETED_PARTITION_KEYS)) {
       LOGGER.info("Syncing deleted partition keys between C* and Amazon Keyspaces");
       if (pkCache instanceof SimpleConcurrentHashMapStorage)
-      removePartitions(pks, stats, pkCache, 0);
+      removePartitions(pks, pkCache, 0);
       if (pkCache instanceof MemcachedStorage) {
         String totalChunks = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
-        int totalChunk = Integer.valueOf((String) pkCache.get(totalChunks));
+        int totalChunk = Integer.parseInt((String) pkCache.get(totalChunks));
         // process each chunk of partition keys
         for (int chunk=0; chunk<totalChunk; chunk++) {
-          removePartitions(pks, stats, pkCache, chunk);
+          removePartitions(pks, pkCache, chunk);
         }
       }
     }
@@ -348,7 +350,6 @@ public class PartitionDiscoveryTask extends AbstractTask {
   protected void doPerformTask(
           Storage pkCache, Utils.CassandraTaskTypes taskName) throws IOException, InterruptedException, ExecutionException, TimeoutException {
 
-    Map<String, String> statsCollector = new ConcurrentHashMap<>(STATS_HASH_SIZE, STATS_LOAD_FACTOR, STATS_HASH_CONCUR);
     String[] pks = metaData.get("partition_key").keySet().toArray(new String[0]);
 
     // Keep all ranges in the format key=range_start and value=range_end
@@ -389,18 +390,15 @@ public class PartitionDiscoveryTask extends AbstractTask {
     LOGGER.info("The number of tiles: {}", tiles.size());
     LOGGER.info("The current tile: {}", currentTile);
 
-    scanAndCompare(rangeList, (Storage<String, Long>) pkCache, pks, taskName);
-    scanAndRemove((Storage<String, Long>) pkCache, pks, taskName, statsCollector);
+    scanAndCompare(rangeList, (Storage<String, Long>) pkCache, pks);
+    scanAndRemove((Storage<String, Long>) pkCache, pks, taskName);
 
-    // Stats deletes
-    long deletes =
-            statsCollector.entrySet().stream()
-                    .filter(x -> x.getValue().startsWith("DELETE")).count();
     StatsMetaData statsMetaDataInserts =
             new StatsMetaData(
                     Integer.parseInt(config.getProperty("TILE")), config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), "DELETE");
-    statsMetaDataInserts.setValue(deletes);
+    statsMetaDataInserts.setValue(statsCounter.getStat("DELETE"));
     targetLoader.load(statsMetaDataInserts);
+    statsCounter.resetStat("DELETE");
     LOGGER.info("Caching and comparing stage is completed");
     LOGGER.info("The number of pre-loaded elements in the cache is {} ", pkCache.getSize(Integer.parseInt(config.getProperty("TILE"))));
   }

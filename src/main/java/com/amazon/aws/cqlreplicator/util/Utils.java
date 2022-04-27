@@ -39,9 +39,10 @@ import java.util.stream.Stream;
 public class Utils {
   private static final Pattern REGEX_COM = Pattern.compile(",");
   private static final Pattern REGEX_REG_SPACE = Pattern.compile(" ");
-  private static final int MAX_NUMBER_RANGES_PER_CLUSTER = 256 * 100;
+  //private static final int MAX_NUMBER_RANGES_PER_CLUSTER = 256 * 100;
   private static final Logger LOGGER = LoggerFactory.getLogger(Utils.class);
 
+  /*
   public static <T> List<T> convertArrayListToLinkedList(List<T> aL) {
     List<T> lL = new LinkedList<>();
     for (T t : aL) {
@@ -50,6 +51,8 @@ public class Utils {
     }
     return lL;
   }
+
+   */
 
   public static byte[] compress(byte[] payload) throws IOException {
     return Snappy.compress(payload);
@@ -69,8 +72,59 @@ public class Utils {
     return mapper.readValue(payload, List.class);
   }
 
+  public static <T> Stream<T> getSliceOfStream(Stream<T> stream, int startIndex, int endIndex)
+  {
+    return stream
+            .skip(startIndex)
+            .limit(endIndex - startIndex + 1);
+  }
+
+  public static List<List<ImmutablePair<String, String>>> getDistributedRangesByTiles(List<ImmutablePair<String, String>> ranges, int tiles) {
+
+    LinkedList<List<ImmutablePair<String, String>>> partitionedTokenRanges = new LinkedList<>();
+    int totalRanges = ranges.size();
+
+    FlushingList<ImmutablePair<String, String>> flushingList = new FlushingList<>(Math.floorDiv(totalRanges, tiles)) {
+      @Override
+      protected void flush(List payload) {
+        partitionedTokenRanges.add(payload);
+      }
+    };
+
+    ranges.
+            stream().
+            sequential().
+            forEach(flushingList::put);
+
+    if (flushingList.getSize()>0) {
+      flushingList.doFlush();
+    }
+
+    // Let's do merge
+    if (partitionedTokenRanges.size() > tiles) {
+
+      Stream<List<ImmutablePair<String, String>>> sliceOfListStream = getSliceOfStream(
+              partitionedTokenRanges.stream(), tiles-1, partitionedTokenRanges.size());
+
+      int rangesToRemove = partitionedTokenRanges.size() - tiles;
+
+      List<ImmutablePair<String, String>> merged = sliceOfListStream.flatMap(Collection::parallelStream).collect(Collectors.toList());
+
+      for (int i = 0; i<= rangesToRemove; i++) {
+        partitionedTokenRanges.removeLast();
+      }
+
+      partitionedTokenRanges.add(merged);
+    }
+
+    return partitionedTokenRanges;
+
+  }
+
+  /*
   public static List<List<ImmutablePair<String, String>>> alignRangesAndTiles(
       List<List<ImmutablePair<String, String>>> input) {
+
     for (int i = input.size() - 1; i >= 0; i--) {
       if (input.get(i).size() < MAX_NUMBER_RANGES_PER_CLUSTER) {
         List<ImmutablePair<String, String>> lastElement = input.get(i);
@@ -91,6 +145,8 @@ public class Utils {
     return Collections.emptyList();
   }
 
+   */
+
   public static Payload convertToJson(
       String rawData, String writeTimeColumns, String[] cls, String[] pks) {
     ObjectMapper objectMapper = new ObjectMapper();
@@ -105,12 +161,11 @@ public class Utils {
 
     List<Long> writeTimeArray = new ArrayList<>();
 
-    JsonNode rootNode = null;
+    JsonNode rootNode;
     try {
       rootNode = objectMapper.readTree(rawData);
     } catch (JsonProcessingException e) {
-      e.printStackTrace();
-      System.err.println(e.getMessage());
+      throw new RuntimeException(e);
     }
     for (String writeColumn : writeTimeColumnsArray) {
       JsonNode idNode =
@@ -138,10 +193,6 @@ public class Utils {
     payload.setPayload(String.valueOf(rootNode).replace("'", "\\\\u0027"));
 
     return payload;
-  }
-
-  public static <K, V> Stream<Map.Entry<K, V>> convertMapToStream(Map<K, V> map) {
-    return map.entrySet().stream();
   }
 
   public static BoundStatementBuilder aggregateBuilder(
@@ -299,7 +350,7 @@ public class Utils {
         genericType = GenericType.setOf(Long.class);
         break;
       default:
-        LOGGER.warn("Unrecognized data type:", cqlType);
+        LOGGER.warn("Unrecognized data type:{}", cqlType);
         genericType = GenericType.STRING;
         break;
     }

@@ -1,7 +1,7 @@
 # The CQLReplicator and Amazon ECS
 The CQLReplicator is designed to run within an Amazon ECS. 
-Amazon ECS is a fully managed container orchestration service that makes it easy for you to deploy, manage,
- and scale the CQLReplicator. Each ECS container handles a single subset of Cassandra partition keys and rows.  
+Amazon ECS is a fully managed container orchestration service makes it easy for you to deploy, manage,
+ and scale the migration process. Each ECS container handles a single subset of primary keys.  
 
 ## Build the project
 ```
@@ -48,8 +48,8 @@ instance IAM role and to attach the managed IAM policy if needed.
 [ECS role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html)
 
 ## Define the number of tiles
-Best practice is to specify the number of tiles equal to the vnodes in the Cassandra cluster, for example,
-16 vnodes is equal to 16 tiles, 32 vnodes is equal to 32 tiles, and etc.
+Best practice is to define the number of tiles equal to the vnodes in the Cassandra cluster, for example,
+16 vnodes is equal to 16 tiles, 32 vnodes is equal to 32 tiles, etc.
 
 ## Change Amazon Keyspaces tables capacity mode
 Before provision tables let's create the internal CQLReplicator tables, and the target table:
@@ -57,12 +57,7 @@ Before provision tables let's create the internal CQLReplicator tables, and the 
 
 After tables created let's provision the internal CQLReplicator tables in cqlsh:
 ```
-ALTER TABLE replicator.partitionkeys 
-    WITH CUSTOM_PROPERTIES={'capacity_mode':
-    {'throughput_mode': 'PROVISIONED', 'read_capacity_units': 15000, 'write_capacity_units': 15000}};
-```
-```
-ALTER TABLE replicator.ledger 
+ALTER TABLE replicator.ledger_v4 
     WITH CUSTOM_PROPERTIES={'capacity_mode':
     {'throughput_mode': 'PROVISIONED', 'read_capacity_units': 5000, 'write_capacity_units': 15000}};
 ```

@@ -35,7 +35,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 
-import static com.amazon.aws.cqlreplicator.util.Utils.alignRangesAndTiles;
+//import static com.amazon.aws.cqlreplicator.util.Utils.alignRangesAndTiles;
+import static com.amazon.aws.cqlreplicator.util.Utils.getDistributedRangesByTiles;
 
 /**
  * The {@code PartitionDiscoveryTask} class provides partition key synchronization between Cassandra
@@ -121,6 +122,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
       for (Row eachResult : resultSetRange) {
         int i = 0;
         List<String> tmp = new ArrayList<>();
+
         for (String cl : pks) {
           String type = metaData.get("partition_key").get(cl);
           tmp.add(String.valueOf(eachResult.get(pks[i], Utils.getClassType(type.toUpperCase()))));
@@ -209,6 +211,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
                 pk = REGEX_PIPE.split((String) key);
 
               int i = 0;
+
               for (String cl : pks) {
                 String type = metaData.get("partition_key").get(cl);
                 try {
@@ -337,7 +340,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
       if (pkCache instanceof MemcachedStorage) {
         String totalChunks = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
         int totalChunk = Integer.parseInt((String) pkCache.get(totalChunks));
-        // process each chunk of partition keys
+        // remove each chunk of partition keys
         for (int chunk = 0; chunk < totalChunk; chunk++) {
           removePartitions(pks, pkCache, chunk);
         }
@@ -356,7 +359,12 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
     String[] pks = metaData.get("partition_key").keySet().toArray(new String[0]);
 
+    List<ImmutablePair<String, String>> ranges = cassandraExtractor.getTokenRanges();
+    int totalRanges = ranges.size();
+    List<List<ImmutablePair<String, String>>> tiles = getDistributedRangesByTiles(ranges, Integer.parseInt(config.getProperty("TILES")));
+
     // Keep all ranges in the format key=range_start and value=range_end
+    /*
     List<ImmutablePair<String, String>> ranges = cassandraExtractor.getTokenRanges();
     List<ImmutablePair<String, String>> rangeList;
 
@@ -367,6 +375,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
     List<List<ImmutablePair<String, String>>> res;
     List<List<ImmutablePair<String, String>>> tiles = new ArrayList<>();
     int tmpSize = tmpTiles.size();
+
     for (int i = 0; i <= tmpSize; i++) {
       res = alignRangesAndTiles(tmpTiles);
       tmpTiles = res;
@@ -376,6 +385,8 @@ public class PartitionDiscoveryTask extends AbstractTask {
         break;
       }
     }
+
+
 
     // Get the current tile
     int currentTile = Integer.parseInt(config.getProperty("TILE"));
@@ -388,6 +399,12 @@ public class PartitionDiscoveryTask extends AbstractTask {
       rangeList = tiles.get(currentTile);
       LOGGER.debug(rangeList.toString());
     }
+
+     */
+
+    int currentTile = Integer.parseInt(config.getProperty("TILE"));
+    List<ImmutablePair<String, String>> rangeList = tiles.get(currentTile);
+
     // if tiles = 0 we need to scan one range from one pkScanner, if tiles>0 we need to scan all
     // ranges from the pkScanner
     LOGGER.info("The number of ranges in the cassandra: {}", totalRanges);

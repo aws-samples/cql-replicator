@@ -23,13 +23,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -86,6 +80,7 @@ public class CassandraReplicationTask extends AbstractTask {
 
     BoundStatementBuilder boundStatementCassandraBuilder =
         cassandraExtractor.getCassandraPreparedStatement().boundStatementBuilder();
+
     int i = 0;
     for (String cl : pks) {
       String type = cassandraSchemaMetadata.get("partition_key").get(cl);
@@ -93,6 +88,7 @@ public class CassandraReplicationTask extends AbstractTask {
           aggregateBuilder(type, cl, pk[i], boundStatementCassandraBuilder);
       i++;
     }
+
     List<Row> cassandraResult = cassandraExtractor.extract(boundStatementCassandraBuilder);
 
     for (Row compareRow : cassandraResult) {
@@ -125,6 +121,7 @@ public class CassandraReplicationTask extends AbstractTask {
       }
 
       List<String> clTmp = new ArrayList<>();
+
       for (String cln : cls) {
         if (!cln.equals(CLUSTERING_COLUMN_ABSENT)) {
           String val = clusteringColumnsMapping.get(cln);
@@ -163,15 +160,18 @@ public class CassandraReplicationTask extends AbstractTask {
               config.getProperty("TARGET_TABLE"));
       List<Row> ledgerResultSet = keyspacesExtractor.extract(queryLedgerItemByPk);
 
-      for (Row ledgerRow : ledgerResultSet) {
-        Long lastRun =
-            Objects.requireNonNull(ledgerRow.get("operation_ts", GenericType.ZONED_DATE_TIME))
-                    .toEpochSecond()
-                * MILLISECONDS;
-        String cl = ledgerRow.getString("cc");
-        ledgerHashMap.put(cl, lastRun);
-      }
+      ledgerResultSet.parallelStream().forEach(
+              ledgerRow -> {
+                Long lastRun =
+                        Objects.requireNonNull(ledgerRow.get("operation_ts", GenericType.ZONED_DATE_TIME))
+                                .toEpochSecond()
+                                * MILLISECONDS;
+                String cl = ledgerRow.getString("cc");
+                ledgerHashMap.put(cl, lastRun);
+              }
+      );
     }
+
 
     MapDifference<String, Long> diff = Maps.difference(sourceHashMap, ledgerHashMap);
     Map<String, MapDifference.ValueDifference<Long>> rowDiffering = diff.entriesDiffering();
@@ -296,7 +296,6 @@ public class CassandraReplicationTask extends AbstractTask {
     String[] clusteringColumnNames =
         cassandraSchemaMetadata.get("clustering").keySet().toArray(new String[0]);
 
-    // TODO: Read from the chunked cache instead from the Ledger
     List<Row> ledgerPks = keyspacesExtractor.extract(partitionsMetaData);
     LOGGER.info(
         "The number of pre-loaded elements in the cache is {} ",

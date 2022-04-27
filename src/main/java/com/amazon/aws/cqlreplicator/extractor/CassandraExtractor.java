@@ -10,8 +10,10 @@ import com.datastax.oss.driver.api.core.metadata.Metadata;
 import com.datastax.oss.driver.api.core.metadata.TokenMap;
 import com.datastax.oss.driver.api.core.metadata.token.TokenRange;
 import com.datastax.oss.driver.internal.core.metadata.token.Murmur3Token;
+import com.datastax.oss.driver.internal.core.metadata.token.RandomToken;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 
+import java.math.BigInteger;
 import java.util.*;
 
 /** Responsible for providing extracting logic from source cluster */
@@ -24,6 +26,9 @@ public class CassandraExtractor implements DataExtractor {
   private final CqlSession cassandraSession;
   private final Properties config;
   private final PreparedStatement psCassandra;
+
+  private final String BIG_INT_MAX_VALUE = String.valueOf(2^Integer.MAX_VALUE);
+  private final String BIG_INT_MIN_VALUE = String.valueOf(-2^Integer.MIN_VALUE);
 
   public CassandraExtractor(Properties config) {
     this.config = config;
@@ -60,20 +65,33 @@ public class CassandraExtractor implements DataExtractor {
     List<ImmutablePair<String, String>> ranges = new ArrayList<>();
     Metadata metadata = cassandraSession.getMetadata();
     TokenMap tokenMap = metadata.getTokenMap().get();
-    Long start, end;
 
     for (TokenRange range : tokenMap.getTokenRanges()) {
-      start = ((Murmur3Token) range.getStart()).getValue();
-      end = ((Murmur3Token) range.getEnd()).getValue();
-      if (start < end) {
-        ranges.add(new ImmutablePair<>(String.valueOf(start), String.valueOf(end)));
-      } else if (start > end) {
-        ranges.add(new ImmutablePair<>(String.valueOf(start), String.valueOf(Long.MAX_VALUE)));
-        ranges.add(new ImmutablePair<>(String.valueOf(Long.MIN_VALUE), String.valueOf(end)));
+      if (range.getStart() instanceof Murmur3Token) {
+        long start = ((Murmur3Token) range.getStart()).getValue();
+        long end = ((Murmur3Token) range.getEnd()).getValue();
+        if (start < end) {
+          ranges.add(new ImmutablePair<>(String.valueOf(start), String.valueOf(end)));
+        } else if (start > end) {
+          ranges.add(new ImmutablePair<>(String.valueOf(start), String.valueOf(Long.MAX_VALUE)));
+          ranges.add(new ImmutablePair<>(String.valueOf(Long.MIN_VALUE), String.valueOf(end)));
+        }
       }
-    }
+      //To support Cassandra<2.1 clusters
+      if (range.getStart() instanceof RandomToken) {
+        BigInteger start = ((RandomToken) range.getStart()).getValue();
+        BigInteger end = ((RandomToken) range.getEnd()).getValue();
+        if (start.compareTo(end) == -1) {
+          ranges.add(new ImmutablePair<>(String.valueOf(start), String.valueOf(end)));
+        } else if (start.compareTo(end) == 1) {
+          ranges.add(new ImmutablePair<>(String.valueOf(start), BIG_INT_MAX_VALUE));
+          ranges.add(new ImmutablePair<>(BIG_INT_MIN_VALUE, String.valueOf(end)));
+        }
+      }
+      }
     return ranges;
   }
+
 
   @Override
   public List<Row> extract(Object object) {

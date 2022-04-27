@@ -6,10 +6,6 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Properties;
 
-/**
- * ConfigReader is the class that defines the reading process from config.yaml file by using
- * YAMLFactory().
- */
 public class ConfigReader {
 
   private static final String configName = "config.properties";

@@ -77,12 +77,6 @@ The tables should be provisioned with proper WCUs/RCUs to sustain the high workl
    ```./cqlreplicator.sh --syncPartitionKeys --tile 0 --tiles 2 & ./cqlreplicator.sh --syncPartitionKeys --tile 1 --tiles 2 & ./cqlreplicator.sh --syncClusteringColumns --tile 0 --tiles 2 & ./cqlreplicator.sh --syncClusteringColumns --tile 1 --tiles 2 &```
 12. Run ```select * from replicator.stats``` against Amazon Keyspaces to monitor the migration process, or you can run ```./cqlreplicator.sh --tile 0 --tiles 2 --stats ``` from your terminal
 
-# Repair
-To mitigate the inconsistency between source and target you might run Repair operation in background on a separate instance. 
-There two types of the repair operation:
-    - repair a tile, for example, ```/cqlreplicator.sh --repair --tile 0 --tiles 2```
-    - repair all tiles sequentially, for example, ```/cqlreplicator.sh --repair-all --tile 0 --tiles 2```    
-
 # Clean up
 Let's clean up the testing environment to avoid extra charges and resource consumption
 1. to stop the docker container run the following command: 

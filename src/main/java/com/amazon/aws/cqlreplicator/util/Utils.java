@@ -5,7 +5,6 @@ package com.amazon.aws.cqlreplicator.util;
 import com.amazon.aws.cqlreplicator.models.Payload;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
-import com.datastax.oss.driver.shaded.guava.common.collect.Lists;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,7 +24,6 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -39,20 +37,7 @@ import java.util.stream.Stream;
 public class Utils {
   private static final Pattern REGEX_COM = Pattern.compile(",");
   private static final Pattern REGEX_REG_SPACE = Pattern.compile(" ");
-  //private static final int MAX_NUMBER_RANGES_PER_CLUSTER = 256 * 100;
   private static final Logger LOGGER = LoggerFactory.getLogger(Utils.class);
-
-  /*
-  public static <T> List<T> convertArrayListToLinkedList(List<T> aL) {
-    List<T> lL = new LinkedList<>();
-    for (T t : aL) {
-      //noinspection UseBulkOperation
-      lL.add(t);
-    }
-    return lL;
-  }
-
-   */
 
   public static byte[] compress(byte[] payload) throws IOException {
     return Snappy.compress(payload);
@@ -120,32 +105,6 @@ public class Utils {
     return partitionedTokenRanges;
 
   }
-
-  /*
-  public static List<List<ImmutablePair<String, String>>> alignRangesAndTiles(
-      List<List<ImmutablePair<String, String>>> input) {
-
-    for (int i = input.size() - 1; i >= 0; i--) {
-      if (input.get(i).size() < MAX_NUMBER_RANGES_PER_CLUSTER) {
-        List<ImmutablePair<String, String>> lastElement = input.get(i);
-        List<ImmutablePair<String, String>> previousElement = input.get(i - 1);
-        List<List<ImmutablePair<String, String>>> newElement = new ArrayList<>();
-        newElement.add(
-            Stream.of(lastElement, previousElement)
-                .flatMap(Collection::stream)
-                .collect(Collectors.toList()));
-        List<List<ImmutablePair<String, String>>> tmp1 =
-            Lists.newArrayList(input.subList(0, i - 1));
-        LinkedList<List<ImmutablePair<String, String>>> tmp2 =
-            (LinkedList<List<ImmutablePair<String, String>>>) convertArrayListToLinkedList(tmp1);
-        tmp2.addFirst(newElement.get(0));
-        return tmp2;
-      }
-    }
-    return Collections.emptyList();
-  }
-
-   */
 
   public static Payload convertToJson(
       String rawData, String writeTimeColumns, String[] cls, String[] pks) {

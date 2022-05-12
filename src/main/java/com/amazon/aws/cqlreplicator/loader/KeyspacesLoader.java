@@ -55,7 +55,7 @@ public class KeyspacesLoader implements DataLoader {
 
     this.config = config;
     ConnectionFactory connectionFactory = new ConnectionFactory(config);
-    keyspacesSession = connectionFactory.getCassandraConnection("KeyspacesConnector.conf");
+    keyspacesSession = connectionFactory.buildCqlSession("KeyspacesConnector.conf");
   }
 
   private BatchStatementBuilder prepareDeleteLegdgerStatement(

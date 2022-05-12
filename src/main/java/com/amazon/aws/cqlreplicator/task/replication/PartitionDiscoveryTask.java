@@ -15,7 +15,6 @@ import com.amazon.aws.cqlreplicator.util.StatsCounter;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
 import com.datastax.oss.driver.api.core.cql.Row;
-import com.datastax.oss.driver.shaded.guava.common.collect.Lists;
 import com.datastax.oss.driver.shaded.guava.common.util.concurrent.RateLimiter;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.slf4j.Logger;
@@ -28,7 +27,6 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -362,46 +360,6 @@ public class PartitionDiscoveryTask extends AbstractTask {
     List<ImmutablePair<String, String>> ranges = cassandraExtractor.getTokenRanges();
     int totalRanges = ranges.size();
     List<List<ImmutablePair<String, String>>> tiles = getDistributedRangesByTiles(ranges, Integer.parseInt(config.getProperty("TILES")));
-
-    // Keep all ranges in the format key=range_start and value=range_end
-    /*
-    List<ImmutablePair<String, String>> ranges = cassandraExtractor.getTokenRanges();
-    List<ImmutablePair<String, String>> rangeList;
-
-    // Partition the range list by the number of tiles
-    int totalRanges = ranges.size();
-    LOGGER.debug(String.valueOf(ranges));
-    List<List<ImmutablePair<String, String>>> tmpTiles = Lists.partition(ranges, 1);
-    List<List<ImmutablePair<String, String>>> res;
-    List<List<ImmutablePair<String, String>>> tiles = new ArrayList<>();
-    int tmpSize = tmpTiles.size();
-
-    for (int i = 0; i <= tmpSize; i++) {
-      res = alignRangesAndTiles(tmpTiles);
-      tmpTiles = res;
-      if (Objects.requireNonNull(tmpTiles).size()
-          == Integer.parseInt(config.getProperty("TILES"))) {
-        tiles = tmpTiles;
-        break;
-      }
-    }
-
-
-
-    // Get the current tile
-    int currentTile = Integer.parseInt(config.getProperty("TILE"));
-
-    if (Integer.parseInt(config.getProperty("TILES")) == 1) {
-      // if the number of tiles is 0 let's process all range as the tile 0
-      rangeList = ranges;
-    } else {
-      // Let's process the specific tile
-      rangeList = tiles.get(currentTile);
-      LOGGER.debug(rangeList.toString());
-    }
-
-     */
-
     int currentTile = Integer.parseInt(config.getProperty("TILE"));
     List<ImmutablePair<String, String>> rangeList = tiles.get(currentTile);
 

@@ -33,7 +33,7 @@ public class CassandraExtractor implements DataExtractor {
   public CassandraExtractor(Properties config) {
     this.config = config;
     ConnectionFactory connectionFactory = new ConnectionFactory(config);
-    this.cassandraSession = connectionFactory.getCassandraConnection("CassandraConnector.conf");
+    this.cassandraSession = connectionFactory.buildCqlSession("CassandraConnector.conf");
     this.psCassandra = cassandraSession.prepare(config.getProperty("SOURCE_CQL_QUERY"));
     metaData =
         getColumns(config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"));

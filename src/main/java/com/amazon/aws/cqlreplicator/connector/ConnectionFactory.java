@@ -23,7 +23,7 @@ public class ConnectionFactory {
     this.config = config;
   }
 
-  public CqlSession getCassandraConnection(String applicationConfName) {
+  public CqlSession buildCqlSession(String applicationConfName) {
     final File configFile =
         new File(String.format("%s/%s", config.getProperty("PATH_TO_CONFIG"), applicationConfName));
 
@@ -33,7 +33,7 @@ public class ConnectionFactory {
         .build();
   }
 
-  public MemcachedClient getMemcachedConnection() throws IOException {
+  public MemcachedClient buildMemcachedSession() throws IOException {
     MemcachedClient client =
         new MemcachedClient(
             new InetSocketAddress(

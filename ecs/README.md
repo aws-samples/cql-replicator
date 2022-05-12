@@ -33,7 +33,7 @@ you would like the containers in your tasks to have. You have several ways to cr
 a new IAM permission policy. You can copy a complete AWS managed policy that already 
 does some of what you're looking for and then customize it to your specific requirements. Add
 an inline policies to access Amazon S3 and Keyspaces. 
-[ECS task execution role]( https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html)  
+[ECS task execution role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html)  
 
 ## Create ECS Role
 Amazon ECS container instances, including both Amazon EC2 and external instances, 

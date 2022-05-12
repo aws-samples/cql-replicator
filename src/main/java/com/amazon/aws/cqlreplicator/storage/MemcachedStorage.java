@@ -44,7 +44,7 @@ public class MemcachedStorage extends Storage {
         "EXTERNAL_MEMCACHED_STORAGE_ENDPOINT", externalMemcachedStorageEndpoint);
     connectionConfig.setProperty("EXTERNAL_MEMCACHED_STORAGE_PORT", externalMemcachedStoragePort);
     ConnectionFactory connectionFactory = new ConnectionFactory(connectionConfig);
-    this.memCachedClient = connectionFactory.getMemcachedConnection();
+    this.memCachedClient = connectionFactory.buildMemcachedSession();
     prefix = String.format("%s|%s|%s", operation, targetKeyspace, targetTable);
   }
 

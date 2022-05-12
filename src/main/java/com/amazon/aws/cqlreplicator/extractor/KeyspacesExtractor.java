@@ -54,7 +54,7 @@ public class KeyspacesExtractor implements DataExtractor {
     publisher = retry.getEventPublisher();
 
     ConnectionFactory connectionFactory = new ConnectionFactory(config);
-    keyspacesSession = connectionFactory.getCassandraConnection("KeyspacesConnector.conf");
+    keyspacesSession = connectionFactory.buildCqlSession("KeyspacesConnector.conf");
     psQueryStats =
         keyspacesSession.prepare(
             "select tile, keyspacename, tablename, ops, rows from replicator.stats where ops='INSERT' and keyspacename=:keyspacename and tablename=:tablename allow filtering");

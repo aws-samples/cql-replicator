@@ -60,6 +60,7 @@ The tables should be provisioned with proper WCUs/RCUs to sustain the high workl
        EXTERNAL_MEMCACHED_STORAGE: true
        EXTERNAL_MEMCACHED_STORAGE_ENDPOINT: localhost
        EXTERNAL_MEMCACHED_STORAGE_PORT: 11211
+   ```
 4. Configure connection/authentication for your source Cassandra in CassandraConnector.conf
 5. Configure connection/authentication for your target Amazon Keyspaces in KeyspacesConnector.conf
 6. Copy config.properties, CassandraConnector.conf, and KeyspacesConnector.conf to Amazon S3, for example, 
@@ -90,14 +91,6 @@ Let's clean up the testing environment to avoid extra charges and resource consu
       12:07:10.337 [Thread-2] INFO  com.amazon.aws.cqlreplicator.Stopper - Replication task is stopped: true` in the log.
 4. to clean up Amazon Keyspaces tables execute the following commands in the cqlsh: 
     ```drop keyspace replicator``` and ```drop keyspace ks_test_cql_replicator```
-
-# Appendix
-Port-forwarding ```ssh -i migrationKeys.pem -f -N -L 11211:cqlreplicator.tpckwk.0001.use1.cache.amazonaws.com:11211 ec2-user@remote_host```
-Run memcached locally ```/usr/local/opt/memcached/bin/memcached -l localhost```
-Flush keys in memcached```echo 'flush_all' | nc localhost 11211```
-Dumping all keys from memcached ```MEMCHOST=localhost; printf "stats items\n" | nc $MEMCHOST 11211 | grep ":number" | awk -F":" '{print $2}' | xargs -I % printf "stats cachedump % 10000\r\n" | nc $MEMCHOST 11211```
-Dumping all keys and values from memcached ```MEMCHOST=localhost; printf "stats items\n" | nc $MEMCHOST 11211 | grep ":number" | awk -F":" '{print $2}' | xargs -I % printf "stats cachedump % 0\r\n" | nc $MEMCHOST 11211 | grep ITEM | awk '{print $2}' | sed -e 's/"/\\"/g'| xargs -I % printf "get %\r\n" | nc $MEMCHOST 11211```
-```for i in {1..40}; do (echo "stats cachedump $i 0"; sleep 1; echo "quit";) | telnet localhost 11211 | grep 'APREFIX*\|ANOTHERPREFIX*'; done```
-
+    
 # License
 This tool licensed under the Apache-2 License. See the LICENSE file.

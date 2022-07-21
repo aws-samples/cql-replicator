@@ -2,7 +2,10 @@
 #Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #SPDX-License-Identifier: Apache-2.0
 
+# Use below steps only if CQLReplicator runs on EC2 instances
 #export CQLREPLICATOR_HOME=${basefolder:0:${#basefolder}-4}
+#basefolder=$(pwd -L)
+
 export CQLREPLICATOR_CONF=$CQLREPLICATOR_HOME"/conf"
 export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
 export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
@@ -11,17 +14,14 @@ export JARS_PATH=$CQLREPLICATOR_HOME/lib/*
 echo "CQLREPLICATOR_HOME:"$CQLREPLICATOR_HOME
 echo "CQLREPLICATOR_CONF:"$CQLREPLICATOR_CONF
 
-#basefolder=$(pwd -L)
-
-
 for file in $JARS_PATH; do
     classpath+=$file":"
 done
-#Copy config.yaml file
+#Copy the config.properties file
 aws s3 cp s3://"$BUCKETNAME"/"$KEYSPACENAME"/"$TABLENAME"/config.properties "$CQLREPLICATOR_HOME"/conf/
-#Copy CassandraConnector.conf
+#Copy the CassandraConnector.conf
 aws s3 cp s3://"$BUCKETNAME"/"$KEYSPACENAME"/"$TABLENAME"/CassandraConnector.conf "$CQLREPLICATOR_HOME"/conf/
-#Copy KeyspacesConnector.conf
+#Copy the KeyspacesConnector.conf
 aws s3 cp s3://"$BUCKETNAME"/"$KEYSPACENAME"/"$TABLENAME"/KeyspacesConnector.conf "$CQLREPLICATOR_HOME"/conf/
 
 if [ -n "${BUCKETNAME}" ] && [ -n "${KEYSPACENAME}" ] && [ -n "${TABLENAME}" ]; then

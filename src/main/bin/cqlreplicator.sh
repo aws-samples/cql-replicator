@@ -2,9 +2,6 @@
 #Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #SPDX-License-Identifier: Apache-2.0
 
-# If using AWS SMPS to store credentials, uncomment the following line:
-#export AWS_SMPS_MODE=true
-
 #basefolder=$(pwd -L)
 #export CQLREPLICATOR_HOME=${basefolder:0:${#basefolder}-4}
 export CQLREPLICATOR_CONF=$CQLREPLICATOR_HOME"/conf"

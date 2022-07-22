@@ -116,6 +116,14 @@ two CQLReplicator instances for the partition discovery
    ```./cqlreplicator.sh --syncClusteringColumns --tile 1 --tiles 2 & ```
 * To validate migration process run ```select * from replicator.stats``` against Amazon Keyspaces, or you can run ```./cqlreplicator.sh --tile 0 --tiles 2 --stats ```
 
+# Credentials
+For the cqlreplicator.sh which is a wrapper script for the replicator job, there are following two options to update Cassandra and Keyspaces passwords (specified in CassandraConnector.conf and KeyspacesConnector.conf files ) :
+
+1. Updating the username and password in respective Conf files and uploading to the S3 bucket. This is the default option.
+2. If credentials are stored on AWS Systems Manager Parameter Store, declare env. variable "AWS_SMPS_MODE". For example: 
+
+export AWS_SMPS_MODE = true 
+
 # Clean up
 Let's clean up the testing environment to avoid extra charges and resource consumption
 * Stop the docker container by running the following command: 

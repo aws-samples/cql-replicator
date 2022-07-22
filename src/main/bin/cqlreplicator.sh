@@ -2,6 +2,7 @@
 #Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #SPDX-License-Identifier: Apache-2.0
 
+#basefolder=$(pwd -L)
 #export CQLREPLICATOR_HOME=${basefolder:0:${#basefolder}-4}
 export CQLREPLICATOR_CONF=$CQLREPLICATOR_HOME"/conf"
 export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
@@ -11,7 +12,7 @@ export JARS_PATH=$CQLREPLICATOR_HOME/lib/*
 echo "CQLREPLICATOR_HOME:"$CQLREPLICATOR_HOME
 echo "CQLREPLICATOR_CONF:"$CQLREPLICATOR_CONF
 
-#basefolder=$(pwd -L)
+
 
 
 for file in $JARS_PATH; do

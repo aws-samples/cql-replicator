@@ -16,12 +16,15 @@ Copy CQLReplicator-1.0-SNAPSHOT.zip to ```s3://cqlreplicator/```.
 Set environmental variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, 
 `BUCKETNAME=cqlreplicator`, `KEYSPACENAME=ks_test_cql_replicator`, `TABLENAME=test_cql_replicator`, 
 and `CQLREPLICATOR_CONF`.
+
 Let's build the docker image `docker build -t cqlreplicator:latest --build-arg AWS_REGION="us-east-1" \
 --build-arg AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID --build-arg AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
 --build-arg AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN .`.
+
 Retrieve an authentication token and authenticate your Docker client to your registry.
 Use the AWS CLI: ```aws ecr get-login-password --region us-east-1 | docker login --username AWS 
 --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com```.
+
 After the build completes, tag your image, so you can push the image to this repository:
 ```docker tag cqlreplicator:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/cqlreplicator:latest```
 Run the following command to push this image to your newly created AWS repository:

@@ -65,6 +65,25 @@ public class CassandraReplicationTask extends AbstractTask {
     return input;
   }
 
+  private void dataLoader(
+      SimpleStatement simpleStatement,
+      RetryEntry retryEntry,
+      LedgerMetaData ledgerMetaData,
+      StatsMetaData statsMetaData,
+      boolean setStartReplicationPoint,
+      long ts,
+      String ops) {
+    if (!setStartReplicationPoint) {
+      targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
+      statsCounter.incrementStat(ops);
+    } else {
+      if (ledgerMetaData.getLastWriteTime() > ts) {
+        targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
+        statsCounter.incrementStat(ops);
+      }
+    }
+  }
+
   private void replicateCassandraRow(
       Row row,
       String[] pks,
@@ -160,18 +179,18 @@ public class CassandraReplicationTask extends AbstractTask {
               config.getProperty("TARGET_TABLE"));
       List<Row> ledgerResultSet = keyspacesExtractor.extract(queryLedgerItemByPk);
 
-      ledgerResultSet.parallelStream().forEach(
+      ledgerResultSet.parallelStream()
+          .forEach(
               ledgerRow -> {
                 Long lastRun =
-                        Objects.requireNonNull(ledgerRow.get("operation_ts", GenericType.ZONED_DATE_TIME))
-                                .toEpochSecond()
-                                * MILLISECONDS;
+                    Objects.requireNonNull(
+                                ledgerRow.get("operation_ts", GenericType.ZONED_DATE_TIME))
+                            .toEpochSecond()
+                        * MILLISECONDS;
                 String cl = ledgerRow.getString("cc");
                 ledgerHashMap.put(cl, lastRun);
-              }
-      );
+              });
     }
-
 
     MapDifference<String, Long> diff = Maps.difference(sourceHashMap, ledgerHashMap);
     Map<String, MapDifference.ValueDifference<Long>> rowDiffering = diff.entriesDiffering();
@@ -222,9 +241,14 @@ public class CassandraReplicationTask extends AbstractTask {
 
             rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
-            targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
-
-            statsCounter.incrementStat("UPDATE");
+            dataLoader(
+                simpleStatement,
+                retryEntry,
+                ledgerMetaData,
+                statsMetaData,
+                Boolean.parseBoolean(config.getProperty("ENABLE_REPLICATION_POINT")),
+                Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")),
+                "UPDATE");
           }
         });
 
@@ -270,9 +294,15 @@ public class CassandraReplicationTask extends AbstractTask {
 
           rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
-          targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
+          dataLoader(
+              simpleStatement,
+              retryEntry,
+              ledgerMetaData,
+              statsMetaData,
+              Boolean.parseBoolean(config.getProperty("ENABLE_REPLICATION_POINT")),
+              Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")),
+              "INSERT");
 
-          statsCounter.incrementStat("INSERT");
         });
     LOGGER.debug("Completed scanning rows in {}", row.getString("cc"));
   }

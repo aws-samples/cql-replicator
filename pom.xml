@@ -20,17 +20,17 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <datastax.version>4.13.0</datastax.version>
-        <keyspaces.version>4.0.4</keyspaces.version>
-        <kotlin.version>1.4.20</kotlin.version>
+        <datastax.version>4.14.0</datastax.version>
+        <keyspaces.version>4.0.5</keyspaces.version>
+        <kotlin.version>1.7.0</kotlin.version>
         <resilience4j.version>1.7.1</resilience4j.version>
-        <jackson.version>2.12.2</jackson.version>
-        <commons.lang3.version>3.11</commons.lang3.version>
-        <partiql.version>0.2.6</partiql.version>
+        <jackson.version>[2.13.2.1,)</jackson.version>
+        <commons.lang3.version>3.12</commons.lang3.version>
+        <partiql.version>0.7.0</partiql.version>
         <commons.codec.version>1.15</commons.codec.version>
         <commons.lang3.version>3.12.0</commons.lang3.version>
-        <logback.version>1.2.8</logback.version>
-        <picocli.version>4.6.1</picocli.version>
+        <logback.version>1.2.11</logback.version>
+        <picocli.version>4.6.3</picocli.version>
         <memcached.version>2.12.3</memcached.version>
         <cbor.version>2.12.3</cbor.version>
         <snappy.version>1.1.8.4</snappy.version>

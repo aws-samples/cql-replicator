@@ -28,7 +28,7 @@ aws s3 cp s3://"$BUCKETNAME"/"$KEYSPACENAME"/"$TABLENAME"/CassandraConnector.con
 #Copy KeyspacesConnector.conf
 aws s3 cp s3://"$BUCKETNAME"/"$KEYSPACENAME"/"$TABLENAME"/KeyspacesConnector.conf "$CQLREPLICATOR_HOME"/conf/
 
-# Updating credentials for Cassandra and Keyspaces from Parameter Store (If using other credential manager, update accordingly)
+# Updating credentials for Cassandra and Keyspaces from Parameter Store (If using AWS SMPS, if not update conf files with credentials and upload to s3 )
 
 if [ -n "${AWS_SMPS_MODE}" ]; then
 

@@ -81,7 +81,7 @@ The tables should be provisioned with proper WCUs/RCUs to sustain the high workl
 For the cqlreplicator.sh which is a wrapper script for the replicator job, there are following two options to update Cassandra and Keyspaces passwords (specified in CassandraConnector.conf and KeyspacesConnector.conf files ) :
 
 1. Updating the username and password in respective Conf files and uploading to the S3 bucket. This is the default option.
-2. If credentials are stored on AWS Systems Manager Parameter Store, define env. variable "AWS_SMPS_MODE" in the cqlreplicator.sh script as follows:
+2. If credentials are stored on AWS Systems Manager Parameter Store, declare env. variable "AWS_SMPS_MODE". For example: 
 
 export AWS_SMPS_MODE = true 
 

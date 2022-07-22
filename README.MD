@@ -77,6 +77,14 @@ The tables should be provisioned with proper WCUs/RCUs to sustain the high workl
    ```./cqlreplicator.sh --syncPartitionKeys --tile 0 --tiles 2 & ./cqlreplicator.sh --syncPartitionKeys --tile 1 --tiles 2 & ./cqlreplicator.sh --syncClusteringColumns --tile 0 --tiles 2 & ./cqlreplicator.sh --syncClusteringColumns --tile 1 --tiles 2 &```
 12. Run ```select * from replicator.stats``` against Amazon Keyspaces to monitor the migration process, or you can run ```./cqlreplicator.sh --tile 0 --tiles 2 --stats ``` from your terminal
 
+# Credentials
+For the cqlreplicator.sh which is a wrapper script for the replicator job, there are following two options to update Cassandra and Keyspaces passwords (specified in CassandraConnector.conf and KeyspacesConnector.conf files ) :
+
+1. Updating the username and password in respective Conf files and uploading to the S3 bucket. This is the default option.
+2. If credentials are stored on AWS Systems Manager Parameter Store, define env. variable "AWS_SMPS_MODE" in the cqlreplicator.sh script as follows:
+
+export AWS_SMPS_MODE = true 
+
 # Clean up
 Let's clean up the testing environment to avoid extra charges and resource consumption
 1. to stop the docker container run the following command: 

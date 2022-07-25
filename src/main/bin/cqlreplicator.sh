@@ -24,18 +24,14 @@ aws s3 cp s3://"$BUCKETNAME"/"$KEYSPACENAME"/"$TABLENAME"/CassandraConnector.con
 #Copy the KeyspacesConnector.conf
 aws s3 cp s3://"$BUCKETNAME"/"$KEYSPACENAME"/"$TABLENAME"/KeyspacesConnector.conf "$CQLREPLICATOR_HOME"/conf/
 
-# Updating credentials for Cassandra and Keyspaces from Parameter Store (If using AWS SMPS, if not update conf files with credentials and upload to s3 )
+# Updating credentials for Cassandra and Amazon Keyspaces from AWS System Manager Property Store
 
 if [ -n "${AWS_SMPS_MODE}" ]; then
-
-USERNAME1=$(grep 'username' $CQLREPLICATOR_HOME/conf/KeyspacesConnector.conf | cut -d '=' -f2)
-PASSWORD1=$(aws ssm get-parameter --name $USERNAME1 --with-decryption | jq '.Parameter.Value')
-sed -i '' -e "s#password = .*#password = $PASSWORD1#" $CQLREPLICATOR_HOME/conf/KeyspacesConnector.conf
-
-USERNAME2=$(grep 'username' $CQLREPLICATOR_HOME/conf/CassandraConnector.conf | cut -d '=' -f2)
-PASSWORD2=$(aws ssm get-parameter --name $USERNAME2 --with-decryption | jq '.Parameter.Value')
-sed -i '' -e "s#password = .*#password = $PASSWORD2#" $CQLREPLICATOR_HOME/conf/CassandraConnector.conf
-
+  for filename in "KeyspacesConnector.conf" "CassandraConnector.conf"; do
+    DB_USERNAME=$(grep 'username' $CQLREPLICATOR_HOME/conf/$filename | cut -d '=' -f2)
+    DB_PASSWORD=$(aws ssm get-parameter --name $DB_USERNAME --with-decryption | jq '.Parameter.Value')
+    sed -i -e 's/password.*/password = '$DB_PASSWORD'/g' $CQLREPLICATOR_HOME/conf/$filename
+  done
 fi 
 
 if [ -n "${BUCKETNAME}" ] && [ -n "${KEYSPACENAME}" ] && [ -n "${TABLENAME}" ]; then

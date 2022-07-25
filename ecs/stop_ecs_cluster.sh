@@ -5,4 +5,3 @@
 CLUSTER_NAME=$1
 REGION_NAME=$2
 ecs-cli down --cluster $CLUSTER_NAME --region $REGION_NAME
-

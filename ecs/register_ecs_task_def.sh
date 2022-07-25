@@ -53,7 +53,7 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "CQLREPLICATOR_HOME",
-          "value": "/root/CQLReplicator-1.0-SNAPSHOT"
+          "value": "/root/CQLReplicator"
         },
         {
           "name": "KEYSPACENAME",
@@ -82,7 +82,7 @@ TASK_DEF=$(jq --null-input \
           "value": "-Xmx2g -Xms2g -XX:+UnlockExperimentalVMOptions -XX:+UseZGC -XX:+HeapDumpOnOutOfMemoryError"
         }
       ],
-      "workingDirectory": "/root/CQLReplicator-1.0-SNAPSHOT/bin",
+      "workingDirectory": "/root/CQLReplicator",
       "memory": 3584,
       "image": $image,
       "essential": true,
@@ -107,7 +107,7 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "CQLREPLICATOR_HOME",
-          "value": "/root/CQLReplicator-1.0-SNAPSHOT"
+          "value": "/root/CQLReplicator"
         },
         {
           "name": "KEYSPACENAME",
@@ -138,7 +138,7 @@ TASK_DEF=$(jq --null-input \
         }
       ],
       "mountPoints": [],
-      "workingDirectory": "/root/CQLReplicator-1.0-SNAPSHOT/bin",
+      "workingDirectory": "/root/CQLReplicator/bin",
       "memory": 3584,
       "volumesFrom": [],
       "image": $image,

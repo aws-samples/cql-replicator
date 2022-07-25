@@ -13,9 +13,10 @@ There are 3 main processes:
    * `Stats` reports migration statistics. 
  
 # Build this project
-To build and use this tool executes the following mvn command and place on the classpath of your application. 
+To build and use this tool executes the following gradle command and place on the classpath of your application. 
 ```
-mvn install package
+gradle build
+gradle task deploy
 ```
 
 # Quick start

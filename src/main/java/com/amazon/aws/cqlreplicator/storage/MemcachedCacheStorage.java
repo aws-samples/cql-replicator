@@ -17,7 +17,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-public class MemcachedStorage extends Storage {
+public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
 
   private static final int TIMEOUT_IN_SEC = 5;
   private MemcachedClient memCachedClient;
@@ -28,7 +28,7 @@ public class MemcachedStorage extends Storage {
   private String externalMemcachedStorageEndpoint;
   private String externalMemcachedStoragePort;
 
-  public MemcachedStorage(Properties config, String operation) {
+  public MemcachedCacheStorage(Properties config, String operation) {
     this.operation = operation;
     this.targetKeyspace = config.getProperty("TARGET_KEYSPACE");
     this.targetTable = config.getProperty("TARGET_TABLE");

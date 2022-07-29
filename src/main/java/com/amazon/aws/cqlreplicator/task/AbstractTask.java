@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.task;
 
-import com.amazon.aws.cqlreplicator.storage.Storage;
+import com.amazon.aws.cqlreplicator.storage.CacheStorage;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,7 +17,7 @@ public abstract class AbstractTask {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(AbstractTask.class);
 
-  public final void performTask(Storage pkCache, Utils.CassandraTaskTypes taskName)
+  public final void performTask(CacheStorage pkCache, Utils.CassandraTaskTypes taskName)
       throws IOException, InterruptedException, ExecutionException, TimeoutException {
     long startTime = System.nanoTime();
     doPerformTask(pkCache, taskName);
@@ -26,6 +26,6 @@ public abstract class AbstractTask {
         "Elapsed time is {} ms for task {}", Duration.ofNanos(elapsedTime).toMillis(), taskName);
   }
 
-  protected abstract void doPerformTask(Storage pkCache, Utils.CassandraTaskTypes taskName)
+  protected abstract void doPerformTask(CacheStorage pkCache, Utils.CassandraTaskTypes taskName)
       throws IOException, InterruptedException, ExecutionException, TimeoutException;
 }

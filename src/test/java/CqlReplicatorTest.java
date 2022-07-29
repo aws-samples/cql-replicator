@@ -72,11 +72,15 @@ public class CqlReplicatorTest {
         ResultSet rsTarget = keyspacesConnectorSession.execute(statement);
         ResultSet rsSource = cassandraConnectorSession.execute(statement);
 
-        rsSource.all().forEach(row -> {
-            sourceHash.add(DigestUtils.md5Hex(Objects.requireNonNull(row.getString(0)).
-                    replace("'", "\\\\u0027")));
-            sourceCount++;
-        });
+    rsSource
+        .all()
+        .forEach(
+            row -> {
+              sourceHash.add(
+                  DigestUtils.md5Hex(
+                      Objects.requireNonNull(row.getString(0))/*.replace("'", "\\\\u0027")*/));
+              sourceCount++;
+            });
 
         rsTarget.all().forEach(row -> {
             targetHash.add(DigestUtils.md5Hex(row.getString(0)));

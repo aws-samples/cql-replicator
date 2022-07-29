@@ -1,6 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-package com.amazon.aws.cqlreplicator.extractor;
+package com.amazon.aws.cqlreplicator.storage;
 
 import com.amazon.aws.cqlreplicator.connector.ConnectionFactory;
 import com.datastax.oss.driver.api.core.ConsistencyLevel;
@@ -17,7 +17,7 @@ import java.math.BigInteger;
 import java.util.*;
 
 /** Responsible for providing extracting logic from source cluster */
-public class CassandraExtractor implements DataExtractor {
+public class SourceStorageOnCassandra {
   private static final SimpleStatement statement =
       SimpleStatement.newInstance(
           "select column_name, type, position, kind from system_schema.\"columns\" "
@@ -30,7 +30,7 @@ public class CassandraExtractor implements DataExtractor {
   private final String BIG_INT_MAX_VALUE = String.valueOf(2^Integer.MAX_VALUE);
   private final String BIG_INT_MIN_VALUE = String.valueOf(-2^Integer.MIN_VALUE);
 
-  public CassandraExtractor(Properties config) {
+  public SourceStorageOnCassandra(Properties config) {
     this.config = config;
     ConnectionFactory connectionFactory = new ConnectionFactory(config);
     this.cassandraSession = connectionFactory.buildCqlSession("CassandraConnector.conf");
@@ -92,8 +92,6 @@ public class CassandraExtractor implements DataExtractor {
     return ranges;
   }
 
-
-  @Override
   public List<Row> extract(Object object) {
     ResultSet resultSet = cassandraSession.execute(((BoundStatementBuilder) object).build());
     return resultSet.all();

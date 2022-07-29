@@ -9,16 +9,16 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class SimpleConcurrentHashMapStorage<K, V> extends Storage<K, V> {
+public class SimpleConcurrentHashMapCacheStorage<K, V> extends CacheStorage<K, V> {
 
   private ConcurrentHashMap<K, V> storage;
   private int initialCapacity;
   private float loadFactor;
   private int concurrentThreads;
 
-  public SimpleConcurrentHashMapStorage(Properties properties) {
+  public SimpleConcurrentHashMapCacheStorage(Properties properties) {
     super();
-    this.storageName = "SimpleConcurrentHashMapStorage";
+    this.storageName = "SimpleConcurrentHashMapCacheStorage";
     this.initialCapacity =
         Integer.parseInt(properties.getProperty("INTERNAL_STORAGE_INIT_CAPACITY"));
     this.loadFactor = Float.parseFloat(properties.getProperty("INTERNAL_STORAGE_LOAD_FACTOR"));

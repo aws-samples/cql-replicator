@@ -2,12 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.task.replication;
 
-import com.amazon.aws.cqlreplicator.extractor.CassandraExtractor;
-import com.amazon.aws.cqlreplicator.extractor.KeyspacesExtractor;
-import com.amazon.aws.cqlreplicator.loader.KeyspacesLoader;
 import com.amazon.aws.cqlreplicator.models.*;
-import com.amazon.aws.cqlreplicator.storage.IonEngine;
-import com.amazon.aws.cqlreplicator.storage.Storage;
+import com.amazon.aws.cqlreplicator.storage.*;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
 import com.amazon.aws.cqlreplicator.util.StatsCounter;
 import com.amazon.aws.cqlreplicator.util.Utils;
@@ -40,20 +36,20 @@ public class CassandraReplicationTask extends AbstractTask {
   private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
 
   private static final long MILLISECONDS = 1000000L;
-  private static CassandraExtractor cassandraExtractor;
-  private static KeyspacesExtractor keyspacesExtractor;
-  private static KeyspacesLoader targetLoader;
+  private static SourceStorageOnCassandra sourceStorageOnCassandra;
+  private static TargetStorageOnKeyspaces targetStorageOnKeyspaces;
+  private static LedgerStorageOnKeyspaces ledgerStorageOnKeyspaces;
   private static Map<String, LinkedHashMap<String, String>> cassandraSchemaMetadata;
   private final Properties config;
-  private StatsCounter statsCounter;
+  private static StatsCounter statsCounter;
 
   public CassandraReplicationTask(Properties config) {
     this.config = config;
-    cassandraExtractor = new CassandraExtractor(config);
-    targetLoader = new KeyspacesLoader(config);
-    cassandraSchemaMetadata = cassandraExtractor.getMetaData();
-    keyspacesExtractor = new KeyspacesExtractor(config);
+    sourceStorageOnCassandra = new SourceStorageOnCassandra(config);
+    cassandraSchemaMetadata = sourceStorageOnCassandra.getMetaData();
     statsCounter = new StatsCounter();
+    targetStorageOnKeyspaces = new TargetStorageOnKeyspaces(config);
+    ledgerStorageOnKeyspaces = new LedgerStorageOnKeyspaces(config);
   }
 
   private static String transformer(String input, Properties config) {
@@ -67,19 +63,16 @@ public class CassandraReplicationTask extends AbstractTask {
 
   private void dataLoader(
       SimpleStatement simpleStatement,
-      RetryEntry retryEntry,
       LedgerMetaData ledgerMetaData,
-      StatsMetaData statsMetaData,
       boolean setStartReplicationPoint,
-      long ts,
-      String ops) {
+      long ts) {
     if (!setStartReplicationPoint) {
-      targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
-      statsCounter.incrementStat(ops);
+      targetStorageOnKeyspaces.write(simpleStatement);
+      ledgerStorageOnKeyspaces.writeRowMetadata(ledgerMetaData);
     } else {
       if (ledgerMetaData.getLastWriteTime() > ts) {
-        targetLoader.load(simpleStatement, retryEntry, ledgerMetaData, statsMetaData);
-        statsCounter.incrementStat(ops);
+        targetStorageOnKeyspaces.write(simpleStatement);
+        ledgerStorageOnKeyspaces.writeRowMetadata(ledgerMetaData);
       }
     }
   }
@@ -90,7 +83,7 @@ public class CassandraReplicationTask extends AbstractTask {
       String[] cls,
       int timeoutRateLimiter,
       RateLimiter rateLimiter,
-      Storage pkCache) {
+      CacheStorage pkCache) {
 
     String[] pk = REGEX_PIPE.split(row.getString("cc"));
     Map<String, Long> ledgerHashMap = new HashMap<>();
@@ -98,7 +91,7 @@ public class CassandraReplicationTask extends AbstractTask {
     Map<String, String> jsonColumnHashMapPerPartition = new HashMap<>();
 
     BoundStatementBuilder boundStatementCassandraBuilder =
-        cassandraExtractor.getCassandraPreparedStatement().boundStatementBuilder();
+        sourceStorageOnCassandra.getCassandraPreparedStatement().boundStatementBuilder();
 
     int i = 0;
     for (String cl : pks) {
@@ -108,7 +101,7 @@ public class CassandraReplicationTask extends AbstractTask {
       i++;
     }
 
-    List<Row> cassandraResult = cassandraExtractor.extract(boundStatementCassandraBuilder);
+    List<Row> cassandraResult = sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
 
     for (Row compareRow : cassandraResult) {
       String query;
@@ -177,7 +170,8 @@ public class CassandraReplicationTask extends AbstractTask {
               Integer.parseInt(config.getProperty("TILE")),
               config.getProperty("TARGET_KEYSPACE"),
               config.getProperty("TARGET_TABLE"));
-      List<Row> ledgerResultSet = keyspacesExtractor.extract(queryLedgerItemByPk);
+
+      List<Row> ledgerResultSet = ledgerStorageOnKeyspaces.readRowMetaData(queryLedgerItemByPk);
 
       ledgerResultSet.parallelStream()
           .forEach(
@@ -229,26 +223,14 @@ public class CassandraReplicationTask extends AbstractTask {
                     config.getProperty("TARGET_TABLE"),
                     "UPDATE");
 
-            // Update target table
-            RetryEntry retryEntry =
-                new RetryEntry(
-                    row.getString("cc"),
-                    k,
-                    config.getProperty("TARGET_KEYSPACE"),
-                    config.getProperty("TARGET_TABLE"),
-                    "INSERT",
-                    java.time.LocalDate.now());
-
             rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
             dataLoader(
                 simpleStatement,
-                retryEntry,
                 ledgerMetaData,
-                statsMetaData,
                 Boolean.parseBoolean(config.getProperty("ENABLE_REPLICATION_POINT")),
-                Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")),
-                "UPDATE");
+                Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")));
+            statsCounter.incrementStat("UPDATE");
           }
         });
 
@@ -282,33 +264,21 @@ public class CassandraReplicationTask extends AbstractTask {
                   config.getProperty("TARGET_TABLE"),
                   "INSERT");
 
-          // Update target table
-          RetryEntry retryEntry =
-              new RetryEntry(
-                  row.getString("cc"),
-                  k,
-                  config.getProperty("TARGET_KEYSPACE"),
-                  config.getProperty("TARGET_TABLE"),
-                  "INSERT",
-                  java.time.LocalDate.now());
-
           rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
           dataLoader(
               simpleStatement,
-              retryEntry,
               ledgerMetaData,
-              statsMetaData,
               Boolean.parseBoolean(config.getProperty("ENABLE_REPLICATION_POINT")),
-              Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")),
-              "INSERT");
+              Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")));
+          statsCounter.incrementStat("INSERT");
 
         });
     LOGGER.debug("Completed scanning rows in {}", row.getString("cc"));
   }
 
   @Override
-  protected void doPerformTask(Storage pkCache, Utils.CassandraTaskTypes taskName)
+  protected void doPerformTask(CacheStorage pkCache, Utils.CassandraTaskTypes taskName)
       throws InterruptedException, ExecutionException, TimeoutException {
 
     int permits = Integer.parseInt(config.getProperty("RATELIMITER_PERMITS"));
@@ -326,7 +296,8 @@ public class CassandraReplicationTask extends AbstractTask {
     String[] clusteringColumnNames =
         cassandraSchemaMetadata.get("clustering").keySet().toArray(new String[0]);
 
-    List<Row> ledgerPks = keyspacesExtractor.extract(partitionsMetaData);
+    //List<Row> ledgerPks = keyspacesExtractor.extract(partitionsMetaData);
+    List<Row> ledgerPks = ledgerStorageOnKeyspaces.readPartitionsMetadata(partitionsMetaData);
     LOGGER.info(
         "The number of pre-loaded elements in the cache is {} ",
         pkCache.getSize(Integer.parseInt(config.getProperty("TILE"))));
@@ -348,8 +319,12 @@ public class CassandraReplicationTask extends AbstractTask {
             config.getProperty("TARGET_KEYSPACE"),
             config.getProperty("TARGET_TABLE"),
             "INSERT");
+
     statsMetaDataInserts.setValue(statsCounter.getStat("INSERT"));
-    targetLoader.load(statsMetaDataInserts);
+    //targetLoader.load(statsMetaDataInserts);
+    if (statsMetaDataInserts.getValue()>0) {
+    targetStorageOnKeyspaces.writeStats(statsMetaDataInserts);
+    }
 
     StatsMetaData statsMetaDataUpdates =
         new StatsMetaData(
@@ -357,8 +332,12 @@ public class CassandraReplicationTask extends AbstractTask {
             config.getProperty("TARGET_KEYSPACE"),
             config.getProperty("TARGET_TABLE"),
             "UPDATE");
+
     statsMetaDataUpdates.setValue(statsCounter.getStat("UPDATE"));
-    targetLoader.load(statsMetaDataUpdates);
+
+    if (statsMetaDataUpdates.getValue() > 0) {
+      targetStorageOnKeyspaces.writeStats(statsMetaDataUpdates);
+    }
 
     statsCounter.resetStat("INSERT");
     statsCounter.resetStat("UPDATE");

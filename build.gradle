@@ -79,7 +79,7 @@ configure(copyLib) {
 
 task copyBin(type: Copy) {
     mkdir "$buildDir/dist/CQLReplicator/bin"
-    from "/Users/kolesnn/Work/CQLReplicator/src/main/bin"
+    from "src/main/bin"
     into "$buildDir/dist/CQLReplicator/bin"
 }
 

@@ -3,8 +3,8 @@
 #SPDX-License-Identifier: Apache-2.0
 
 # Use below steps only if CQLReplicator runs on EC2 instances
-#export CQLREPLICATOR_HOME=${basefolder:0:${#basefolder}-4}
 #basefolder=$(pwd -L)
+#export CQLREPLICATOR_HOME=${basefolder:0:${#basefolder}-4}
 
 export CQLREPLICATOR_CONF=$CQLREPLICATOR_HOME"/conf"
 export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
@@ -29,7 +29,7 @@ aws s3 cp s3://"$BUCKETNAME"/"$KEYSPACENAME"/"$TABLENAME"/KeyspacesConnector.con
 if [ -n "${AWS_SMPS_MODE}" ]; then
   for filename in "KeyspacesConnector.conf" "CassandraConnector.conf"; do
     DB_USERNAME=$(grep 'username' $CQLREPLICATOR_HOME/conf/$filename | cut -d '=' -f2)
-    DB_PASSWORD=$(aws ssm get-parameter --name $DB_USERNAME --with-decryption | jq '.Parameter.Value')
+    DB_PASSWORD=$(aws ssm get-parameter --name $DB_USERNAME --with-decryption | jq '.Parameter.Value' | sed 's/\//\\\//g')
     sed -i -e 's/password.*/password = '$DB_PASSWORD'/g' $CQLREPLICATOR_HOME/conf/$filename
   done
 fi 

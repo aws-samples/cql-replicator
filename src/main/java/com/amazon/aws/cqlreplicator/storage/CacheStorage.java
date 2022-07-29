@@ -11,7 +11,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
-public abstract class Storage<K, V> {
+public abstract class CacheStorage<K, V> {
   protected String storageName;
 
   public abstract void connect() throws IOException;

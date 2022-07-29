@@ -4,9 +4,9 @@ package com.amazon.aws.cqlreplicator;
 
 import com.amazon.aws.cqlreplicator.config.ConfigReader;
 import com.amazon.aws.cqlreplicator.models.StatsAggrQuery;
-import com.amazon.aws.cqlreplicator.storage.MemcachedStorage;
-import com.amazon.aws.cqlreplicator.storage.SimpleConcurrentHashMapStorage;
-import com.amazon.aws.cqlreplicator.storage.Storage;
+import com.amazon.aws.cqlreplicator.storage.CacheStorage;
+import com.amazon.aws.cqlreplicator.storage.MemcachedCacheStorage;
+import com.amazon.aws.cqlreplicator.storage.SimpleConcurrentHashMapCacheStorage;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
 import com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTask;
 import com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTask;
@@ -43,8 +43,8 @@ public class Starter implements Callable<Integer> {
   private static String pathToConfig = "";
   private static long replicationDelay;
   private static long statsDelay;
-  private static Storage pkCacheForClusteringKeys;
-  private static Storage pkCacheForPartitionKeys;
+  private static CacheStorage pkCacheForClusteringKeys;
+  private static CacheStorage pkCacheForPartitionKeys;
 
   @CommandLine.Option(
       names = {"--syncPartitionKeys"},
@@ -146,9 +146,9 @@ public class Starter implements Callable<Integer> {
       if (abstractTaskPartitionKeys == null) {
         abstractTaskPartitionKeys = new PartitionDiscoveryTask(config);
         if (config.getProperty("EXTERNAL_MEMCACHED_STORAGE").equals("false")) {
-          pkCacheForPartitionKeys = new SimpleConcurrentHashMapStorage(config);
+          pkCacheForPartitionKeys = new SimpleConcurrentHashMapCacheStorage(config);
         } else {
-          pkCacheForPartitionKeys = new MemcachedStorage(config, "pd");
+          pkCacheForPartitionKeys = new MemcachedCacheStorage(config, "pd");
         }
         pkCacheForPartitionKeys.connect();
       }
@@ -163,9 +163,9 @@ public class Starter implements Callable<Integer> {
       if (abstractTaskClusteringKeys == null) {
         abstractTaskClusteringKeys = new CassandraReplicationTask(config);
         if (config.getProperty("EXTERNAL_MEMCACHED_STORAGE").equals("false")) {
-          pkCacheForClusteringKeys = new SimpleConcurrentHashMapStorage(config);
+          pkCacheForClusteringKeys = new SimpleConcurrentHashMapCacheStorage(config);
         } else {
-          pkCacheForClusteringKeys = new MemcachedStorage(config, "rd");
+          pkCacheForClusteringKeys = new MemcachedCacheStorage(config, "rd");
         }
         pkCacheForClusteringKeys.connect();
       }

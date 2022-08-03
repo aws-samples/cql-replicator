@@ -14,12 +14,12 @@ import java.util.concurrent.TimeoutException;
 public abstract class AdvancedCache<T> {
 
   private final List<T> queue = new ArrayList<>();
-  private Storage storage;
+  private CacheStorage cacheStorage;
   private int maxCacheSize;
 
-  public AdvancedCache(int maxCacheSize, Storage storage) {
+  public AdvancedCache(int maxCacheSize, CacheStorage cacheStorage) {
     this.maxCacheSize = maxCacheSize;
-    this.storage = storage;
+    this.cacheStorage = cacheStorage;
   }
 
   public synchronized void put(T element)
@@ -33,7 +33,7 @@ public abstract class AdvancedCache<T> {
   public synchronized void doFlush()
       throws IOException, InterruptedException, ExecutionException, TimeoutException {
     List<T> payload = new ArrayList<>(queue);
-    flush(payload, storage);
+    flush(payload, cacheStorage);
     queue.clear();
   }
 
@@ -41,6 +41,6 @@ public abstract class AdvancedCache<T> {
     return queue.size();
   }
 
-  protected abstract void flush(List<T> payload, Storage storage)
+  protected abstract void flush(List<T> payload, CacheStorage cacheStorage)
       throws IOException, InterruptedException, ExecutionException, TimeoutException;
 }

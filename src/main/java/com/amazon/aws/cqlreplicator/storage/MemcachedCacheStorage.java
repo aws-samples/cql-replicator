@@ -17,7 +17,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-public class MemcachedStorage extends Storage {
+public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
 
   private static final int TIMEOUT_IN_SEC = 5;
   private MemcachedClient memCachedClient;
@@ -28,7 +28,7 @@ public class MemcachedStorage extends Storage {
   private String externalMemcachedStorageEndpoint;
   private String externalMemcachedStoragePort;
 
-  public MemcachedStorage(Properties config, String operation) {
+  public MemcachedCacheStorage(Properties config, String operation) {
     this.operation = operation;
     this.targetKeyspace = config.getProperty("TARGET_KEYSPACE");
     this.targetTable = config.getProperty("TARGET_TABLE");
@@ -39,33 +39,39 @@ public class MemcachedStorage extends Storage {
 
   @Override
   public void connect() throws IOException {
-    Properties connectionConfig = new Properties();
+    var connectionConfig = new Properties();
     connectionConfig.setProperty(
         "EXTERNAL_MEMCACHED_STORAGE_ENDPOINT", externalMemcachedStorageEndpoint);
     connectionConfig.setProperty("EXTERNAL_MEMCACHED_STORAGE_PORT", externalMemcachedStoragePort);
-    ConnectionFactory connectionFactory = new ConnectionFactory(connectionConfig);
+    var connectionFactory = new ConnectionFactory(connectionConfig);
     this.memCachedClient = connectionFactory.buildMemcachedSession();
     prefix = String.format("%s|%s|%s", operation, targetKeyspace, targetTable);
   }
 
   public void counterIncrement(int tile)
       throws InterruptedException, ExecutionException, TimeoutException {
-    String cntKey =
+    var cntKey =
         String.format("%s|%s|%s|%s|%s", tile, operation, "counter", targetKeyspace, targetTable);
-    boolean contains = memCachedClient.asyncGet(cntKey) != null;
+    var contains = memCachedClient.asyncGet(cntKey) != null;
+    if (!contains) {
+      memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
+    }
+    memCachedClient.asyncIncr(cntKey, 1);
+    /*
     if (contains) {
       memCachedClient.asyncIncr(cntKey, 1);
     } else {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
       memCachedClient.asyncIncr(cntKey, 1);
     }
+     */
   }
 
   private void counterDecrement(int tile, String operationType) {
-    String cntKey =
+    var cntKey =
         String.format(
             "%s|%s|%s|%s|%s", tile, operationType, "counter", targetKeyspace, targetTable);
-    boolean contains = memCachedClient.get(cntKey) != null;
+    var contains = memCachedClient.get(cntKey) != null;
     if (contains) {
       memCachedClient.asyncDecr(cntKey, 1);
     }
@@ -105,10 +111,9 @@ public class MemcachedStorage extends Storage {
 
   @Override
   public long getSize(int tile) throws InterruptedException, ExecutionException, TimeoutException {
-    String cntKey =
+    var cntKey =
         String.format("%s|%s|%s|%s|%s", tile, operation, "counter", targetKeyspace, targetTable);
-    boolean contains;
-    contains = memCachedClient.asyncGet(cntKey).get(TIMEOUT_IN_SEC, TimeUnit.SECONDS) != null;
+    var contains = memCachedClient.asyncGet(cntKey).get(TIMEOUT_IN_SEC, TimeUnit.SECONDS) != null;
     if (!contains) {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     }
@@ -139,7 +144,7 @@ public class MemcachedStorage extends Storage {
   @Override
   public void remove(int tile, String operationType, Object key)
       throws InterruptedException, ExecutionException, TimeoutException {
-    String ksAndTable = String.format("%s|%s", targetKeyspace, targetTable);
+    var ksAndTable = String.format("%s|%s", targetKeyspace, targetTable);
     memCachedClient
         .delete(String.format("%s|%s|%s", operationType, ksAndTable, key))
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -153,20 +158,25 @@ public class MemcachedStorage extends Storage {
 
   public void incrByOne(Object key)
       throws InterruptedException, ExecutionException, TimeoutException {
-    String cntKey = String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key);
-    boolean contains =
-        memCachedClient.asyncGet(cntKey).get(TIMEOUT_IN_SEC, TimeUnit.SECONDS) != null;
+    var cntKey = String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key);
+    var contains = memCachedClient.asyncGet(cntKey).get(TIMEOUT_IN_SEC, TimeUnit.SECONDS) != null;
+    if (!contains) {
+      memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
+    }
+    memCachedClient.asyncIncr(cntKey, 1);
+    /*
     if (contains) {
       memCachedClient.asyncIncr(cntKey, 1);
     } else {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
       memCachedClient.asyncIncr(cntKey, 1);
     }
+     */
   }
 
   public void decrByOne(Object key) {
-    String cntKey = String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key);
-    boolean contains = memCachedClient.get(cntKey) != null;
+    var cntKey = String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key);
+    var contains = memCachedClient.get(cntKey) != null;
     if (contains) {
       memCachedClient.asyncDecr(cntKey, 1);
     }

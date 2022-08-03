@@ -4,10 +4,8 @@
  */
 package com.amazon.aws.cqlreplicator.storage;
 
-import com.amazon.ion.IonDatagram;
 import com.amazon.ion.IonReader;
 import com.amazon.ion.IonSystem;
-import com.amazon.ion.IonWriter;
 import com.amazon.ion.system.IonReaderBuilder;
 import com.amazon.ion.system.IonSystemBuilder;
 import com.amazon.ion.system.IonTextWriterBuilder;
@@ -41,19 +39,19 @@ public class IonEngine {
 
     Expression selectAndFilter = pipeline.compile(sql);
     try (IonReader ionReader = IonReaderBuilder.standard().build(originalData);
-        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-        IonWriter resultWriter = IonTextWriterBuilder.json().build(byteArrayOutputStream)) {
-      IonDatagram values = ion.getLoader().load(ionReader);
+        var byteArrayOutputStream = new ByteArrayOutputStream();
+        var resultWriter = IonTextWriterBuilder.json().build(byteArrayOutputStream)) {
+      var values = ion.getLoader().load(ionReader);
       Function0<ExprValue> res = () -> pipeline.getValueFactory().newFromIonValue(values);
 
-      EvaluationSession session =
+      var session =
           EvaluationSession.builder()
               .globals(
                   Bindings.<ExprValue>lazyBindingsBuilder()
                       .addBinding("inputDocument", res)
                       .build())
               .build();
-      ExprValue selectAndFilterResult = selectAndFilter.eval(session);
+      var selectAndFilterResult = selectAndFilter.eval(session);
 
       selectAndFilterResult.getIonValue().writeTo(resultWriter);
       return byteArrayOutputStream.toString();

@@ -17,11 +17,9 @@ ARG AWS_SESSION_TOKEN
 ENV AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN
 
 ENV CQLREPLICATOR_WORKING_DIR=/root
-ENV JAVA_HOME /usr/lib/jvm/java-1.8.0-openjdk/
 WORKDIR $CQLREPLICATOR_WORKING_DIR
 
 RUN yum update -y
-#RUN yum install -y java-1.8.0-openjdk java-1.8.0-openjdk-devel
 RUN rpm --import https://yum.corretto.aws/corretto.key
 RUN curl -L -o /etc/yum.repos.d/corretto.repo https://yum.corretto.aws/corretto.repo
 RUN yum install -y java-11-amazon-corretto-devel
@@ -31,9 +29,9 @@ RUN yum clean all
 ENV JAVA_OPTS=""
 
 #CQLReplicator SETUP
-RUN aws s3 cp s3://cqlreplicator/CQLReplicator-1.0-SNAPSHOT.zip $CQLREPLICATOR_WORKING_DIR/
-RUN unzip $CQLREPLICATOR_WORKING_DIR/CQLReplicator-1.0-SNAPSHOT.zip
-RUN chmod 755 $CQLREPLICATOR_WORKING_DIR/CQLReplicator-1.0-SNAPSHOT/bin/cqlreplicator.sh
-ENV PATH="${PATH}:$CQLREPLICATOR_WORKING_DIR/CQLReplicator-1.0-SNAPSHOT/bin"
-WORKDIR $CQLREPLICATOR_WORKING_DIR/CQLReplicator-1.0-SNAPSHOT/bin
+COPY deploy/CQLReplicator.zip $CQLREPLICATOR_WORKING_DIR/
+RUN unzip $CQLREPLICATOR_WORKING_DIR/CQLReplicator.zip
+RUN chmod 755 $CQLREPLICATOR_WORKING_DIR/CQLReplicator/bin/cqlreplicator.sh
+ENV PATH="${PATH}:$CQLREPLICATOR_WORKING_DIR/CQLReplicator/bin"
+WORKDIR $CQLREPLICATOR_WORKING_DIR/CQLReplicator/bin
 ENTRYPOINT ["cqlreplicator.sh"]

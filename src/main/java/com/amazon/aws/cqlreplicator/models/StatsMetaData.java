@@ -37,12 +37,12 @@ public class StatsMetaData {
     return ops;
   }
 
-  public void setValue(long v) {
-    this.value = v;
-  }
-
   public long getValue() {
     return value;
+  }
+
+  public void setValue(long v) {
+    this.value = v;
   }
 
   @Override

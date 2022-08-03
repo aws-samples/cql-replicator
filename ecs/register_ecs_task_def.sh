@@ -53,7 +53,7 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "CQLREPLICATOR_HOME",
-          "value": "/root/CQLReplicator-1.0-SNAPSHOT"
+          "value": "/root/CQLReplicator"
         },
         {
           "name": "KEYSPACENAME",
@@ -79,11 +79,11 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "JAVA_OPTS",
-          "value": "-Xmx2g -Xms2g -XX:+UnlockExperimentalVMOptions -XX:+UseZGC -XX:+HeapDumpOnOutOfMemoryError"
+          "value": "-XX:+HeapDumpOnOutOfMemoryError"
         }
       ],
-      "workingDirectory": "/root/CQLReplicator-1.0-SNAPSHOT/bin",
-      "memory": 3584,
+      "workingDirectory": "/root/CQLReplicator",
+      "memory": 1024,
       "image": $image,
       "essential": true,
       "dockerLabels": {
@@ -107,7 +107,7 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "CQLREPLICATOR_HOME",
-          "value": "/root/CQLReplicator-1.0-SNAPSHOT"
+          "value": "/root/CQLReplicator"
         },
         {
           "name": "KEYSPACENAME",
@@ -134,12 +134,12 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "JAVA_OPTS",
-          "value": "-Xmx2g -Xms2g -XX:+UnlockExperimentalVMOptions -XX:+UseZGC -XX:+HeapDumpOnOutOfMemoryError"
+          "value": "-XX:+HeapDumpOnOutOfMemoryError"
         }
       ],
       "mountPoints": [],
-      "workingDirectory": "/root/CQLReplicator-1.0-SNAPSHOT/bin",
-      "memory": 3584,
+      "workingDirectory": "/root/CQLReplicator/bin",
+      "memory": 1024,
       "volumesFrom": [],
       "image": $image,
       "essential": true,
@@ -148,7 +148,7 @@ TASK_DEF=$(jq --null-input \
   ],
   "volumes": [],
   "networkMode": "bridge",
-  "memory": "7 gb",
+  "memory": "3 gb",
   "cpu": "2 vCPU",
   "taskRoleArn": $task_role,
   "placementConstraints": [],

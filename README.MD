@@ -13,9 +13,10 @@ There are 3 main processes:
    * `Stats` reports migration statistics. 
  
 # Build this project
-To build and use this tool executes the following mvn command and place on the classpath of your application. 
+To build and use this tool executes the following gradle command and place on the classpath of your application. 
 ```
-mvn install package
+gradle build
+gradle task deploy
 ```
 
 # Quick start
@@ -115,6 +116,12 @@ two CQLReplicator instances for the partition discovery
    ```./cqlreplicator.sh --syncClusteringColumns --tile 0 --tiles 2 & ```
    ```./cqlreplicator.sh --syncClusteringColumns --tile 1 --tiles 2 & ```
 * To validate migration process run ```select * from replicator.stats``` against Amazon Keyspaces, or you can run ```./cqlreplicator.sh --tile 0 --tiles 2 --stats ```
+
+# Credentials
+There are two options to use and store credentials for Cassandra and Amazon Keyspaces:
+
+* Explicitly updating the username and the password in respective configuration files and uploading to the S3 bucket (Default option)
+* Use AWS Systems Manager Parameter Store by declaring an env variable "AWS_SMPS_MODE". For example: `export AWS_SMPS_MODE = true` 
 
 # Clean up
 Let's clean up the testing environment to avoid extra charges and resource consumption

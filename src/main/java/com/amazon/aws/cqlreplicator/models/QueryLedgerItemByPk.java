@@ -9,7 +9,11 @@ public class QueryLedgerItemByPk {
   private final String keyspaceName;
   private final String tableName;
 
-  public QueryLedgerItemByPk(final String partitionKey, final int tile, final String keyspaceName, final String tableName) {
+  public QueryLedgerItemByPk(
+      final String partitionKey,
+      final int tile,
+      final String keyspaceName,
+      final String tableName) {
 
     this.partitionKey = partitionKey;
     this.tile = tile;

@@ -18,6 +18,9 @@ import com.datastax.oss.driver.api.core.cql.Row;
 import com.datastax.oss.driver.api.core.servererrors.*;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
 import io.github.resilience4j.core.IntervalFunction;
+//import io.github.resilience4j.ratelimiter.RateLimiter;
+//import io.github.resilience4j.ratelimiter.RateLimiterConfig;
+//import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
@@ -35,41 +38,43 @@ public class LedgerStorageOnKeyspaces
 
   private static final Logger LOGGER = LoggerFactory.getLogger(LedgerStorageOnKeyspaces.class);
   private static Retry retry;
+  //private static RateLimiter limiter;
   private static Retry.EventPublisher publisher;
+  //private static RateLimiter.EventPublisher publisher1;
+
   private static CqlSession cqlSession;
   private static PreparedStatement psWriteRowMetadata;
   private static PreparedStatement psWritePartitionMetadata;
   private static PreparedStatement psDeletePartitionMetadata;
   private static PreparedStatement psDeleteRowMetadata;
-  private static PreparedStatement psReadPartitionsMetadata ;
+  private static PreparedStatement psReadPartitionsMetadata;
   private static PreparedStatement psReadRowMetaData;
   private static PreparedStatement psReadPartitionMetadata;
-
 
   public LedgerStorageOnKeyspaces(Properties properties) {
     var connectionFactory = new ConnectionFactory(properties);
     cqlSession = connectionFactory.buildCqlSession("KeyspacesConnector.conf");
     psWriteRowMetadata =
-            cqlSession.prepare(
-                    "insert into replicator.ledger_v4(process_name, tile, keyspacename,tablename, pk, cc, operation_ts, value) values(:process_name, :tile, :keyspacename, :tablename, :pk, :cc, :operation_ts, :value)");
+        cqlSession.prepare(
+            "insert into replicator.ledger_v4(process_name, tile, keyspacename,tablename, pk, cc, operation_ts, value) values(:process_name, :tile, :keyspacename, :tablename, :pk, :cc, :operation_ts, :value)");
     psWritePartitionMetadata =
-            cqlSession.prepare(
-                    "insert into replicator.ledger_v4(process_name, tile, keyspacename,tablename, pk, cc, operation_ts, value) values(:process_name, :tile, :keyspacename, :tablename, :pk, :cc, :operation_ts, :value)");
+        cqlSession.prepare(
+            "insert into replicator.ledger_v4(process_name, tile, keyspacename,tablename, pk, cc, operation_ts, value) values(:process_name, :tile, :keyspacename, :tablename, :pk, :cc, :operation_ts, :value)");
     psDeleteRowMetadata =
-            cqlSession.prepare(
-                    "delete from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk");
+        cqlSession.prepare(
+            "delete from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk");
     psDeletePartitionMetadata =
-            cqlSession.prepare(
-                    "delete from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk and cc=:cc");
+        cqlSession.prepare(
+            "delete from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk and cc=:cc");
     psReadPartitionsMetadata =
-            cqlSession.prepare(
-                    "SELECT pk, cc from replicator.ledger_v4 where process_name=:process_name and tile=:tile AND keyspacename=:keyspacename and tablename=:tablename AND pk=:pk");
+        cqlSession.prepare(
+            "SELECT pk, cc from replicator.ledger_v4 where process_name=:process_name and tile=:tile AND keyspacename=:keyspacename and tablename=:tablename AND pk=:pk");
     psReadRowMetaData =
-            cqlSession.prepare(
-                    "select * from replicator.ledger_v4 where process_name=:process_name AND tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk");
+        cqlSession.prepare(
+            "select * from replicator.ledger_v4 where process_name=:process_name AND tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk");
     psReadPartitionMetadata =
-            cqlSession.prepare(
-                    "select cc from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk limit 1");
+        cqlSession.prepare(
+            "select cc from replicator.ledger_v4 where process_name=:process_name and tile=:tile and keyspacename=:keyspacename and tablename=:tablename and pk=:pk limit 1");
 
     var retryConfig =
         RetryConfig.custom()
@@ -82,12 +87,29 @@ public class LedgerStorageOnKeyspaces
                 WriteFailureException.class,
                 WriteTimeoutException.class,
                 ServerError.class,
-                UnavailableException.class)
+                UnavailableException.class,
+                ReadFailureException.class,
+                ReadTimeoutException.class,
+                CoordinatorException.class,
+                FunctionFailureException.class)
             .failAfterMaxAttempts(true)
             .build();
     var registry = RetryRegistry.of(retryConfig);
     retry = registry.retry("LedgerStorageKeyspaces");
     publisher = retry.getEventPublisher();
+
+    /*
+    var limiterConfig =
+        RateLimiterConfig.custom()
+            .limitForPeriod(Integer.parseInt(properties.getProperty("RATELIMITER_PERMITS")))
+            .limitRefreshPeriod(Duration.ofMillis(500))
+            .timeoutDuration(Duration.ofMillis(Integer.parseInt(properties.getProperty("RATELIMITER_TIMEOUT_MS"))))
+            .build();
+    var registryRL = RateLimiterRegistry.of(limiterConfig);
+    limiter = registryRL.rateLimiter("LedgerStorageKeyspaces");
+    publisher1 = limiter.getEventPublisher();
+
+     */
   }
 
   @Override
@@ -117,7 +139,7 @@ public class LedgerStorageOnKeyspaces
 
   @Override
   public List<Row> readPartitionMetadata(Object o) {
-    PartitionMetaData partitionMetadata = (PartitionMetaData) o;
+    var partitionMetadata = (PartitionMetaData) o;
     var bsReadPartitionMetadata =
         psReadPartitionMetadata
             .boundStatementBuilder()
@@ -126,7 +148,7 @@ public class LedgerStorageOnKeyspaces
             .setString("keyspacename", partitionMetadata.getKeyspaceName())
             .setString("tablename", partitionMetadata.getTableName())
             .setString("pk", partitionMetadata.getPk())
-            .setConsistencyLevel(ConsistencyLevel.LOCAL_ONE);
+            .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
     return execute(bsReadPartitionMetadata);
   }
 
@@ -151,7 +173,7 @@ public class LedgerStorageOnKeyspaces
 
   @Override
   public List<Row> readRowMetaData(Object o) {
-    QueryLedgerItemByPk queryRowMetadata = (QueryLedgerItemByPk) o;
+    var queryRowMetadata = (QueryLedgerItemByPk) o;
     var bsReadRowMetadata =
         psReadRowMetaData
             .boundStatementBuilder()
@@ -160,7 +182,7 @@ public class LedgerStorageOnKeyspaces
             .setString("keyspacename", queryRowMetadata.getKeyspaceName())
             .setString("tablename", queryRowMetadata.getTableName())
             .setString("pk", queryRowMetadata.getPartitionKey())
-            .setConsistencyLevel(ConsistencyLevel.LOCAL_ONE);
+            .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
     return execute(bsReadRowMetadata);
   }
 
@@ -197,7 +219,7 @@ public class LedgerStorageOnKeyspaces
 
   @Override
   public List<Row> readPartitionsMetadata(Object o) {
-    PartitionsMetaData partitionsMetadata = (PartitionsMetaData) o;
+    var partitionsMetadata = (PartitionsMetaData) o;
     var boundStatementBuilder =
         psReadPartitionsMetadata
             .boundStatementBuilder()
@@ -206,15 +228,26 @@ public class LedgerStorageOnKeyspaces
             .setString("pk", String.valueOf(partitionsMetadata.getTile()))
             .setString("keyspacename", partitionsMetadata.getKeyspaceName())
             .setString("tablename", partitionsMetadata.getTableName())
-            .setConsistencyLevel(ConsistencyLevel.LOCAL_ONE);
+            .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
     return execute(boundStatementBuilder);
   }
 
   @Override
   public List<Row> execute(BoundStatementBuilder boundStatementBuilder) {
     Supplier<List<Row>> supplier = () -> cqlSession.execute(boundStatementBuilder.build()).all();
-    var result = Retry.decorateSupplier(retry, supplier).get();
-    publisher.onError(event -> LOGGER.warn("Operation was failed on event {}", event.toString()));
-    return result;
+    publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event.toString()));
+    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
+    return Retry.decorateSupplier(retry, supplier).get();
+
+    /*
+    Supplier<List<Row>> rateLimiterSupplier =
+        RateLimiter.decorateSupplier(
+            limiter, () -> cqlSession.execute(boundStatementBuilder.build()).all());
+    publisher1.onSuccess(event -> LOGGER.debug("{}", event.toString()));
+    Supplier<List<Row>> supplier = Retry.decorateSupplier(retry, rateLimiterSupplier);
+    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
+    publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event.toString()));
+    return Retry.decorateSupplier(retry, supplier).get();
+     */
   }
 }

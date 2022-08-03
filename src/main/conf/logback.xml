@@ -21,7 +21,8 @@
         <appender-ref ref="ASYNC"/>
     </logger>
 
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTask" level="INFO" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTask" level="INFO"
+            additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
 

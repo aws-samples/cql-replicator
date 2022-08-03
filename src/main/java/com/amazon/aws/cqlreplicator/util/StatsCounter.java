@@ -15,10 +15,10 @@ public class StatsCounter {
   public StatsCounter() {}
 
   public void incrementStat(String key) {
-    AtomicInteger value = map.get(key);
+    var value = map.get(key);
     if (value == null) {
       value = new AtomicInteger(0);
-      AtomicInteger old = map.putIfAbsent(key, value);
+      var old = map.putIfAbsent(key, value);
       if (old != null) {
         value = old;
       }
@@ -27,15 +27,15 @@ public class StatsCounter {
   }
 
   public Integer getStat(String key) {
-    AtomicInteger value = map.get(key);
+    var value = map.get(key);
     return (value == null) ? 0 : value.get();
   }
 
   public void resetStat(String key) {
-    AtomicInteger value = map.get(key);
+    var value = map.get(key);
     if (value == null) {
       value = new AtomicInteger(0);
-      AtomicInteger old = map.putIfAbsent(key, value);
+      var old = map.putIfAbsent(key, value);
       if (old != null) {
         value = old;
       }

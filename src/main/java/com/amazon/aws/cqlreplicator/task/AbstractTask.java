@@ -19,9 +19,9 @@ public abstract class AbstractTask {
 
   public final void performTask(CacheStorage pkCache, Utils.CassandraTaskTypes taskName)
       throws IOException, InterruptedException, ExecutionException, TimeoutException {
-    long startTime = System.nanoTime();
+    var startTime = System.nanoTime();
     doPerformTask(pkCache, taskName);
-    long elapsedTime = System.nanoTime() - startTime;
+    var elapsedTime = System.nanoTime() - startTime;
     LOGGER.info(
         "Elapsed time is {} ms for task {}", Duration.ofNanos(elapsedTime).toMillis(), taskName);
   }

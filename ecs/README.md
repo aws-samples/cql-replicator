@@ -5,21 +5,20 @@ Amazon ECS is a fully managed container orchestration service makes it easy for 
 
 ## Build the project
 ```
-    mvn install package
+    gradle clean build
+    gradle task deploy
 ```
-## Copy the archive and config files to the S3 bucket
+## Copy the config and conf files to the S3 bucket
 Let's create a S3 bucket cqlreplicator with prefix /ks_test_cql_replicator/test_cql_replicator.
-Copy CassandraConnector.conf, KeyspacesConnector.conf, and config.yaml to ```s3://cqlreplicator/ks_test_cql_replicator/test_cql_replicator```.
+Copy CassandraConnector.conf, KeyspacesConnector.conf, and config.properties to ```s3://cqlreplicator/ks_test_cql_replicator/test_cql_replicator```.
 
 ## Build and push the docker image to the ECS repository
-Copy CQLReplicator-1.0-SNAPSHOT.zip to ```s3://cqlreplicator/```. 
-Set environmental variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, 
-`BUCKETNAME=cqlreplicator`, `KEYSPACENAME=ks_test_cql_replicator`, `TABLENAME=test_cql_replicator`, 
-and `CQLREPLICATOR_CONF`.
-
-Let's build the docker image `docker build -t cqlreplicator:latest --build-arg AWS_REGION="us-east-1" \
+Let's build the docker image for x86 Linux `docker build -f docker/Dockerfile -t cqlreplicator:latest --build-arg AWS_REGION="us-east-1" \
 --build-arg AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID --build-arg AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
 --build-arg AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN .`.
+
+or you can build the docker image for [ARM64 Linux](https://docs.docker.com/desktop/multi-arch/) `docker buildx build --platform linux/arm64 --load -f docker/Dockerfile -t cqlreplicator:latest --build-arg AWS_REGION="us-east-1" \
+ --build-arg AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID --build-arg AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY --build-arg AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN .`.
 
 Retrieve an authentication token and authenticate your Docker client to your registry.
 Use the AWS CLI: ```aws ecr get-login-password --region us-east-1 | docker login --username AWS 
@@ -55,20 +54,68 @@ Best practice is to define the number of tiles equal to the vnodes in the Cassan
 16 vnodes is equal to 16 tiles, 32 vnodes is equal to 32 tiles, etc.
 
 ## Change Amazon Keyspaces tables capacity mode
-Before provision tables let's create the internal CQLReplicator tables, and the target table:
-```java -cp CQLReplicator-1.0-SNAPSHOT.jar com.amazon.aws.cqlreplicator.Init```
+Let's create and pre-warm CQLReplicator internal tables in cqlsh:
+```
+CREATE TABLE replicator.ledger_v4 (
+    process_name text,
+    tile int,
+    keyspacename text,
+    tablename text,
+    pk text,
+    cc text,
+    operation_ts timestamp,
+    value bigint,
+    PRIMARY KEY ((process_name, tile, keyspacename, tablename, pk), cc)
+) WITH default_time_to_live = 0 AND CUSTOM_PROPERTIES = {
+	'capacity_mode':{
+		'throughput_mode':'PROVISIONED',
+		'write_capacity_units':30000,
+		'read_capacity_units':10000
+	}
+} AND CLUSTERING ORDER BY (cc ASC)
+```
 
-After tables created let's provision the internal CQLReplicator tables in cqlsh:
 ```
-ALTER TABLE replicator.ledger_v4 
-    WITH CUSTOM_PROPERTIES={'capacity_mode':
-    {'throughput_mode': 'PROVISIONED', 'read_capacity_units': 5000, 'write_capacity_units': 15000}};
+ALTER TABLE replicator.ledger_v4  WITH CUSTOM_PROPERTIES = {'capacity_mode':{ 'throughput_mode':'PAY_PER_REQUEST'}}
 ```
-after provision the target table in cqlsh:
+
+```
+CREATE TABLE replicator.stats (
+    tile int,
+    keyspacename text,
+    tablename text,
+    ops text,
+    "rows" counter,
+    PRIMARY KEY ((tile, keyspacename, tablename, ops))
+)
+```
+
+Create and provision the target table test_cql_replicator:
+```
+CREATE TABLE ks_test_cql_replicator.test_cql_replicator (
+    key uuid,
+    col0 tinyint,
+    col1 text,
+    col2 date,
+    col3 double,
+    col4 int,
+    col5 bigint,
+    col6 timestamp,
+    col7 float,
+    col8 blob,
+    PRIMARY KEY (key, col0)
+) WITH default_time_to_live = 0 AND CUSTOM_PROPERTIES = {
+  	'capacity_mode':{
+  		'throughput_mode':'PROVISIONED',
+  		'write_capacity_units':30000,
+  		'read_capacity_units':10000
+  	}
+  } AND  CLUSTERING ORDER BY (col0 ASC)
+```
+
 ```
 ALTER TABLE ks_test_cql_replicator.test_cql_replicator 
-    WITH CUSTOM_PROPERTIES={'capacity_mode':
-    {'throughput_mode': 'PROVISIONED', 'read_capacity_units': 15000, 'write_capacity_units': 15000}};
+    WITH CUSTOM_PROPERTIES = {'capacity_mode':{ 'throughput_mode':'PAY_PER_REQUEST'}}
 ```  
 ## Run the CQLReplicator on ECS cluster
 
@@ -80,7 +127,7 @@ keyspaces_migration.sh 16 123456789012 ecsTaskExecutionRole ecsRole cqlreplicato
 ## Check ECS logs
 if you want to get all WARNs and ERRORs from ECS execute get_ecs_logs.sh with the cluster name, and an absolute path to the pem file
 ```
-  get_ecs_logs.sh test_cql_replicator 
+  get_ecs_logs.sh test_cql_replicator pem-key
 ``` 
 
 ## Clean up
@@ -96,3 +143,10 @@ if you want to stop the cluster execute stop_ecs_cluster.sh within the cluster n
 ```
  deregister_ecs_task.sh CQLReplicator 16
 ```
+## Cost consideration
+The original the project was built for m6i.large VMs, but AWS introduced a new EC2 A1.
+Amazon EC2 A1 instances deliver significant cost savings for scale-out and Arm-based applications such as CQLReplicator, 
+and distributed data stores that are supported by the extensive Arm ecosystem. A1 instances are the first EC2 instances 
+powered by AWS Graviton Processors that feature 64-bit Arm Neoverse cores and custom silicon designed by AWS. 
+These instances will also appeal to developers, enthusiasts, and educators across the Arm developer community. 
+Most architecture-agnostic applications that can run on Arm cores could also benefit from A1 instances.  

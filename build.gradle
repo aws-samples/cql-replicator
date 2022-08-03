@@ -33,6 +33,8 @@ dependencies {
     implementation 'net.spy:spymemcached:2.12.3'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.12.3'
     implementation 'org.xerial.snappy:snappy-java:1.1.8.4'
+    implementation 'io.github.resilience4j:resilience4j-ratelimiter:1.7.1'
+    implementation 'org.lz4:lz4-java:1.4.1'
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.8.1'
     testImplementation 'org.junit.platform:junit-platform-console-standalone:1.8.1'
 }

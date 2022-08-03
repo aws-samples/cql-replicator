@@ -22,14 +22,7 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.UUID;
+import java.util.*;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -48,54 +41,52 @@ public class Utils {
   }
 
   public static <T> byte[] cborEncoder(List<T> obj) throws JsonProcessingException {
-    ObjectMapper mapper = new CBORMapper();
+    var mapper = new CBORMapper();
     return mapper.writeValueAsBytes(obj);
   }
 
   public static <T> List<T> cborDecoder(byte[] payload) throws IOException {
-    ObjectMapper mapper = new CBORMapper();
+    var mapper = new CBORMapper();
     return mapper.readValue(payload, List.class);
   }
 
-  public static <T> Stream<T> getSliceOfStream(Stream<T> stream, int startIndex, int endIndex)
-  {
-    return stream
-            .skip(startIndex)
-            .limit(endIndex - startIndex + 1);
+  public static <T> Stream<T> getSliceOfStream(Stream<T> stream, int startIndex, int endIndex) {
+    return stream.skip(startIndex).limit(endIndex - startIndex + 1);
   }
 
-  public static List<List<ImmutablePair<String, String>>> getDistributedRangesByTiles(List<ImmutablePair<String, String>> ranges, int tiles) {
+  public static List<List<ImmutablePair<String, String>>> getDistributedRangesByTiles(
+      List<ImmutablePair<String, String>> ranges, int tiles) {
 
     LinkedList<List<ImmutablePair<String, String>>> partitionedTokenRanges = new LinkedList<>();
-    int totalRanges = ranges.size();
+    var totalRanges = ranges.size();
 
-    FlushingList<ImmutablePair<String, String>> flushingList = new FlushingList<>(Math.floorDiv(totalRanges, tiles)) {
-      @Override
-      protected void flush(List payload) {
-        partitionedTokenRanges.add(payload);
-      }
-    };
+    FlushingList<ImmutablePair<String, String>> flushingList =
+        new FlushingList<>(Math.floorDiv(totalRanges, tiles)) {
+          @Override
+          protected void flush(List payload) {
+            partitionedTokenRanges.add(payload);
+          }
+        };
 
-    ranges.
-            stream().
-            sequential().
-            forEach(flushingList::put);
+    ranges.stream().sequential().forEach(flushingList::put);
 
-    if (flushingList.getSize()>0) {
+    if (flushingList.getSize() > 0) {
       flushingList.doFlush();
     }
 
     // Let's do merge
     if (partitionedTokenRanges.size() > tiles) {
 
-      Stream<List<ImmutablePair<String, String>>> sliceOfListStream = getSliceOfStream(
-              partitionedTokenRanges.stream(), tiles-1, partitionedTokenRanges.size());
+      Stream<List<ImmutablePair<String, String>>> sliceOfListStream =
+          getSliceOfStream(
+              partitionedTokenRanges.stream(), tiles - 1, partitionedTokenRanges.size());
 
       int rangesToRemove = partitionedTokenRanges.size() - tiles;
 
-      List<ImmutablePair<String, String>> merged = sliceOfListStream.flatMap(Collection::parallelStream).collect(Collectors.toList());
+      List<ImmutablePair<String, String>> merged =
+          sliceOfListStream.flatMap(Collection::parallelStream).collect(Collectors.toList());
 
-      for (int i = 0; i<= rangesToRemove; i++) {
+      for (int i = 0; i <= rangesToRemove; i++) {
         partitionedTokenRanges.removeLast();
       }
 
@@ -103,19 +94,18 @@ public class Utils {
     }
 
     return partitionedTokenRanges;
-
   }
 
   public static Payload convertToJson(
       String rawData, String writeTimeColumns, String[] cls, String[] pks) {
-    ObjectMapper objectMapper = new ObjectMapper();
+    var objectMapper = new ObjectMapper();
 
-    Payload payload = new Payload();
+    var payload = new Payload();
 
     Map<String, String> clusteringColumnMapping = new HashMap<>();
     Map<String, String> partitionColumnsMapping = new HashMap<>();
 
-    String[] writeTimeColumnsArray =
+    var writeTimeColumnsArray =
         REGEX_COM.split(REGEX_REG_SPACE.matcher(writeTimeColumns).replaceAll(""));
 
     List<Long> writeTimeArray = new ArrayList<>();
@@ -186,12 +176,12 @@ public class Utils {
         bound.setFloat(columnName, Float.parseFloat(colValue));
         break;
       case "date":
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-        java.time.LocalDate date = java.time.LocalDate.parse(colValue, formatter);
+        var formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        var date = java.time.LocalDate.parse(colValue, formatter);
         bound.setLocalDate(columnName, date);
         break;
       case "timestamp":
-        ZonedDateTime valueOnClient = ZonedDateTime.parse(colValue.replace("\"", ""));
+        var valueOnClient = ZonedDateTime.parse(colValue.replace("\"", ""));
         bound.set(columnName, valueOnClient, GenericType.ZONED_DATE_TIME);
         break;
       case "timeuuid":
@@ -206,7 +196,7 @@ public class Utils {
         break;
       case "inet":
         try {
-          InetAddress ipFixed = InetAddress.getByName(colValue.replace("/", ""));
+          var ipFixed = InetAddress.getByName(colValue.replace("/", ""));
           bound.setInetAddress(columnName, ipFixed);
         } catch (UnknownHostException e) {
           throw new RuntimeException(e);

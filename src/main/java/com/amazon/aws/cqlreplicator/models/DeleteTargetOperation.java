@@ -4,7 +4,6 @@ package com.amazon.aws.cqlreplicator.models;
 
 import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
 
-import java.util.Arrays;
 import java.util.Map;
 
 /** Defines deletion in target and ledger */

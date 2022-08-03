@@ -37,10 +37,12 @@ public class Starter implements Callable<Integer> {
   protected static Timer timer = new Timer("Timer");
   protected static TimerTask task;
   protected static Properties config;
+
   @CommandLine.Option(
       names = {"--pathToConfig"},
-      description = "Path to config.yaml file")
+      description = "Path to config.properties file")
   private static String pathToConfig = "";
+
   private static long replicationDelay;
   private static long statsDelay;
   private static CacheStorage pkCacheForClusteringKeys;
@@ -78,8 +80,8 @@ public class Starter implements Callable<Integer> {
 
   /** Responsible for running each task in a timer loop */
   public static void main(String[] args) {
-    long delay = 0;
-    boolean isStats = false;
+    var delay = 0L;
+    var isStats = false;
 
     int arg = 0;
     for (String param : args) {
@@ -94,7 +96,7 @@ public class Starter implements Callable<Integer> {
 
     if (pathToConfig == "") pathToConfig = System.getenv("CQLREPLICATOR_CONF");
 
-    ConfigReader configReader = new ConfigReader(pathToConfig);
+    var configReader = new ConfigReader(pathToConfig);
 
     try {
       config = configReader.getConfig();

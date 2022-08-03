@@ -34,6 +34,7 @@
         <memcached.version>2.12.3</memcached.version>
         <cbor.version>2.12.3</cbor.version>
         <snappy.version>1.1.8.4</snappy.version>
+        <lz4.version>1.4.1</lz4.version>
     </properties>
     <build>
         <plugins>
@@ -121,6 +122,11 @@
             <version>${resilience4j.version}</version>
         </dependency>
         <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-ratelimiter</artifactId>
+            <version>${resilience4j.version}</version>
+        </dependency>
+        <dependency>
             <groupId>com.fasterxml.jackson.dataformat</groupId>
             <artifactId>jackson-dataformat-yaml</artifactId>
             <version>${jackson.version}</version>
@@ -205,6 +211,11 @@
             <groupId>org.xerial.snappy</groupId>
             <artifactId>snappy-java</artifactId>
             <version>${snappy.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.lz4</groupId>
+            <artifactId>lz4-java</artifactId>
+            <version>${lz4.version}</version>
         </dependency>
     </dependencies>
     <licenses>

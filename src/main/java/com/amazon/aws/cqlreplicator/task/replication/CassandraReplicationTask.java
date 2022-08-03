@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.task.replication;
 
-import com.amazon.aws.cqlreplicator.models.*;
+import com.amazon.aws.cqlreplicator.models.LedgerMetaData;
+import com.amazon.aws.cqlreplicator.models.PartitionsMetaData;
+import com.amazon.aws.cqlreplicator.models.QueryLedgerItemByPk;
+import com.amazon.aws.cqlreplicator.models.StatsMetaData;
 import com.amazon.aws.cqlreplicator.storage.*;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
 import com.amazon.aws.cqlreplicator.util.StatsCounter;
@@ -14,14 +17,12 @@ import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
 import com.datastax.oss.driver.shaded.guava.common.collect.MapDifference;
 import com.datastax.oss.driver.shaded.guava.common.collect.Maps;
-import com.datastax.oss.driver.shaded.guava.common.util.concurrent.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 
@@ -40,8 +41,8 @@ public class CassandraReplicationTask extends AbstractTask {
   private static TargetStorageOnKeyspaces targetStorageOnKeyspaces;
   private static LedgerStorageOnKeyspaces ledgerStorageOnKeyspaces;
   private static Map<String, LinkedHashMap<String, String>> cassandraSchemaMetadata;
-  private final Properties config;
   private static StatsCounter statsCounter;
+  private final Properties config;
 
   public CassandraReplicationTask(Properties config) {
     this.config = config;
@@ -54,8 +55,8 @@ public class CassandraReplicationTask extends AbstractTask {
 
   private static String transformer(String input, Properties config) {
     if (config.getProperty("TRANSFORM_INBOUND_REQUEST").equals("true")) {
-      IonEngine ionEngine = new IonEngine();
-      String res = ionEngine.query(config.getProperty("TRANSFORM_SQL"), input);
+      var ionEngine = new IonEngine();
+      var res = ionEngine.query(config.getProperty("TRANSFORM_SQL"), input);
       return res.substring(1, res.length() - 1);
     }
     return input;
@@ -65,27 +66,24 @@ public class CassandraReplicationTask extends AbstractTask {
       SimpleStatement simpleStatement,
       LedgerMetaData ledgerMetaData,
       boolean setStartReplicationPoint,
-      long ts) {
+      long ts, String ops) {
     if (!setStartReplicationPoint) {
       targetStorageOnKeyspaces.write(simpleStatement);
       ledgerStorageOnKeyspaces.writeRowMetadata(ledgerMetaData);
+      statsCounter.incrementStat(ops);
+
     } else {
       if (ledgerMetaData.getLastWriteTime() > ts) {
         targetStorageOnKeyspaces.write(simpleStatement);
         ledgerStorageOnKeyspaces.writeRowMetadata(ledgerMetaData);
+        statsCounter.incrementStat(ops);
       }
     }
   }
 
-  private void replicateCassandraRow(
-      Row row,
-      String[] pks,
-      String[] cls,
-      int timeoutRateLimiter,
-      RateLimiter rateLimiter,
-      CacheStorage pkCache) {
+  private void replicateCassandraRow(Row row, String[] pks, String[] cls, CacheStorage pkCache) {
 
-    String[] pk = REGEX_PIPE.split(row.getString("cc"));
+    var pk = REGEX_PIPE.split(row.getString("cc"));
     Map<String, Long> ledgerHashMap = new HashMap<>();
     Map<String, Long> sourceHashMap = new HashMap<>();
     Map<String, String> jsonColumnHashMapPerPartition = new HashMap<>();
@@ -95,25 +93,25 @@ public class CassandraReplicationTask extends AbstractTask {
 
     int i = 0;
     for (String cl : pks) {
-      String type = cassandraSchemaMetadata.get("partition_key").get(cl);
+      var type = cassandraSchemaMetadata.get("partition_key").get(cl);
       boundStatementCassandraBuilder =
           aggregateBuilder(type, cl, pk[i], boundStatementCassandraBuilder);
       i++;
     }
-
-    List<Row> cassandraResult = sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
+    // TODO: Move to async paging
+    var cassandraResult = sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
 
     for (Row compareRow : cassandraResult) {
       String query;
       long ts;
-      Payload jsonPayload =
+      var jsonPayload =
           Utils.convertToJson(
               compareRow.getString(0), config.getProperty("WRITETIME_COLUMNS"), cls, pks);
       ts = jsonPayload.getTimestamp();
 
       Map<String, String> clusteringColumnsMapping = jsonPayload.getClusteringColumns();
 
-      String payload = transformer(jsonPayload.getPayload(), config);
+      var payload = transformer(jsonPayload.getPayload(), config);
 
       LOGGER.debug("PAYLOAD: {}", payload);
       // Prepare the JSON CQL statement with "USING TIMESTAMP" from the source
@@ -136,14 +134,14 @@ public class CassandraReplicationTask extends AbstractTask {
 
       for (String cln : cls) {
         if (!cln.equals(CLUSTERING_COLUMN_ABSENT)) {
-          String val = clusteringColumnsMapping.get(cln);
+          var val = clusteringColumnsMapping.get(cln);
           clTmp.add(val);
         } else {
           clTmp.add(REPLICATION_NOT_APPLICABLE);
         }
       }
-      String cl = String.join("|", clTmp);
-      String hk = String.format("%s|%s", row.getString("cc"), cl);
+      var cl = String.join("|", clTmp);
+      var hk = String.format("%s|%s", row.getString("cc"), cl);
       // if hk is not in the global pk cache, add it
       try {
         if (!pkCache.containsKey(hk)) {
@@ -202,12 +200,12 @@ public class CassandraReplicationTask extends AbstractTask {
                 config.getProperty("TARGET_TABLE"),
                 row.getString("cc"),
                 k);
-            SimpleStatement simpleStatement =
+            var simpleStatement =
                 SimpleStatement.newInstance(jsonColumnHashMapPerPartition.get(k))
                     .setIdempotent(true)
                     .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
 
-            LedgerMetaData ledgerMetaData =
+            var ledgerMetaData =
                 new LedgerMetaData(
                     row.getString("cc"),
                     k,
@@ -216,21 +214,13 @@ public class CassandraReplicationTask extends AbstractTask {
                     Integer.parseInt(config.getProperty("TILE")),
                     valueOnClient,
                     v.leftValue());
-            StatsMetaData statsMetaData =
-                new StatsMetaData(
-                    Integer.parseInt(config.getProperty("TILE")),
-                    config.getProperty("TARGET_KEYSPACE"),
-                    config.getProperty("TARGET_TABLE"),
-                    "UPDATE");
-
-            rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
             dataLoader(
                 simpleStatement,
                 ledgerMetaData,
                 Boolean.parseBoolean(config.getProperty("ENABLE_REPLICATION_POINT")),
-                Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")));
-            statsCounter.incrementStat("UPDATE");
+                Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")),
+                "UPDATE");
           }
         });
 
@@ -242,13 +232,13 @@ public class CassandraReplicationTask extends AbstractTask {
               config.getProperty("TARGET_TABLE"),
               row.getString("cc"),
               k);
-          ZonedDateTime valueOnClient = ZonedDateTime.now();
-          SimpleStatement simpleStatement =
+          var valueOnClient = ZonedDateTime.now();
+          var simpleStatement =
               SimpleStatement.newInstance(jsonColumnHashMapPerPartition.get(k))
                   .setIdempotent(true)
                   .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
 
-          LedgerMetaData ledgerMetaData =
+          var ledgerMetaData =
               new LedgerMetaData(
                   row.getString("cc"),
                   k,
@@ -257,22 +247,13 @@ public class CassandraReplicationTask extends AbstractTask {
                   Integer.parseInt(config.getProperty("TILE")),
                   valueOnClient,
                   v);
-          StatsMetaData statsMetaData =
-              new StatsMetaData(
-                  Integer.parseInt(config.getProperty("TILE")),
-                  config.getProperty("TARGET_KEYSPACE"),
-                  config.getProperty("TARGET_TABLE"),
-                  "INSERT");
-
-          rateLimiter.tryAcquire(1, timeoutRateLimiter, TimeUnit.MILLISECONDS);
 
           dataLoader(
               simpleStatement,
               ledgerMetaData,
               Boolean.parseBoolean(config.getProperty("ENABLE_REPLICATION_POINT")),
-              Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")));
-          statsCounter.incrementStat("INSERT");
-
+              Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")),
+                  "INSERT");
         });
     LOGGER.debug("Completed scanning rows in {}", row.getString("cc"));
   }
@@ -281,39 +262,27 @@ public class CassandraReplicationTask extends AbstractTask {
   protected void doPerformTask(CacheStorage pkCache, Utils.CassandraTaskTypes taskName)
       throws InterruptedException, ExecutionException, TimeoutException {
 
-    int permits = Integer.parseInt(config.getProperty("RATELIMITER_PERMITS"));
-    int timeoutRateLimiter = Integer.parseInt(config.getProperty("RATELIMITER_TIMEOUT_MS"));
-    RateLimiter rateLimiter = RateLimiter.create(permits);
-
-    PartitionsMetaData partitionsMetaData =
+    var partitionsMetaData =
         new PartitionsMetaData(
             Integer.parseInt(config.getProperty("TILE")),
             config.getProperty("TARGET_KEYSPACE"),
             config.getProperty("TARGET_TABLE"));
 
-    String[] partitionKeyNames =
+    var partitionKeyNames =
         cassandraSchemaMetadata.get("partition_key").keySet().toArray(new String[0]);
-    String[] clusteringColumnNames =
+    var clusteringColumnNames =
         cassandraSchemaMetadata.get("clustering").keySet().toArray(new String[0]);
 
-    //List<Row> ledgerPks = keyspacesExtractor.extract(partitionsMetaData);
-    List<Row> ledgerPks = ledgerStorageOnKeyspaces.readPartitionsMetadata(partitionsMetaData);
+    var ledgerPks = ledgerStorageOnKeyspaces.readPartitionsMetadata(partitionsMetaData);
     LOGGER.info(
         "The number of pre-loaded elements in the cache is {} ",
         pkCache.getSize(Integer.parseInt(config.getProperty("TILE"))));
 
     ledgerPks.parallelStream()
         .forEach(
-            row ->
-                replicateCassandraRow(
-                    row,
-                    partitionKeyNames,
-                    clusteringColumnNames,
-                    timeoutRateLimiter,
-                    rateLimiter,
-                    pkCache));
+            row -> replicateCassandraRow(row, partitionKeyNames, clusteringColumnNames, pkCache));
 
-    StatsMetaData statsMetaDataInserts =
+    var statsMetaDataInserts =
         new StatsMetaData(
             Integer.parseInt(config.getProperty("TILE")),
             config.getProperty("TARGET_KEYSPACE"),
@@ -321,12 +290,11 @@ public class CassandraReplicationTask extends AbstractTask {
             "INSERT");
 
     statsMetaDataInserts.setValue(statsCounter.getStat("INSERT"));
-    //targetLoader.load(statsMetaDataInserts);
-    if (statsMetaDataInserts.getValue()>0) {
-    targetStorageOnKeyspaces.writeStats(statsMetaDataInserts);
+    if (statsMetaDataInserts.getValue() > 0) {
+      targetStorageOnKeyspaces.writeStats(statsMetaDataInserts);
     }
 
-    StatsMetaData statsMetaDataUpdates =
+    var statsMetaDataUpdates =
         new StatsMetaData(
             Integer.parseInt(config.getProperty("TILE")),
             config.getProperty("TARGET_KEYSPACE"),

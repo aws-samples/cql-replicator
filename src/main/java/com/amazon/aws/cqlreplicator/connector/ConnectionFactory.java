@@ -34,11 +34,9 @@ public class ConnectionFactory {
   }
 
   public MemcachedClient buildMemcachedSession() throws IOException {
-    MemcachedClient client =
-        new MemcachedClient(
-            new InetSocketAddress(
-                config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT"),
-                Integer.parseInt(config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT"))));
-    return client;
+    return new MemcachedClient(
+        new InetSocketAddress(
+            config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT"),
+            Integer.parseInt(config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT"))));
   }
 }

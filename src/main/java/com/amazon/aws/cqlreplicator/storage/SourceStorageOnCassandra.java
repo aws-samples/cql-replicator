@@ -27,8 +27,8 @@ public class SourceStorageOnCassandra {
   private final Properties config;
   private final PreparedStatement psCassandra;
 
-  private final String BIG_INT_MAX_VALUE = String.valueOf(2^Integer.MAX_VALUE);
-  private final String BIG_INT_MIN_VALUE = String.valueOf(-2^Integer.MIN_VALUE);
+  private final String BIG_INT_MAX_VALUE = String.valueOf(2 ^ Integer.MAX_VALUE);
+  private final String BIG_INT_MIN_VALUE = String.valueOf(-2 ^ Integer.MIN_VALUE);
 
   public SourceStorageOnCassandra(Properties config) {
     this.config = config;
@@ -77,7 +77,7 @@ public class SourceStorageOnCassandra {
           ranges.add(new ImmutablePair<>(String.valueOf(Long.MIN_VALUE), String.valueOf(end)));
         }
       }
-      //To support Cassandra<2.1 clusters
+      // To support Cassandra<2.1 clusters
       if (range.getStart() instanceof RandomToken) {
         BigInteger start = ((RandomToken) range.getStart()).getValue();
         BigInteger end = ((RandomToken) range.getEnd()).getValue();
@@ -88,7 +88,7 @@ public class SourceStorageOnCassandra {
           ranges.add(new ImmutablePair<>(BIG_INT_MIN_VALUE, String.valueOf(end)));
         }
       }
-      }
+    }
     return ranges;
   }
 

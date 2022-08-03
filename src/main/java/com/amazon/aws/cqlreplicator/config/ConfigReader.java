@@ -17,7 +17,7 @@ public class ConfigReader {
 
   public Properties getConfig() throws IOException {
 
-    Properties properties = new Properties();
+    var properties = new Properties();
     properties.load(new FileInputStream(String.format("%s/%s", pathToConfig, configName)));
 
     return properties;

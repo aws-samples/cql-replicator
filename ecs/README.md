@@ -144,7 +144,7 @@ if you want to stop the cluster execute stop_ecs_cluster.sh within the cluster n
  deregister_ecs_task.sh CQLReplicator 16
 ```
 ## Cost consideration
-The original the project was built for m6i.large VMs, but AWS introduced a new EC2 A1.
+Originally the project built for m6i.large VMs, but AWS introduced a new EC2 A1.
 Amazon EC2 A1 instances deliver significant cost savings for scale-out and Arm-based applications such as CQLReplicator, 
 and distributed data stores that are supported by the extensive Arm ecosystem. A1 instances are the first EC2 instances 
 powered by AWS Graviton Processors that feature 64-bit Arm Neoverse cores and custom silicon designed by AWS. 

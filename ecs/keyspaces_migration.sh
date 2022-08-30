@@ -29,6 +29,9 @@ do
   ./register_ecs_task_def.sh $value $@
 done
 
+# Create a CloudWatch log-group
+aws logs create-log-group --log-group-name awslogs-cqlreplicator
+
 SUBNETS=$8
 VPC=$9
 SG=${10}

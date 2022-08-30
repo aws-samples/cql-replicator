@@ -40,37 +40,37 @@ The below steps only for testing purposes, for production please use [Amazon ECS
        TARGET_TABLE: test_cql_replicator
        
        # Source query that runs against Cassandra cluster per partition key
-       SOURCE_CQL_QUERY: SELECT json key,col0,col1,col2,col3,col4,col5,col6,col7,col8,writetime(col2),writetime(col4) FROM ks_test_cql_replicator.test_cql_replicator WHERE key=:key
-       WRITETIME_COLUMNS: col2, col4
-       REPLICATE_REFRESH_PERIOD_SEC: 5
-       REPLICATE_WITH_TIMESTAMP: false
-       REGISTER_PARTITION_DELETES: false
-       REPLICATE_RETRY_MAXATTEMPTS: 512
+       SOURCE_CQL_QUERY=SELECT json key,col0,col1,col2,col3,col4,col5,col6,col7,col8,writetime(col2),writetime(col4) FROM ks_test_cql_replicator.test_cql_replicator WHERE key=:key
+       WRITETIME_COLUMNS=col2, col4
+       REPLICATE_REFRESH_PERIOD_SEC=5
+       REPLICATE_WITH_TIMESTAMP=false
+       REGISTER_PARTITION_DELETES=false
+       REPLICATE_RETRY_MAXATTEMPTS=512
        
        # Refresh period of statistics
-       STATS_REFRESH_PERIOD_SEC: 60
+       STATS_REFRESH_PERIOD_SEC=60
        
        # Use PartiQL statements to transform JSON Cassandra rows into a new Keyspaces' schema if need it, https://partiql.org/tutorial.html
        # inputDocument represents the source cassandra row in the PartiQL statement
        # For example, transform JSON key,col0,col1,col2,col3,col4,col5,col6,col7,col8 to JSON id, col0
-       TRANSFORM_INBOUND_REQUEST: false
-       TRANSFORM_SQL: SELECT \"key\" as \"id\", \"col0\" as \"new_col\" FROM inputDocument
-       TRANSFORM_PARTITION_KEY: id
+       TRANSFORM_INBOUND_REQUEST=false
+       TRANSFORM_SQL=SELECT \"key\" as \"id\", \"col0\" as \"new_col\" FROM inputDocument
+       TRANSFORM_PARTITION_KEY=id
        
        # Rate limiting the CQLReplicator instance
-       RATELIMITER_PERMITS: 1500
-       RATELIMITER_TIMEOUT_MS: 1000
+       RATELIMITER_PERMITS=1500
+       RATELIMITER_TIMEOUT_MS=1000
        
-       INTERNAL_STORAGE_INIT_CAPACITY: 687500
-       INTERNAL_STORAGE_LOAD_FACTOR: 0.75f
-       INTERNAL_STORAGE_CONCURRENCY_LEVEL: 2
+       INTERNAL_STORAGE_INIT_CAPACITY=687500
+       INTERNAL_STORAGE_LOAD_FACTOR=0.75f
+       INTERNAL_STORAGE_CONCURRENCY_LEVEL=2
        
-       EXTERNAL_MEMCACHED_STORAGE: true
-       EXTERNAL_MEMCACHED_STORAGE_ENDPOINT: localhost
-       EXTERNAL_MEMCACHED_STORAGE_PORT: 11211
+       EXTERNAL_MEMCACHED_STORAGE=true
+       EXTERNAL_MEMCACHED_STORAGE_ENDPOINT=localhost
+       EXTERNAL_MEMCACHED_STORAGE_PORT=11211
        
-       ENABLE_REPLICATION_POINT: false
-       STARTING_REPLICATION_TIMESTAMP: 1658322868006000
+       ENABLE_REPLICATION_POINT=false
+       STARTING_REPLICATION_TIMESTAMP=1658322868006000
 
 * Configure connection/authentication for your source Cassandra in CassandraConnector.conf
 * Configure connection/authentication for your target Amazon Keyspaces in KeyspacesConnector.conf

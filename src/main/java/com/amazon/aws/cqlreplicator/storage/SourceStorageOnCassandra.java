@@ -3,6 +3,8 @@
 package com.amazon.aws.cqlreplicator.storage;
 
 import com.amazon.aws.cqlreplicator.connector.ConnectionFactory;
+import com.amazon.aws.cqlreplicator.models.PrimaryKey;
+import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.ConsistencyLevel;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.*;
@@ -15,6 +17,8 @@ import org.apache.commons.lang3.tuple.ImmutablePair;
 
 import java.math.BigInteger;
 import java.util.*;
+import java.util.concurrent.CompletionStage;
+import java.util.regex.Pattern;
 
 /** Responsible for providing extracting logic from source cluster */
 public class SourceStorageOnCassandra {
@@ -30,6 +34,8 @@ public class SourceStorageOnCassandra {
   private final String BIG_INT_MAX_VALUE = String.valueOf(2 ^ Integer.MAX_VALUE);
   private final String BIG_INT_MIN_VALUE = String.valueOf(-2 ^ Integer.MIN_VALUE);
 
+  private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
+
   public SourceStorageOnCassandra(Properties config) {
     this.config = config;
     ConnectionFactory connectionFactory = new ConnectionFactory(config);
@@ -37,6 +43,56 @@ public class SourceStorageOnCassandra {
     this.psCassandra = cassandraSession.prepare(config.getProperty("SOURCE_CQL_QUERY"));
     metaData =
         getColumns(config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"));
+  }
+
+  public boolean findPrimaryKey(PrimaryKey primaryKey, String[] partitionKeyNames, String[] clusteringKeyNames) {
+    List<String> whereClause = new ArrayList<>();
+
+    var pkValues = REGEX_PIPE.split(primaryKey.getPartitionKeys());
+    var ckValues = REGEX_PIPE.split(primaryKey.getClusteringColumns());
+
+    for (var col : partitionKeyNames) {
+      whereClause.add(String.format("%s=:%s", col, col));
+    }
+    for (var col : clusteringKeyNames) {
+      whereClause.add(String.format("%s=:%s", col, col));
+    }
+
+    var pks = String.join(",", partitionKeyNames);
+    var finalWhereClause = String.join(" AND ", whereClause);
+
+    String selectStatement =
+        String.format(
+            "SELECT %s FROM %s.%s WHERE %s",
+             pks,
+             config.getProperty("TARGET_KEYSPACE"),
+             config.getProperty("TARGET_TABLE"),
+            finalWhereClause);
+
+    PreparedStatement psSelectStatement = cassandraSession.prepare(selectStatement);
+    BoundStatementBuilder bsSelectStatement = psSelectStatement.boundStatementBuilder();
+
+    int i = 0;
+    for (var cl : partitionKeyNames) {
+      var type = getMetaData().get("partition_key").get(cl);
+      bsSelectStatement =
+              Utils.aggregateBuilder(
+                      type, cl, pkValues[i], bsSelectStatement);
+      i++;
+    }
+
+    int k = 0;
+    for (var cl : clusteringKeyNames) {
+      var type = getMetaData().get("clustering").get(cl);
+      bsSelectStatement =
+              Utils.aggregateBuilder(
+                      type, cl, ckValues[k], bsSelectStatement);
+      k++;
+    }
+
+    Optional<Row> result = Optional.ofNullable(cassandraSession.execute(bsSelectStatement.setConsistencyLevel(ConsistencyLevel.ONE).build()).one());
+
+    return result.isPresent();
   }
 
   public List<Row> findPartitionsByTokenRange(String pksStr, long startRange, long endRange) {
@@ -97,6 +153,11 @@ public class SourceStorageOnCassandra {
     return resultSet.all();
   }
 
+  public CompletionStage<AsyncResultSet> extractAsync (Object object) {
+    return cassandraSession.executeAsync(((BoundStatementBuilder) object).build());
+  }
+
+
   private PreparedStatement getPartitionKeysByTokenRange(
       String partitionKeyStr, long startRange, long endRange) {
 
@@ -125,7 +186,6 @@ public class SourceStorageOnCassandra {
               partitionKeyStr,
               config.getProperty("TARGET_KEYSPACE"),
               config.getProperty("TARGET_TABLE"),
-              partitionKeyStr,
               partitionKeyStr);
     }
 

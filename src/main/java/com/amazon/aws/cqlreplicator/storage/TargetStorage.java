@@ -5,12 +5,14 @@
 
 package com.amazon.aws.cqlreplicator.storage;
 
+import java.util.concurrent.ExecutionException;
+
 public abstract class TargetStorage<O, R, B, S> {
   public abstract void tearDown();
 
   public abstract R execute(B b);
 
-  public abstract void write(S s);
+  public abstract boolean write(S s) throws ExecutionException, InterruptedException;
 
   public abstract void writeStats(O o);
 

@@ -30,6 +30,8 @@ TASK_DEF=$(jq --null-input \
   --arg partition_command "$PARTITION_COMMAND" \
   --arg exec_role "$EXEC_ROLE" \
   --arg task_role "$TASK_ROLE" \
+  --arg awslogname_pd "pd_tile$TILE" \
+  --arg awslogname_rd "rd_tile$TILE" \
   '{
   "executionRoleArn": $exec_role,
   "requiresCompatibilities": [
@@ -38,6 +40,21 @@ TASK_DEF=$(jq --null-input \
   "inferenceAccelerators": [],
   "containerDefinitions": [
     {
+      "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "awslogs-cqlreplicator",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": $awslogname_rd
+                }
+            },
+      "mountPoints": [
+                {
+                    "sourceVolume": "database",
+                    "containerPath": "/opt",
+                    "readOnly": false
+                }
+      ],
       "entryPoint": [
         "cqlreplicator.sh"
       ],
@@ -45,7 +62,7 @@ TASK_DEF=$(jq --null-input \
       "command": [
         $rows_command
       ],
-      "cpu": 1,
+      "cpu": 2,
       "environment": [
         {
           "name": "BUCKETNAME",
@@ -79,11 +96,11 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "JAVA_OPTS",
-          "value": "-XX:+HeapDumpOnOutOfMemoryError"
+          "value": "-Xms2048m -Xmx2048m -XX:+HeapDumpOnOutOfMemoryError"
         }
       ],
       "workingDirectory": "/root/CQLReplicator",
-      "memory": 1024,
+      "memory": 3584,
       "image": $image,
       "essential": true,
       "dockerLabels": {
@@ -92,6 +109,21 @@ TASK_DEF=$(jq --null-input \
       "name": "RowReplicator"
     },
     {
+    "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "awslogs-cqlreplicator",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix":$awslogname_pd
+                }
+            },
+      "mountPoints": [
+                {
+                    "sourceVolume": "database",
+                    "containerPath": "/opt",
+                    "readOnly": false
+                }
+      ],
       "entryPoint": [
         "cqlreplicator.sh"
       ],
@@ -99,7 +131,7 @@ TASK_DEF=$(jq --null-input \
       "command": [
         $partition_command
       ],
-      "cpu": 1,
+      "cpu": 2,
       "environment": [
         {
           "name": "BUCKETNAME",
@@ -134,22 +166,31 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "JAVA_OPTS",
-          "value": "-XX:+HeapDumpOnOutOfMemoryError"
+          "value": "-Xms2048m -Xmx2048m -XX:+HeapDumpOnOutOfMemoryError"
         }
       ],
-      "mountPoints": [],
       "workingDirectory": "/root/CQLReplicator/bin",
-      "memory": 1024,
+      "memory": 3584,
       "volumesFrom": [],
       "image": $image,
       "essential": true,
       "name": "PartitionReplicator"
     }
   ],
-  "volumes": [],
+  "volumes": [{
+        "name": "database",
+        "dockerVolumeConfiguration" : {
+            "scope": "shared",
+            "autoprovision": true,
+            "driver": "local",
+            "labels": {
+                "database": "levelDB"
+            }
+        }
+    }],
   "networkMode": "bridge",
-  "memory": "3 gb",
-  "cpu": "2 vCPU",
+  "memory": "7 gb",
+  "cpu": "4 vCPU",
   "taskRoleArn": $task_role,
   "placementConstraints": [],
   "tags": [{

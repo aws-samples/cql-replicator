@@ -2,11 +2,15 @@
 .idea/
 *.iml
 *.iws
+*.jfr
 .gradle
 # Maven
 target/
 deploy/
 build/
+ledger_v4_0_pd.ldb/
+ledger_v4_0_rd.ldb/
+ledger_v4_0_pd.ldb-snapshot/
 
 # Ignore Gradle GUI config
 gradle-app.setting

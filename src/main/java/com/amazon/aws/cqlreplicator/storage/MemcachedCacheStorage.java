@@ -17,9 +17,12 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import org.apache.commons.codec.binary.Base64;
+
 public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
 
   private static final int TIMEOUT_IN_SEC = 5;
+  private static Base64 base64 = new Base64();
   private MemcachedClient memCachedClient;
   private String prefix;
   private String operation;
@@ -27,6 +30,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   private String targetTable;
   private String externalMemcachedStorageEndpoint;
   private String externalMemcachedStoragePort;
+
 
   public MemcachedCacheStorage(Properties config, String operation) {
     this.operation = operation;
@@ -57,14 +61,6 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     }
     memCachedClient.asyncIncr(cntKey, 1);
-    /*
-    if (contains) {
-      memCachedClient.asyncIncr(cntKey, 1);
-    } else {
-      memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
-      memCachedClient.asyncIncr(cntKey, 1);
-    }
-     */
   }
 
   private void counterDecrement(int tile, String operationType) {
@@ -84,14 +80,17 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
 
   @Override
   public Object get(Object key) {
-    return memCachedClient.get(String.format("%s|%s", prefix, key));
+    return
+            memCachedClient.get(
+                    new String(base64.encode(String.format("%s|%s", prefix, key).getBytes())));
   }
 
   @Override
   public void put(Object key, Object value)
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
-        .set(String.format("%s|%s", prefix, key), 0, value)
+        .set(
+                new String(base64.encode(String.format("%s|%s", prefix, key).getBytes())), 0, value)
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
   }
 
@@ -99,7 +98,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   public void add(int tile, Object key, Object value)
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
-        .add(String.format("%s|%s", prefix, key), 0, value)
+        .add(new String(base64.encode(String.format("%s|%s", prefix, key).getBytes())), 0, value)
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     counterIncrement(tile);
   }
@@ -123,10 +122,11 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   @Override
   public boolean containsKey(Object key)
       throws InterruptedException, ExecutionException, TimeoutException {
-    boolean contains = false;
+    boolean contains;
     contains =
         memCachedClient
-                .asyncGet(String.format("%s|%s", prefix, key))
+                .asyncGet(
+                        new String(base64.encode(String.format("%s|%s", prefix, key).getBytes())))
                 .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS)
             != null;
     return contains;
@@ -136,7 +136,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   public void remove(int tile, Object key)
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
-        .delete(String.format("%s|%s", prefix, key))
+        .delete(new String(base64.encode(String.format("%s|%s", prefix, key).getBytes())))
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     counterDecrement(tile, operation);
   }
@@ -146,7 +146,8 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
       throws InterruptedException, ExecutionException, TimeoutException {
     var ksAndTable = String.format("%s|%s", targetKeyspace, targetTable);
     memCachedClient
-        .delete(String.format("%s|%s|%s", operationType, ksAndTable, key))
+        .delete(
+                new String(base64.encode(String.format("%s|%s|%s", operationType, ksAndTable, key).getBytes())))
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     counterDecrement(tile, operationType);
   }
@@ -164,14 +165,6 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     }
     memCachedClient.asyncIncr(cntKey, 1);
-    /*
-    if (contains) {
-      memCachedClient.asyncIncr(cntKey, 1);
-    } else {
-      memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
-      memCachedClient.asyncIncr(cntKey, 1);
-    }
-     */
   }
 
   public void decrByOne(Object key) {

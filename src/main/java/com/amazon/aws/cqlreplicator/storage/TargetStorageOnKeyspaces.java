@@ -7,6 +7,7 @@ package com.amazon.aws.cqlreplicator.storage;
 
 import com.amazon.aws.cqlreplicator.connector.ConnectionFactory;
 import com.amazon.aws.cqlreplicator.models.DeleteTargetOperation;
+import com.amazon.aws.cqlreplicator.models.PrimaryKey;
 import com.amazon.aws.cqlreplicator.models.QueryStats;
 import com.amazon.aws.cqlreplicator.models.StatsMetaData;
 import com.amazon.aws.cqlreplicator.util.Utils;
@@ -15,9 +16,6 @@ import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.cql.*;
 import com.datastax.oss.driver.api.core.servererrors.*;
 import io.github.resilience4j.core.IntervalFunction;
-//import io.github.resilience4j.ratelimiter.RateLimiter;
-//import io.github.resilience4j.ratelimiter.RateLimiterConfig;
-//import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
@@ -25,10 +23,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Properties;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 public class TargetStorageOnKeyspaces
     extends TargetStorage<Object, List<Row>, BatchStatementBuilder, SimpleStatement> {
@@ -37,15 +36,15 @@ public class TargetStorageOnKeyspaces
   private static CqlSession cqlSession;
   private static PreparedStatement psWriteStats;
   private static PreparedStatement psReadStats;
-  //private static RateLimiter limiter;
-  //private static RateLimiter.EventPublisher publisher1;
-  private Retry retry;
-  private Retry.EventPublisher publisher;
+  private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
+  private static Retry retry;
+  private static Retry.EventPublisher publisher;
+  private final Properties config;
+  //private static final ScheduledExecutorService scheduler = new ScheduledThreadPoolExecutor(10);
 
   public TargetStorageOnKeyspaces(Properties properties) {
     var connectionFactory = new ConnectionFactory(properties);
     cqlSession = connectionFactory.buildCqlSession("KeyspacesConnector.conf");
-
     psWriteStats =
         cqlSession.prepare(
             "update replicator.stats set rows=rows+:value where tile=:tile and keyspacename=:keyspacename and tablename=:tablename and ops=:ops");
@@ -57,7 +56,7 @@ public class TargetStorageOnKeyspaces
         RetryConfig.custom()
             .maxAttempts(
                 Integer.parseInt(properties.getProperty("REPLICATE_RETRY_MAXATTEMPTS", "256")))
-            .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(30), 1.5))
+            .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(20), 1.1))
             .retryOnException(
                 keyspacesExceptions -> keyspacesExceptions instanceof QueryConsistencyException)
             .retryExceptions(
@@ -75,18 +74,7 @@ public class TargetStorageOnKeyspaces
     retry = registry.retry("TargetKeyspacesStorage");
     publisher = retry.getEventPublisher();
 
-    /*
-    var limiterConfig =
-        RateLimiterConfig.custom()
-                .limitForPeriod(Integer.parseInt(properties.getProperty("RATELIMITER_PERMITS")))
-                .limitRefreshPeriod(Duration.ofMillis(500))
-                .timeoutDuration(Duration.ofMillis(Integer.parseInt(properties.getProperty("RATELIMITER_TIMEOUT_MS"))))
-                .build();
-    var registryRL = RateLimiterRegistry.of(limiterConfig);
-    limiter = registryRL.rateLimiter("TargetKeyspacesStorage");
-    publisher1 = limiter.getEventPublisher();
-
-     */
+    this.config = properties;
   }
 
   @Override
@@ -100,42 +88,64 @@ public class TargetStorageOnKeyspaces
     publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event.toString()));
     publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
     return Retry.decorateSupplier(retry, supplier).get();
+  }
 
-    /*
-    Supplier<List<Row>> rateLimiterSupplier =
-        RateLimiter.decorateSupplier(
-            limiter, () -> cqlSession.execute(batchableStatement.build()).all());
-    publisher1.onSuccess(event -> LOGGER.debug("{}", event.toString()));
-    Supplier<List<Row>> supplier = Retry.decorateSupplier(retry, rateLimiterSupplier);
-    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
+  /*
+  public AsyncResultSet execute(SimpleStatement simpleStatement) throws ExecutionException, InterruptedException {
     publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event.toString()));
-    return Retry.decorateSupplier(retry, supplier).get();
-     */
+    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
+    CompletableFuture<AsyncResultSet> responseFuture = retry.executeCompletionStage(scheduler,
+            () -> cqlSession.executeAsync(simpleStatement)
+    ).toCompletableFuture();
+    return responseFuture.get();
+  }
+   */
+
+  public boolean execute(SimpleStatement simpleStatement) {
+    AtomicBoolean result = new AtomicBoolean(false);
+    Supplier<Row> supplier = () -> cqlSession.execute(simpleStatement).one();
+    Retry.decorateSupplier(retry, supplier).get();
+    publisher.onError(event -> {
+            LOGGER.error("Operation was failed on event {}", event.toString());
+            result.set(false);
+  });
+    publisher.onRetry(event ->
+            LOGGER.warn("Operation was retried on event {}", event.toString()));
+    publisher.onSuccess(event ->
+      result.set(true)
+    );
+    return result.get();
   }
 
   @Override
-  public void write(SimpleStatement statement) {
-    var batchableStatements = BatchStatement.builder(DefaultBatchType.UNLOGGED);
-    batchableStatements.addStatement(statement);
-    execute(batchableStatements);
+  public boolean write(SimpleStatement statement) {
+    return execute(statement);
   }
+
+  /*@Override
+  public AsyncResultSet write(SimpleStatement statement) throws ExecutionException, InterruptedException {
+    return execute(statement);
+  }
+
+   */
+
 
   @Override
   public void writeStats(Object o) {
     var statsMetadata = (StatsMetaData) o;
     var boundStatementBuilder =
-        psWriteStats
-            .boundStatementBuilder()
-            .setInt("tile", statsMetadata.getTile())
-            .setString("keyspacename", statsMetadata.getKeyspaceName())
-            .setString("tablename", statsMetadata.getTableName())
-            .setString("ops", statsMetadata.getOps())
-            .setLong("value", statsMetadata.getValue())
-            .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
+            psWriteStats
+                    .boundStatementBuilder()
+                    .setInt("tile", statsMetadata.getTile())
+                    .setString("keyspacename", statsMetadata.getKeyspaceName())
+                    .setString("tablename", statsMetadata.getTableName())
+                    .setString("ops", statsMetadata.getOps())
+                    .setLong("value", statsMetadata.getValue())
+                    .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
 
     var batchableStatements = BatchStatement.builder(DefaultBatchType.UNLOGGED);
     batchableStatements.addStatement(
-        boundStatementBuilder.setConsistencyLevel(ConsistencyLevel.QUORUM).build());
+            boundStatementBuilder.setConsistencyLevel(ConsistencyLevel.QUORUM).build());
 
     execute(batchableStatements);
   }
@@ -144,16 +154,70 @@ public class TargetStorageOnKeyspaces
   public List<Row> readStats(Object o) {
     var queryStats = (QueryStats) o;
     var boundStatementBuilder =
-        psReadStats
-            .boundStatementBuilder()
-            .setString("ops", queryStats.getOps())
-            .setString("keyspacename", queryStats.getKeyspaceName())
-            .setString("tablename", queryStats.getTableName());
+            psReadStats
+                    .boundStatementBuilder()
+                    .setString("ops", queryStats.getOps())
+                    .setString("keyspacename", queryStats.getKeyspaceName())
+                    .setString("tablename", queryStats.getTableName());
     var batchableStatements = BatchStatement.builder(DefaultBatchType.UNLOGGED);
     batchableStatements.addStatement(
-        boundStatementBuilder.setConsistencyLevel(ConsistencyLevel.LOCAL_ONE).build());
+            boundStatementBuilder.setConsistencyLevel(ConsistencyLevel.LOCAL_ONE).build());
 
     return execute(batchableStatements);
+  }
+
+  public void delete(PrimaryKey primaryKey, String[] partitionKeyNames, String[] clusteringKeyNames, Map<String, LinkedHashMap<String, String>> metadata) {
+    var batchableStatements = BatchStatement.builder(DefaultBatchType.UNLOGGED);
+    List<String> whereClause = new ArrayList<>();
+
+    var pkValues = REGEX_PIPE.split(primaryKey.getPartitionKeys());
+    var ckValues = REGEX_PIPE.split(primaryKey.getClusteringColumns());
+
+    for (var col : partitionKeyNames) {
+      whereClause.add(String.format("%s=:%s", col, col));
+    }
+    for (var col : clusteringKeyNames) {
+      whereClause.add(String.format("%s=:%s", col, col));
+    }
+
+    var finalWhereClause = String.join(" AND ", whereClause);
+
+    String deleteStatement =
+            String.format(
+                    "DELETE FROM %s.%s WHERE %s",
+                    config.getProperty("TARGET_KEYSPACE"),
+                    config.getProperty("TARGET_TABLE"),
+                    finalWhereClause);
+
+    PreparedStatement psDeleteStatement = cqlSession.prepare(deleteStatement);
+    BoundStatementBuilder bsDeleteStatement = psDeleteStatement.boundStatementBuilder();
+
+    int i = 0;
+    for (var cl : partitionKeyNames) {
+      var type = metadata.get("partition_key").get(cl);
+      bsDeleteStatement =
+              Utils.aggregateBuilder(
+                      type, cl, pkValues[i], bsDeleteStatement);
+      i++;
+    }
+
+    int k = 0;
+    for (var cl : clusteringKeyNames) {
+      var type = metadata.get("clustering").get(cl);
+      bsDeleteStatement =
+              Utils.aggregateBuilder(
+                      type, cl, ckValues[k], bsDeleteStatement);
+      k++;
+    }
+
+    batchableStatements.addStatement(
+            bsDeleteStatement
+                    .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM)
+                    .setIdempotence(true)
+                    .build());
+
+    execute(batchableStatements);
+
   }
 
   @Override

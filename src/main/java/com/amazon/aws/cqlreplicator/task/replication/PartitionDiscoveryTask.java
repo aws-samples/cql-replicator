@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.task.replication;
 
-import com.amazon.aws.cqlreplicator.models.DeleteTargetOperation;
-import com.amazon.aws.cqlreplicator.models.PartitionMetaData;
-import com.amazon.aws.cqlreplicator.models.QueryLedgerItemByPk;
-import com.amazon.aws.cqlreplicator.models.StatsMetaData;
+import com.amazon.aws.cqlreplicator.models.*;
 import com.amazon.aws.cqlreplicator.storage.*;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
 import com.amazon.aws.cqlreplicator.util.StatsCounter;
@@ -43,7 +40,8 @@ public class PartitionDiscoveryTask extends AbstractTask {
   private static SourceStorageOnCassandra sourceStorageOnCassandra;
   private static Map<String, LinkedHashMap<String, String>> metaData;
   private static StatsCounter statsCounter;
-  private static LedgerStorageOnKeyspaces ledgerStorageOnKeyspaces;
+  private static LedgerStorageOnLevelDB ledgerStorageOnLevelDB;
+
   private static TargetStorageOnKeyspaces targetStorageOnKeyspaces;
   private final Properties config;
 
@@ -52,12 +50,12 @@ public class PartitionDiscoveryTask extends AbstractTask {
    *
    * @param config the array to be sorted
    */
-  public PartitionDiscoveryTask(Properties config) {
+  public PartitionDiscoveryTask(Properties config) throws IOException {
     this.config = config;
     sourceStorageOnCassandra = new SourceStorageOnCassandra(config);
     metaData = sourceStorageOnCassandra.getMetaData();
     statsCounter = new StatsCounter();
-    ledgerStorageOnKeyspaces = new LedgerStorageOnKeyspaces(config);
+    ledgerStorageOnLevelDB = new LedgerStorageOnLevelDB(config);
     targetStorageOnKeyspaces = new TargetStorageOnKeyspaces(config);
   }
 
@@ -65,6 +63,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
   private void scanAndCompare(
       List<ImmutablePair<String, String>> rangeList, CacheStorage pkCache, String[] pks)
       throws IOException, InterruptedException, ExecutionException, TimeoutException {
+
 
     AdvancedCache<String> advancedCache = null;
 
@@ -97,8 +96,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
     for (ImmutablePair<String, String> range : rangeList) {
       var rangeStart = Long.parseLong(range.left);
       var rangeEnd = Long.parseLong(range.right);
-
-      // TODO: Move to async paging
+      //TODO: Make it async
       var resultSetRange =
           sourceStorageOnCassandra.findPartitionsByTokenRange(pksStr, rangeStart, rangeEnd);
 
@@ -145,7 +143,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
   }
 
   private void syncPartitionKeys(PartitionMetaData partitionMetaData) {
-    ledgerStorageOnKeyspaces.writePartitionMetadata(partitionMetaData);
+    ledgerStorageOnLevelDB.writePartitionMetadata(partitionMetaData);
   }
 
   private void removePartitions(String[] pks, CacheStorage pkCache, int chunk)
@@ -166,7 +164,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
     }
 
     Collection<?> finalClonedCollection = new ArrayList<>(collection);
-    collection.stream()
+    collection
         .forEach(
             key -> {
               String[] pk;
@@ -191,85 +189,17 @@ public class PartitionDiscoveryTask extends AbstractTask {
                 }
                 i++;
               }
-              // TODO: Move to async paging
-              List<Row> cassandraResult =
-                  sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
+
+              List<Row> cassandraResult = sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
+              
               // Found deleted key
               if (cassandraResult.size() == 0) {
                 LOGGER.debug("Found deleted partition key {}", key);
-                // Delete from Ledger
-
-                QueryLedgerItemByPk queryLedgerItemByPk = null;
-                PartitionMetaData partitionMetaData = null;
-
-                if (pkCache instanceof MemcachedCacheStorage) {
-                  queryLedgerItemByPk =
-                      new QueryLedgerItemByPk(
-                          (String) key,
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"));
-                }
-
-                if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) {
-                  queryLedgerItemByPk =
-                      new QueryLedgerItemByPk(
-                          (String) key,
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"));
-
-                  partitionMetaData =
-                      new PartitionMetaData(
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"),
-                          (String) key);
-                }
-                // Remove clustering columns associated with the partition key from the cache
-                if (pkCache instanceof MemcachedCacheStorage) {
-                  var ledgerResultSet =
-                      ledgerStorageOnKeyspaces.readRowMetaData(queryLedgerItemByPk);
-                  ledgerResultSet.stream()
-                      .forEach(
-                          deleteRow -> {
-                            try {
-                              pkCache.remove(
-                                  Integer.parseInt(config.getProperty("TILE")),
-                                  "rd",
-                                  String.format(
-                                      "%s|%s", ((String) key), deleteRow.getString("cc")));
-                            } catch (InterruptedException
-                                | ExecutionException
-                                | TimeoutException e) {
-                              throw new RuntimeException(e);
-                            }
-                          });
-
-                  partitionMetaData =
-                      new PartitionMetaData(
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"),
-                          ((String) key));
-                }
-
-                // Delete from Target table
-                DeleteTargetOperation deleteTargetOperation =
-                    new DeleteTargetOperation(
-                        config.getProperty("TARGET_KEYSPACE"),
-                        config.getProperty("TARGET_TABLE"),
-                        pk,
-                        pks,
-                        metaData.get("partition_key"));
-                ledgerStorageOnKeyspaces.deletePartitionMetadata(partitionMetaData);
-                ledgerStorageOnKeyspaces.deleteRowMetadata(queryLedgerItemByPk);
-                targetStorageOnKeyspaces.delete(deleteTargetOperation);
 
                 // Remove partition key from the cache
                 if (pkCache instanceof MemcachedCacheStorage) {
                   try {
-                    pkCache.remove(Integer.parseInt(config.getProperty("TILE")), ((String) key));
+                    pkCache.remove(Integer.parseInt(config.getProperty("TILE")), (key));
                   } catch (InterruptedException | ExecutionException | TimeoutException e) {
                     throw new RuntimeException(e);
                   }
@@ -278,15 +208,23 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
                 if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) {
                   try {
-                    pkCache.remove(Integer.parseInt(config.getProperty("TILE")), ((String) key));
+                    pkCache.remove(Integer.parseInt(config.getProperty("TILE")), (key));
                   } catch (InterruptedException | ExecutionException | TimeoutException e) {
                     throw new RuntimeException(e);
                   }
                 }
 
+                // Delete partition from Ledger
+                ledgerStorageOnLevelDB.deletePartitionMetadata(new PartitionMetaData(
+                        Integer.parseInt(config.getProperty("TILE")),
+                        config.getProperty("TARGET_KEYSPACE"),
+                        config.getProperty("TARGET_TABLE"),
+                        (String) key));
+
                 statsCounter.incrementStat("DELETE");
               }
             });
+
     if (pkCache instanceof MemcachedCacheStorage
         && finalClonedCollection.size() < collection.size()) {
       var cborPayload = Utils.cborEncoder((List<String>) finalClonedCollection);
@@ -349,7 +287,9 @@ public class PartitionDiscoveryTask extends AbstractTask {
     LOGGER.info("The current tile: {}", currentTile);
 
     scanAndCompare(rangeList, (CacheStorage<String, Long>) pkCache, pks);
-    scanAndRemove((CacheStorage<String, Long>) pkCache, pks, taskName);
+    if (config.getProperty("REPLICATE_DELETES").equals("true")) {
+      scanAndRemove((CacheStorage<String, Long>) pkCache, pks, taskName);
+    }
 
     var statsMetaDataInserts =
         new StatsMetaData(

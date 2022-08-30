@@ -50,6 +50,16 @@ public class Utils {
     return mapper.readValue(payload, List.class);
   }
 
+  public static <T> byte[] cborEncoderSet(Set<T> obj) throws JsonProcessingException {
+    var mapper = new CBORMapper();
+    return mapper.writeValueAsBytes(obj);
+  }
+
+  public static <T> Set<T> cborDecoderSet(byte[] payload) throws IOException {
+    var mapper = new CBORMapper();
+    return mapper.readValue(payload, Set.class);
+  }
+
   public static <T> Stream<T> getSliceOfStream(Stream<T> stream, int startIndex, int endIndex) {
     return stream.skip(startIndex).limit(endIndex - startIndex + 1);
   }
@@ -129,9 +139,9 @@ public class Utils {
       partitionColumnsMapping.put(pk, Objects.requireNonNull(rootNode).path(pk).asText());
     }
 
-    payload.setPk(partitionColumnsMapping.values().stream().collect(Collectors.joining("|")));
+    payload.setPk(String.join("|", partitionColumnsMapping.values()));
     payload.setClusteringColumn(
-        clusteringColumnMapping.values().stream().collect(Collectors.joining("|")));
+            String.join("|", clusteringColumnMapping.values()));
     payload.setTimestamp(writeTimeArray.stream().max(Long::compare).get());
     payload.setClusteringColumns(clusteringColumnMapping);
 

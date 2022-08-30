@@ -94,7 +94,7 @@ public class Starter implements Callable<Integer> {
       arg++;
     }
 
-    if (pathToConfig == "") pathToConfig = System.getenv("CQLREPLICATOR_CONF");
+    if (pathToConfig.isBlank()) pathToConfig = System.getenv("CQLREPLICATOR_CONF");
 
     var configReader = new ConfigReader(pathToConfig);
 
@@ -146,6 +146,7 @@ public class Starter implements Callable<Integer> {
     if (syncPartitionKeys) {
 
       if (abstractTaskPartitionKeys == null) {
+        config.setProperty("PROCESS_NAME", "pd");
         abstractTaskPartitionKeys = new PartitionDiscoveryTask(config);
         if (config.getProperty("EXTERNAL_MEMCACHED_STORAGE").equals("false")) {
           pkCacheForPartitionKeys = new SimpleConcurrentHashMapCacheStorage(config);
@@ -163,6 +164,7 @@ public class Starter implements Callable<Integer> {
     }
     if (syncClusteringColumns) {
       if (abstractTaskClusteringKeys == null) {
+        config.setProperty("PROCESS_NAME", "rd");
         abstractTaskClusteringKeys = new CassandraReplicationTask(config);
         if (config.getProperty("EXTERNAL_MEMCACHED_STORAGE").equals("false")) {
           pkCacheForClusteringKeys = new SimpleConcurrentHashMapCacheStorage(config);

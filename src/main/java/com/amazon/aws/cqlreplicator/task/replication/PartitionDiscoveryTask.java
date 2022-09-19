@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.task.replication;
 
-import com.amazon.aws.cqlreplicator.models.*;
+import com.amazon.aws.cqlreplicator.models.PartitionMetaData;
+import com.amazon.aws.cqlreplicator.models.StatsMetaData;
 import com.amazon.aws.cqlreplicator.storage.*;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
 import com.amazon.aws.cqlreplicator.util.StatsCounter;
@@ -36,7 +37,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(PartitionDiscoveryTask.class);
   private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
-  private static final int ADVANCED_CACHE_SIZE = 1000;
+  private static int ADVANCED_CACHE_SIZE;
   private static SourceStorageOnCassandra sourceStorageOnCassandra;
   private static Map<String, LinkedHashMap<String, String>> metaData;
   private static StatsCounter statsCounter;
@@ -52,6 +53,8 @@ public class PartitionDiscoveryTask extends AbstractTask {
    */
   public PartitionDiscoveryTask(Properties config) throws IOException {
     this.config = config;
+    ADVANCED_CACHE_SIZE =
+        Integer.parseInt(config.getProperty("EXTERNAL_MEMCACHED_PAGE_SIZE_PER_TILE"));
     sourceStorageOnCassandra = new SourceStorageOnCassandra(config);
     metaData = sourceStorageOnCassandra.getMetaData();
     statsCounter = new StatsCounter();
@@ -63,7 +66,6 @@ public class PartitionDiscoveryTask extends AbstractTask {
   private void scanAndCompare(
       List<ImmutablePair<String, String>> rangeList, CacheStorage pkCache, String[] pks)
       throws IOException, InterruptedException, ExecutionException, TimeoutException {
-
 
     AdvancedCache<String> advancedCache = null;
 
@@ -96,7 +98,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
     for (ImmutablePair<String, String> range : rangeList) {
       var rangeStart = Long.parseLong(range.left);
       var rangeEnd = Long.parseLong(range.right);
-      //TODO: Make it async
+
       var resultSetRange =
           sourceStorageOnCassandra.findPartitionsByTokenRange(pksStr, rangeStart, rangeEnd);
 
@@ -146,94 +148,74 @@ public class PartitionDiscoveryTask extends AbstractTask {
     ledgerStorageOnLevelDB.writePartitionMetadata(partitionMetaData);
   }
 
-  private void removePartitions(String[] pks, CacheStorage pkCache, int chunk)
+  private void deletePartitions(String[] pks, CacheStorage pkCache, int chunk)
       throws IOException, InterruptedException, ExecutionException, TimeoutException {
-    Collection<?> collection = null;
 
-    if (pkCache instanceof MemcachedCacheStorage) {
+    var keyOfChunkFirst = String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), chunk);
+    var compressedPayloadFirst = (byte[]) pkCache.get(keyOfChunkFirst);
+    var cborPayloadFirst = Utils.decompress(compressedPayloadFirst);
+    var collection = Utils.cborDecoder(cborPayloadFirst);
 
-      var keyOfChunk = String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), chunk);
-      var compressedPayload = (byte[]) pkCache.get(keyOfChunk);
-      byte[] cborPayload;
-      cborPayload = Utils.decompress(compressedPayload);
-      collection = Utils.cborDecoder(cborPayload);
-    }
+    var finalClonedCollection = new ArrayList<>(collection);
+    collection.forEach(
+        key -> {
+          BoundStatementBuilder boundStatementCassandraBuilder =
+              sourceStorageOnCassandra.getCassandraPreparedStatement().boundStatementBuilder();
 
-    if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) {
-      collection = pkCache.keySet();
-    }
+          if (pkCache instanceof MemcachedCacheStorage)
+            LOGGER.debug("Processing partition key: {}", key);
+          var pk = REGEX_PIPE.split((String) key);
 
-    Collection<?> finalClonedCollection = new ArrayList<>(collection);
-    collection
-        .forEach(
-            key -> {
-              String[] pk;
-              BoundStatementBuilder boundStatementCassandraBuilder =
-                  sourceStorageOnCassandra.getCassandraPreparedStatement().boundStatementBuilder();
-              if (pkCache instanceof MemcachedCacheStorage)
-                LOGGER.debug("Processing partition key: {}", key);
-              pk = REGEX_PIPE.split((String) key);
+          var i = 0;
 
-              if (pkCache instanceof SimpleConcurrentHashMapCacheStorage)
-                pk = REGEX_PIPE.split((String) key);
+          for (String cl : pks) {
+            var type = metaData.get("partition_key").get(cl);
+            try {
+              boundStatementCassandraBuilder =
+                  Utils.aggregateBuilder(type, cl, pk[i], boundStatementCassandraBuilder);
+            } catch (Exception e) {
+              throw new RuntimeException(e);
+            }
+            i++;
+          }
 
-              var i = 0;
+          List<Row> cassandraResult =
+              sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
 
-              for (String cl : pks) {
-                var type = metaData.get("partition_key").get(cl);
-                try {
-                  boundStatementCassandraBuilder =
-                      Utils.aggregateBuilder(type, cl, pk[i], boundStatementCassandraBuilder);
-                } catch (Exception e) {
-                  LOGGER.error(e.getMessage());
-                }
-                i++;
+          // Found deleted partition key
+          if (cassandraResult.size() == 0) {
+            LOGGER.debug("Found deleted partition key {}", key);
+
+            // Remove partition key from the cache
+            if (pkCache instanceof MemcachedCacheStorage) {
+              try {
+                pkCache.remove(Integer.parseInt(config.getProperty("TILE")), (key));
+              } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                throw new RuntimeException(e);
               }
+              finalClonedCollection.remove(key);
+            }
 
-              List<Row> cassandraResult = sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
-              
-              // Found deleted key
-              if (cassandraResult.size() == 0) {
-                LOGGER.debug("Found deleted partition key {}", key);
+            // Delete partition from Ledger
+            ledgerStorageOnLevelDB.deletePartitionMetadata(
+                new PartitionMetaData(
+                    Integer.parseInt(config.getProperty("TILE")),
+                    config.getProperty("TARGET_KEYSPACE"),
+                    config.getProperty("TARGET_TABLE"),
+                    (String) key));
 
-                // Remove partition key from the cache
-                if (pkCache instanceof MemcachedCacheStorage) {
-                  try {
-                    pkCache.remove(Integer.parseInt(config.getProperty("TILE")), (key));
-                  } catch (InterruptedException | ExecutionException | TimeoutException e) {
-                    throw new RuntimeException(e);
-                  }
-                  finalClonedCollection.remove(key);
-                }
+            statsCounter.incrementStat("DELETE");
+          }
+        });
 
-                if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) {
-                  try {
-                    pkCache.remove(Integer.parseInt(config.getProperty("TILE")), (key));
-                  } catch (InterruptedException | ExecutionException | TimeoutException e) {
-                    throw new RuntimeException(e);
-                  }
-                }
-
-                // Delete partition from Ledger
-                ledgerStorageOnLevelDB.deletePartitionMetadata(new PartitionMetaData(
-                        Integer.parseInt(config.getProperty("TILE")),
-                        config.getProperty("TARGET_KEYSPACE"),
-                        config.getProperty("TARGET_TABLE"),
-                        (String) key));
-
-                statsCounter.incrementStat("DELETE");
-              }
-            });
-
-    if (pkCache instanceof MemcachedCacheStorage
-        && finalClonedCollection.size() < collection.size()) {
-      var cborPayload = Utils.cborEncoder((List<String>) finalClonedCollection);
+    if (finalClonedCollection.size() < collection.size()) {
+      var cborPayload = Utils.cborEncoder(finalClonedCollection);
       var compressedPayload = Utils.compress(cborPayload);
       var keyOfChunk = String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), chunk);
       pkCache.put(keyOfChunk, compressedPayload);
     }
 
-    if (pkCache instanceof MemcachedCacheStorage && finalClonedCollection.size() == 0) {
+    if (finalClonedCollection.size() == 0) {
       var keyOfChunk = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
       ((MemcachedCacheStorage) pkCache).decrByOne(keyOfChunk);
     }
@@ -249,13 +231,12 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
     if (taskName.equals(Utils.CassandraTaskTypes.SYNC_DELETED_PARTITION_KEYS)) {
       LOGGER.info("Syncing deleted partition keys between C* and Amazon Keyspaces");
-      if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) removePartitions(pks, pkCache, 0);
       if (pkCache instanceof MemcachedCacheStorage) {
         var totalChunks = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
-        var totalChunk = Integer.parseInt(((String) pkCache.get(totalChunks)).trim());
+        var chunks = Integer.parseInt(((String) pkCache.get(totalChunks)).trim());
         // remove each chunk of partition keys
-        for (int chunk = 0; chunk < totalChunk; chunk++) {
-          removePartitions(pks, pkCache, chunk);
+        for (int chunk = 0; chunk < chunks; chunk++) {
+          deletePartitions(pks, pkCache, chunk);
         }
       }
     }

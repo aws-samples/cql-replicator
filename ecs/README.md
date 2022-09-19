@@ -54,30 +54,7 @@ Best practice is to define the number of tiles equal to the vnodes in the Cassan
 16 vnodes is equal to 16 tiles, 32 vnodes is equal to 32 tiles, etc.
 
 ## Change Amazon Keyspaces tables capacity mode
-Let's create and pre-warm CQLReplicator internal tables in cqlsh:
-```
-CREATE TABLE replicator.ledger_v4 (
-    process_name text,
-    tile int,
-    keyspacename text,
-    tablename text,
-    pk text,
-    cc text,
-    operation_ts timestamp,
-    value bigint,
-    PRIMARY KEY ((process_name, tile, keyspacename, tablename, pk), cc)
-) WITH default_time_to_live = 0 AND CUSTOM_PROPERTIES = {
-	'capacity_mode':{
-		'throughput_mode':'PROVISIONED',
-		'write_capacity_units':30000,
-		'read_capacity_units':10000
-	}
-} AND CLUSTERING ORDER BY (cc ASC)
-```
-
-```
-ALTER TABLE replicator.ledger_v4  WITH CUSTOM_PROPERTIES = {'capacity_mode':{ 'throughput_mode':'PAY_PER_REQUEST'}}
-```
+Let's create and pre-warm CQLReplicator the target table in cqlsh:
 
 ```
 CREATE TABLE replicator.stats (

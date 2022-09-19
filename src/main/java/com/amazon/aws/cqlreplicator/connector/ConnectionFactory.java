@@ -24,7 +24,7 @@ public class ConnectionFactory {
   }
 
   public CqlSession buildCqlSession(String applicationConfName) {
-    final File configFile =
+    final var configFile =
         new File(String.format("%s/%s", config.getProperty("PATH_TO_CONFIG"), applicationConfName));
 
     return CqlSession.builder()

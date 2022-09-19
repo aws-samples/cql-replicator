@@ -75,7 +75,7 @@ public class CqlReplicatorTest {
             row -> {
               sourceHash.add(
                   DigestUtils.md5Hex(
-                      Objects.requireNonNull(row.getString(0)) /*.replace("'", "\\\\u0027")*/));
+                      Objects.requireNonNull(row.getString(0)).replace("'", "\\\\u0027")));
               sourceCount++;
             });
 

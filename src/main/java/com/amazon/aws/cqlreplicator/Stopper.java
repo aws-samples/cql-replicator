@@ -9,7 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Responsible for stopping replication tasks */
-public class Stopper extends Thread {
+public class Stopper implements Runnable {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(Stopper.class);
 

@@ -140,8 +140,7 @@ public class Utils {
     }
 
     payload.setPk(String.join("|", partitionColumnsMapping.values()));
-    payload.setClusteringColumn(
-            String.join("|", clusteringColumnMapping.values()));
+    payload.setClusteringColumn(String.join("|", clusteringColumnMapping.values()));
     payload.setTimestamp(writeTimeArray.stream().max(Long::compare).get());
     payload.setClusteringColumns(clusteringColumnMapping);
 

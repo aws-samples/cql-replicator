@@ -43,7 +43,7 @@ TASK_DEF=$(jq --null-input \
       "logConfiguration": {
                 "logDriver": "awslogs",
                 "options": {
-                    "awslogs-group": "awslogs-cqlreplicator",
+                    "awslogs-group": $tablename,
                     "awslogs-region": "us-east-1",
                     "awslogs-stream-prefix": $awslogname_rd
                 }
@@ -62,7 +62,7 @@ TASK_DEF=$(jq --null-input \
       "command": [
         $rows_command
       ],
-      "cpu": 2,
+      "cpu": 3,
       "environment": [
         {
           "name": "BUCKETNAME",
@@ -100,7 +100,7 @@ TASK_DEF=$(jq --null-input \
         }
       ],
       "workingDirectory": "/root/CQLReplicator",
-      "memory": 3584,
+      "memory": 4608,
       "image": $image,
       "essential": true,
       "dockerLabels": {
@@ -112,7 +112,7 @@ TASK_DEF=$(jq --null-input \
     "logConfiguration": {
                 "logDriver": "awslogs",
                 "options": {
-                    "awslogs-group": "awslogs-cqlreplicator",
+                    "awslogs-group": $tablename,
                     "awslogs-region": "us-east-1",
                     "awslogs-stream-prefix":$awslogname_pd
                 }
@@ -131,7 +131,7 @@ TASK_DEF=$(jq --null-input \
       "command": [
         $partition_command
       ],
-      "cpu": 2,
+      "cpu": 1,
       "environment": [
         {
           "name": "BUCKETNAME",
@@ -166,11 +166,11 @@ TASK_DEF=$(jq --null-input \
         },
         {
           "name": "JAVA_OPTS",
-          "value": "-Xms2048m -Xmx2048m -XX:+HeapDumpOnOutOfMemoryError"
+          "value": "-Xms1024m -Xmx1024m -XX:+HeapDumpOnOutOfMemoryError"
         }
       ],
       "workingDirectory": "/root/CQLReplicator/bin",
-      "memory": 3584,
+      "memory": 2048,
       "volumesFrom": [],
       "image": $image,
       "essential": true,

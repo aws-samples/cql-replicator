@@ -26,15 +26,13 @@ public class SourceStorageOnCassandra {
       SimpleStatement.newInstance(
           "select column_name, type, position, kind from system_schema.\"columns\" "
               + "where keyspace_name=:keyspace_name and table_name=:table_name");
+  private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
   private final Map<String, LinkedHashMap<String, String>> metaData;
   private final CqlSession cassandraSession;
   private final Properties config;
   private final PreparedStatement psCassandra;
-
   private final String BIG_INT_MAX_VALUE = String.valueOf(2 ^ Integer.MAX_VALUE);
   private final String BIG_INT_MIN_VALUE = String.valueOf(-2 ^ Integer.MIN_VALUE);
-
-  private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
 
   public SourceStorageOnCassandra(Properties config) {
     this.config = config;
@@ -45,7 +43,8 @@ public class SourceStorageOnCassandra {
         getColumns(config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"));
   }
 
-  public boolean findPrimaryKey(PrimaryKey primaryKey, String[] partitionKeyNames, String[] clusteringKeyNames) {
+  public boolean findPrimaryKey(
+      PrimaryKey primaryKey, String[] partitionKeyNames, String[] clusteringKeyNames) {
     List<String> whereClause = new ArrayList<>();
 
     var pkValues = REGEX_PIPE.split(primaryKey.getPartitionKeys());
@@ -64,9 +63,9 @@ public class SourceStorageOnCassandra {
     String selectStatement =
         String.format(
             "SELECT %s FROM %s.%s WHERE %s",
-             pks,
-             config.getProperty("TARGET_KEYSPACE"),
-             config.getProperty("TARGET_TABLE"),
+            pks,
+            config.getProperty("TARGET_KEYSPACE"),
+            config.getProperty("TARGET_TABLE"),
             finalWhereClause);
 
     PreparedStatement psSelectStatement = cassandraSession.prepare(selectStatement);
@@ -75,22 +74,22 @@ public class SourceStorageOnCassandra {
     int i = 0;
     for (var cl : partitionKeyNames) {
       var type = getMetaData().get("partition_key").get(cl);
-      bsSelectStatement =
-              Utils.aggregateBuilder(
-                      type, cl, pkValues[i], bsSelectStatement);
+      bsSelectStatement = Utils.aggregateBuilder(type, cl, pkValues[i], bsSelectStatement);
       i++;
     }
 
-    int k = 0;
+    var k = 0;
     for (var cl : clusteringKeyNames) {
       var type = getMetaData().get("clustering").get(cl);
-      bsSelectStatement =
-              Utils.aggregateBuilder(
-                      type, cl, ckValues[k], bsSelectStatement);
+      bsSelectStatement = Utils.aggregateBuilder(type, cl, ckValues[k], bsSelectStatement);
       k++;
     }
 
-    Optional<Row> result = Optional.ofNullable(cassandraSession.execute(bsSelectStatement.setConsistencyLevel(ConsistencyLevel.ONE).build()).one());
+    Optional<Row> result =
+        Optional.ofNullable(
+            cassandraSession
+                .execute(bsSelectStatement.setConsistencyLevel(ConsistencyLevel.ONE).build())
+                .one());
 
     return result.isPresent();
   }
@@ -153,10 +152,9 @@ public class SourceStorageOnCassandra {
     return resultSet.all();
   }
 
-  public CompletionStage<AsyncResultSet> extractAsync (Object object) {
+  public CompletionStage<AsyncResultSet> extractAsync(Object object) {
     return cassandraSession.executeAsync(((BoundStatementBuilder) object).build());
   }
-
 
   private PreparedStatement getPartitionKeysByTokenRange(
       String partitionKeyStr, long startRange, long endRange) {

@@ -8,21 +8,20 @@ package com.amazon.aws.cqlreplicator.models;
 import java.io.Serializable;
 
 public class TimestampMetrics implements Serializable {
-    private static final long serialVersionUID = 1L;
-    private final long lastRun;
-    private final long writeTime;
+  private static final long serialVersionUID = 1L;
+  private final long lastRun;
+  private final long writeTime;
 
-    public TimestampMetrics(long lastRun, long writeTime) {
-        this.lastRun = lastRun;
-        this.writeTime = writeTime;
-    }
+  public TimestampMetrics(long lastRun, long writeTime) {
+    this.lastRun = lastRun;
+    this.writeTime = writeTime;
+  }
 
-    public long getLastRun() {
-        return lastRun;
-    }
+  public long getLastRun() {
+    return lastRun;
+  }
 
-    public long getWriteTime() {
-        return writeTime;
-    }
-
+  public long getWriteTime() {
+    return writeTime;
+  }
 }

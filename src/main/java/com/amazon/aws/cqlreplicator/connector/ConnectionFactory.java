@@ -9,6 +9,7 @@ import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
 import com.datastax.oss.driver.api.core.type.codec.TypeCodecs;
 import net.spy.memcached.MemcachedClient;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
 import java.io.IOException;
@@ -17,13 +18,13 @@ import java.util.Properties;
 
 public class ConnectionFactory {
 
-  private Properties config;
+  private final Properties config;
 
-  public ConnectionFactory(Properties config) {
+  public ConnectionFactory(final @NotNull Properties config) {
     this.config = config;
   }
 
-  public CqlSession buildCqlSession(String applicationConfName) {
+  public CqlSession buildCqlSession(final @NotNull String applicationConfName) {
     final var configFile =
         new File(String.format("%s/%s", config.getProperty("PATH_TO_CONFIG"), applicationConfName));
 
@@ -39,4 +40,5 @@ public class ConnectionFactory {
             config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT"),
             Integer.parseInt(config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT"))));
   }
+
 }

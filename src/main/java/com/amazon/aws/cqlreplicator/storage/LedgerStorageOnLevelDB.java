@@ -63,15 +63,11 @@ public class LedgerStorageOnLevelDB extends LedgerStorage<Object, List<Object>, 
 
   public static void copyDirectory(
       String sourceDirectoryLocation, String destinationDirectoryLocation) throws IOException {
-    var methodName = new Throwable().getStackTrace()[0].getMethodName();
-    var startTime = System.nanoTime();
 
     File sourceDirectory = new File(sourceDirectoryLocation);
     File destinationDirectory = new File(destinationDirectoryLocation);
     FileUtils.copyDirectory(sourceDirectory, destinationDirectory);
 
-    var elapsedTime = System.nanoTime() - startTime;
-    LOGGER.debug("Call {} : {} ms", methodName, Duration.ofNanos(elapsedTime).toMillis());
   }
 
   @Override

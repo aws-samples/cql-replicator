@@ -14,9 +14,15 @@ import com.datastax.oss.driver.shaded.guava.common.collect.MapDifference;
 import com.datastax.oss.driver.shaded.guava.common.collect.Maps;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
+import software.amazon.awssdk.services.cloudwatch.model.*;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
@@ -44,6 +50,7 @@ public class CassandraReplicationTask extends AbstractTask {
   private static int CORE_POOL_SIZE;
   private static int MAX_CORE_POOL_SIZE;
   private static int CORE_POOL_TIMEOUT;
+  private static CloudWatchClient cloudWatchClient;
 
   public CassandraReplicationTask(final Properties cfg) throws IOException {
     config = cfg;
@@ -55,6 +62,13 @@ public class CassandraReplicationTask extends AbstractTask {
     statsCounter = new StatsCounter();
     targetStorageOnKeyspaces = new TargetStorageOnKeyspaces(config);
     ledgerStorageOnLevelDB = new LedgerStorageOnLevelDB(config);
+
+    if (config.getProperty("ENABLE_CLOUD_WATCH").equals("true")) {
+      cloudWatchClient =
+          CloudWatchClient.builder()
+              .region(Region.of(config.getProperty("CLOUD_WATCH_REGION")))
+              .build();
+      }
   }
 
   protected static String transformer(final String input, final Properties config) {
@@ -138,6 +152,42 @@ public class CassandraReplicationTask extends AbstractTask {
                         throw new RuntimeException(e);
                       }
                     }));
+  }
+
+  private static void putMetricData(CloudWatchClient cw, Double dataPoint, String metricName) {
+      Dimension dimension = Dimension.builder()
+              .name("OPERATIONS")
+              .value("REPLICA")
+              .build();
+
+      // Set an Instant object
+      String time = ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT);
+      Instant instant = Instant.parse(time);
+
+      MetricDatum datum = MetricDatum.builder()
+              .metricName(metricName)
+              .unit(StandardUnit.COUNT)
+              .value(dataPoint)
+              .timestamp(instant)
+              .dimensions(dimension).build();
+
+      PutMetricDataRequest request = PutMetricDataRequest.builder()
+              .namespace("CQL-REPLICATOR")
+              .metricData(datum).build();
+
+      cw.putMetricData(request);
+  }
+
+  private static void persistMetrics(StatsMetaData statsMetadata){
+    if (statsMetadata.getValue() > 0) {
+      if (config.getProperty("ENABLE_CLOUD_WATCH").equals("false")) {
+        targetStorageOnKeyspaces.writeStats(statsMetadata);
+      } else {
+        var metricVal = statsMetadata.getValue();
+        var metricName = statsMetadata.getOps();
+        putMetricData(cloudWatchClient, Double.valueOf(String.valueOf(metricVal)), metricName);
+      }
+    }
   }
 
   @Override
@@ -237,9 +287,7 @@ public class CassandraReplicationTask extends AbstractTask {
             "INSERT");
 
     statsMetaDataInserts.setValue(statsCounter.getStat("INSERT"));
-    if (statsMetaDataInserts.getValue() > 0) {
-      targetStorageOnKeyspaces.writeStats(statsMetaDataInserts);
-    }
+    persistMetrics(statsMetaDataInserts);
 
     var statsMetaDataUpdates =
         new StatsMetaData(
@@ -249,10 +297,7 @@ public class CassandraReplicationTask extends AbstractTask {
             "UPDATE");
 
     statsMetaDataUpdates.setValue(statsCounter.getStat("UPDATE"));
-
-    if (statsMetaDataUpdates.getValue() > 0) {
-      targetStorageOnKeyspaces.writeStats(statsMetaDataUpdates);
-    }
+    persistMetrics(statsMetaDataUpdates);
 
     var statsMetaDataDeletes =
         new StatsMetaData(
@@ -262,10 +307,7 @@ public class CassandraReplicationTask extends AbstractTask {
             "DELETE");
 
     statsMetaDataDeletes.setValue(statsCounter.getStat("DELETE"));
-
-    if (statsMetaDataDeletes.getValue() > 0) {
-      targetStorageOnKeyspaces.writeStats(statsMetaDataDeletes);
-    }
+    persistMetrics(statsMetaDataDeletes);
 
     statsCounter.resetStat("INSERT");
     statsCounter.resetStat("UPDATE");

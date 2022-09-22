@@ -8,6 +8,9 @@ Amazon ECS is a fully managed container orchestration service makes it easy for 
     gradle clean build
     gradle task deploy
 ```
+## Deploy Amazon ElastiCache (memcached)
+Following, this [instruction](https://docs.aws.amazon.com/AmazonElastiCache/latest/mem-ug/deploy-cluster.html), you can deploy the ElastiCache cluster.
+
 ## Copy the config and conf files to the S3 bucket
 Let's create a S3 bucket cqlreplicator with prefix /ks_test_cql_replicator/test_cql_replicator.
 Copy CassandraConnector.conf, KeyspacesConnector.conf, and config.properties to ```s3://cqlreplicator/ks_test_cql_replicator/test_cql_replicator```.
@@ -94,6 +97,7 @@ CREATE TABLE ks_test_cql_replicator.test_cql_replicator (
 ALTER TABLE ks_test_cql_replicator.test_cql_replicator 
     WITH CUSTOM_PROPERTIES = {'capacity_mode':{ 'throughput_mode':'PAY_PER_REQUEST'}}
 ```  
+
 ## Run the CQLReplicator on ECS cluster
 
 To start the ECS cluster you can use keyspaces_migration.sh with parameters TILES ACCOUNT TASK_ROLE ECS_ROLE S3_BUCKET KEYSPACE_NANE TABLE_NAME SUBNETS VPC SG KEYPAIR.
@@ -102,10 +106,7 @@ The following example starts Amazon ECS cluster with 16 CQLReplicator's instance
 keyspaces_migration.sh 16 123456789012 ecsTaskExecutionRole ecsRole cqlreplicator ks_test_cql_replicator test_cql_replicator subnets vpc-id sg keypair_name
 ```
 ## Check ECS logs
-if you want to get all WARNs and ERRORs from ECS execute get_ecs_logs.sh with the cluster name, and an absolute path to the pem file
-```
-  get_ecs_logs.sh test_cql_replicator pem-key
-``` 
+ECS logs are available in `Amazon CloudWatch/Log groups/test_cq_replicator`
 
 ## Clean up
 After you completed the migration process stop the ECS cluster, drop the internal CQLReplicator tables, and 

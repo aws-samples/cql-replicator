@@ -3,10 +3,8 @@
 package com.amazon.aws.cqlreplicator.task.replication;
 
 import com.amazon.aws.cqlreplicator.models.PartitionMetaData;
-import com.amazon.aws.cqlreplicator.models.StatsMetaData;
 import com.amazon.aws.cqlreplicator.storage.*;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
-import com.amazon.aws.cqlreplicator.util.StatsCounter;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
 import com.datastax.oss.driver.api.core.cql.Row;
@@ -40,10 +38,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
   private static int ADVANCED_CACHE_SIZE;
   private static SourceStorageOnCassandra sourceStorageOnCassandra;
   private static Map<String, LinkedHashMap<String, String>> metaData;
-  private static StatsCounter statsCounter;
   private static LedgerStorageOnLevelDB ledgerStorageOnLevelDB;
-
-  private static TargetStorageOnKeyspaces targetStorageOnKeyspaces;
   private final Properties config;
 
   /**
@@ -57,9 +52,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
         Integer.parseInt(config.getProperty("EXTERNAL_MEMCACHED_PAGE_SIZE_PER_TILE"));
     sourceStorageOnCassandra = new SourceStorageOnCassandra(config);
     metaData = sourceStorageOnCassandra.getMetaData();
-    statsCounter = new StatsCounter();
     ledgerStorageOnLevelDB = new LedgerStorageOnLevelDB(config);
-    targetStorageOnKeyspaces = new TargetStorageOnKeyspaces(config);
   }
 
   /** Scan and compare partition keys. */
@@ -203,8 +196,6 @@ public class PartitionDiscoveryTask extends AbstractTask {
                     config.getProperty("TARGET_KEYSPACE"),
                     config.getProperty("TARGET_TABLE"),
                     (String) key));
-
-            statsCounter.incrementStat("DELETE");
           }
         });
 
@@ -272,15 +263,6 @@ public class PartitionDiscoveryTask extends AbstractTask {
       scanAndRemove((CacheStorage<String, Long>) pkCache, pks, taskName);
     }
 
-    var statsMetaDataInserts =
-        new StatsMetaData(
-            Integer.parseInt(config.getProperty("TILE")),
-            config.getProperty("TARGET_KEYSPACE"),
-            config.getProperty("TARGET_TABLE"),
-            "DELETE");
-    statsMetaDataInserts.setValue(statsCounter.getStat("DELETE"));
-    targetStorageOnKeyspaces.writeStats(statsMetaDataInserts);
-    statsCounter.resetStat("DELETE");
     LOGGER.info("Caching and comparing stage is completed");
     LOGGER.info(
         "The number of pre-loaded elements in the cache is {} ",

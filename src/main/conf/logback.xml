@@ -32,4 +32,7 @@
     <logger name="com.amazon.aws.cqlreplicator.storage.MemcachedCacheStorage" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
+    <logger name="com.amazon.aws.cqlreplicator.task.AbstractTask" level="ERROR" additivity="false">
+        <appender-ref ref="ASYNC"/>
+    </logger>
 </configuration>

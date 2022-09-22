@@ -103,7 +103,7 @@ public class TargetStorageOnKeyspaces
   }
 
   public boolean execute(SimpleStatement simpleStatement) {
-    AtomicBoolean result = new AtomicBoolean(false);
+    AtomicBoolean result = new AtomicBoolean(true);
     Supplier<Row> supplier = () -> cqlSession.execute(simpleStatement).one();
     Retry.decorateSupplier(retry, supplier).get();
     publisher.onError(
@@ -112,6 +112,7 @@ public class TargetStorageOnKeyspaces
           result.set(false);
         });
     publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
+    // if a request is not succeeded set result to false
     publisher.onSuccess(event -> result.set(true));
 
     return result.get();

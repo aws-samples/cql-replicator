@@ -20,7 +20,7 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <datastax.version>4.14.0</datastax.version>
+        <datastax.version>4.14.1</datastax.version>
         <keyspaces.version>4.0.5</keyspaces.version>
         <kotlin.version>1.7.0</kotlin.version>
         <resilience4j.version>1.7.1</resilience4j.version>

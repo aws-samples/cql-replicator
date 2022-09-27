@@ -16,7 +16,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.datastax.oss:java-driver-core:4.14.0'
+    implementation 'com.datastax.oss:java-driver-core:4.14.1'
     implementation 'io.github.resilience4j:resilience4j-retry:1.7.1'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:[2.13.2.1,)'
     implementation 'org.apache.commons:commons-lang3:3.12.0'
@@ -61,6 +61,7 @@ publishing {
 
 jar {
     duplicatesStrategy = 'include'
+    zip64 true
 
     manifest {
         attributes "Main-Class": "com.amazon.aws.cqlreplicator.Starter"

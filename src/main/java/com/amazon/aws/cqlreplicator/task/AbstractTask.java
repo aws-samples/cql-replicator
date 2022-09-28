@@ -6,6 +6,7 @@ import com.amazon.aws.cqlreplicator.storage.CacheStorage;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -25,6 +26,7 @@ public abstract class AbstractTask {
     LOGGER.info(
         "Elapsed time is {} ms for task {}", Duration.ofNanos(elapsedTime).toMillis(), taskName);
   }
+
 
   protected abstract void doPerformTask(CacheStorage pkCache, Utils.CassandraTaskTypes taskName)
       throws IOException, InterruptedException, ExecutionException, TimeoutException;

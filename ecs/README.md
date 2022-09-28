@@ -8,6 +8,9 @@ Amazon ECS is a fully managed container orchestration service makes it easy for 
     gradle clean build
     gradle task deploy
 ```
+## Deploy Amazon ElastiCache (memcached)
+Following, this [instruction](https://docs.aws.amazon.com/AmazonElastiCache/latest/mem-ug/deploy-cluster.html), you can deploy the ElastiCache cluster.
+
 ## Copy the config and conf files to the S3 bucket
 Let's create a S3 bucket cqlreplicator with prefix /ks_test_cql_replicator/test_cql_replicator.
 Copy CassandraConnector.conf, KeyspacesConnector.conf, and config.properties to ```s3://cqlreplicator/ks_test_cql_replicator/test_cql_replicator```.
@@ -54,30 +57,7 @@ Best practice is to define the number of tiles equal to the vnodes in the Cassan
 16 vnodes is equal to 16 tiles, 32 vnodes is equal to 32 tiles, etc.
 
 ## Change Amazon Keyspaces tables capacity mode
-Let's create and pre-warm CQLReplicator internal tables in cqlsh:
-```
-CREATE TABLE replicator.ledger_v4 (
-    process_name text,
-    tile int,
-    keyspacename text,
-    tablename text,
-    pk text,
-    cc text,
-    operation_ts timestamp,
-    value bigint,
-    PRIMARY KEY ((process_name, tile, keyspacename, tablename, pk), cc)
-) WITH default_time_to_live = 0 AND CUSTOM_PROPERTIES = {
-	'capacity_mode':{
-		'throughput_mode':'PROVISIONED',
-		'write_capacity_units':30000,
-		'read_capacity_units':10000
-	}
-} AND CLUSTERING ORDER BY (cc ASC)
-```
-
-```
-ALTER TABLE replicator.ledger_v4  WITH CUSTOM_PROPERTIES = {'capacity_mode':{ 'throughput_mode':'PAY_PER_REQUEST'}}
-```
+Let's create and pre-warm CQLReplicator the target table in cqlsh:
 
 ```
 CREATE TABLE replicator.stats (
@@ -117,6 +97,7 @@ CREATE TABLE ks_test_cql_replicator.test_cql_replicator (
 ALTER TABLE ks_test_cql_replicator.test_cql_replicator 
     WITH CUSTOM_PROPERTIES = {'capacity_mode':{ 'throughput_mode':'PAY_PER_REQUEST'}}
 ```  
+
 ## Run the CQLReplicator on ECS cluster
 
 To start the ECS cluster you can use keyspaces_migration.sh with parameters TILES ACCOUNT TASK_ROLE ECS_ROLE S3_BUCKET KEYSPACE_NANE TABLE_NAME SUBNETS VPC SG KEYPAIR.
@@ -125,10 +106,7 @@ The following example starts Amazon ECS cluster with 16 CQLReplicator's instance
 keyspaces_migration.sh 16 123456789012 ecsTaskExecutionRole ecsRole cqlreplicator ks_test_cql_replicator test_cql_replicator subnets vpc-id sg keypair_name
 ```
 ## Check ECS logs
-if you want to get all WARNs and ERRORs from ECS execute get_ecs_logs.sh with the cluster name, and an absolute path to the pem file
-```
-  get_ecs_logs.sh test_cql_replicator pem-key
-``` 
+ECS logs are available in `Amazon CloudWatch/Log groups/test_cq_replicator`
 
 ## Clean up
 After you completed the migration process stop the ECS cluster, drop the internal CQLReplicator tables, and 
@@ -144,7 +122,7 @@ if you want to stop the cluster execute stop_ecs_cluster.sh within the cluster n
  deregister_ecs_task.sh CQLReplicator 16
 ```
 ## Cost consideration
-The original the project was built for m6i.large VMs, but AWS introduced a new EC2 A1.
+Originally the project built for m6i.large VMs, but AWS introduced a new EC2 A1.
 Amazon EC2 A1 instances deliver significant cost savings for scale-out and Arm-based applications such as CQLReplicator, 
 and distributed data stores that are supported by the extensive Arm ecosystem. A1 instances are the first EC2 instances 
 powered by AWS Graviton Processors that feature 64-bit Arm Neoverse cores and custom silicon designed by AWS. 

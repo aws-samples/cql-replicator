@@ -37,7 +37,7 @@ public class StatsCounter {
       value = new AtomicInteger(0);
       var old = map.putIfAbsent(key, value);
       if (old != null) {
-        value = old;
+        value.set(old.get());
       }
     }
     map.get(key).set(0);

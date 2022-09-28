@@ -29,6 +29,10 @@ do
   ./register_ecs_task_def.sh $value $@
 done
 
+TABLE_NAME=$7
+# Create a CloudWatch log-group
+aws logs create-log-group --log-group-name $TABLE_NAME
+
 SUBNETS=$8
 VPC=$9
 SG=${10}

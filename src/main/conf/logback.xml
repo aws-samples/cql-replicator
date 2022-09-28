@@ -1,5 +1,4 @@
 <configuration>
-
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <layout class="ch.qos.logback.classic.PatternLayout">
             <Pattern>
@@ -7,31 +6,33 @@
             </Pattern>
         </layout>
     </appender>
-
     <root level="INFO">
         <appender-ref ref="CONSOLE"/>
     </root>
-
     <appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">
         <appender-ref ref="CONSOLE"/>
         <queueSize>1000</queueSize>
     </appender>
-
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTask" level="INFO" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTask" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTask" level="INFO"
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTask" level="ERROR"
             additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-
-    <logger name="com.amazon.aws.cqlreplicator.Starter" level="INFO" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.Starter" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-
-    <logger name="com.amazon.aws.cqlreplicator.task.replication" level="INFO" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.storage.TargetStorageOnKeyspaces" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-
+    <logger name="com.amazon.aws.cqlreplicator.storage.LedgerStorageOnLevelDB" level="ERROR" additivity="false">
+        <appender-ref ref="ASYNC"/>
+    </logger>
+    <logger name="com.amazon.aws.cqlreplicator.storage.MemcachedCacheStorage" level="ERROR" additivity="false">
+        <appender-ref ref="ASYNC"/>
+    </logger>
+    <logger name="com.amazon.aws.cqlreplicator.task.AbstractTask" level="ERROR" additivity="false">
+        <appender-ref ref="ASYNC"/>
+    </logger>
 </configuration>

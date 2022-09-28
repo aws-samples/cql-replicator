@@ -34,75 +34,29 @@ The below steps only for testing purposes, for production please use [Amazon ECS
      | xargs -I % printf "stats cachedump % 10000\r\n" | nc $MEMCHOST 11211```
     5. Dumping all values from the memcached ``` MEMCHOST=localhost; printf "stats items\n" | nc $MEMCHOST 11211 | grep ":number" | awk -F":" '{print $2}' | xargs -I % printf "stats cachedump % 0\r\n" | nc $MEMCHOST 11211 | grep ITEM | awk '{print $2}' | sed -e 's/"/\\"/g'| xargs -I % printf "get %\r\n" | nc $MEMCHOST 11211
                                                   for i in {1..40}; do (echo "stats cachedump $i 0"; sleep 1; echo "quit";) | telnet localhost 11211 | grep 'APREFIX*\|ANOTHERPREFIX*'; done ```
-* Prepare the config.properties per table
-    ```# Target keyspace and table in Amazon Keyspaces
-       TARGET_KEYSPACE: ks_test_cql_replicator
-       TARGET_TABLE: test_cql_replicator
-       
-       # Source query that runs against Cassandra cluster per partition key
-       SOURCE_CQL_QUERY: SELECT json key,col0,col1,col2,col3,col4,col5,col6,col7,col8,writetime(col2),writetime(col4) FROM ks_test_cql_replicator.test_cql_replicator WHERE key=:key
-       WRITETIME_COLUMNS: col2, col4
-       REPLICATE_REFRESH_PERIOD_SEC: 5
-       REPLICATE_WITH_TIMESTAMP: false
-       REGISTER_PARTITION_DELETES: false
-       REPLICATE_RETRY_MAXATTEMPTS: 512
-       
-       # Refresh period of statistics
-       STATS_REFRESH_PERIOD_SEC: 60
-       
-       # Use PartiQL statements to transform JSON Cassandra rows into a new Keyspaces' schema if need it, https://partiql.org/tutorial.html
-       # inputDocument represents the source cassandra row in the PartiQL statement
-       # For example, transform JSON key,col0,col1,col2,col3,col4,col5,col6,col7,col8 to JSON id, col0
-       TRANSFORM_INBOUND_REQUEST: false
-       TRANSFORM_SQL: SELECT \"key\" as \"id\", \"col0\" as \"new_col\" FROM inputDocument
-       TRANSFORM_PARTITION_KEY: id
-       
-       # Rate limiting the CQLReplicator instance
-       RATELIMITER_PERMITS: 1500
-       RATELIMITER_TIMEOUT_MS: 1000
-       
-       INTERNAL_STORAGE_INIT_CAPACITY: 687500
-       INTERNAL_STORAGE_LOAD_FACTOR: 0.75f
-       INTERNAL_STORAGE_CONCURRENCY_LEVEL: 2
-       
-       EXTERNAL_MEMCACHED_STORAGE: true
-       EXTERNAL_MEMCACHED_STORAGE_ENDPOINT: localhost
-       EXTERNAL_MEMCACHED_STORAGE_PORT: 11211
-       
-       ENABLE_REPLICATION_POINT: false
-       STARTING_REPLICATION_TIMESTAMP: 1658322868006000
-
+* Prepare the config.properties per one table
 * Configure connection/authentication for your source Cassandra in CassandraConnector.conf
 * Configure connection/authentication for your target Amazon Keyspaces in KeyspacesConnector.conf
 * Copy config.properties, CassandraConnector.conf, and KeyspacesConnector.conf to Amazon S3, for example, 
    copy the files to ```s3://cqlreplicator/ks_test_cql_replicator/test_cql_replicator```
 * Run ```unzip CQLReplicator-1.0-SNAPSHOT.zip```
 * Set environmental variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `BUCKETNAME=cqlreplicator`, `KEYSPACENAME=ks_test_cql_replicator`, `TABLENAME=test_cql_replicator`, and `CQLREPLICATOR_CONF`
-* Run ```java -cp CQLReplicator-1.0-SNAPSHOT.jar com.amazon.aws.cqlreplicator.Init``` to create the ledger and the test target table in Amazon Keyspaces. 
-For production purposes pre-warm ledger_v4, and the target table, for example,  
-    ```
-    CREATE TABLE replicator.ledger_v4 (
-             process_name text,
-             tile int,
-             keyspacename text,
-             tablename text,
-             pk text,
-             cc text,
-             operation_ts timestamp,
-             value bigint,
-             PRIMARY KEY ((process_name, tile, keyspacename, tablename, pk), cc)
-             ) WITH default_time_to_live = 0 AND CUSTOM_PROPERTIES = {
-                        'capacity_mode':{
-                        'throughput_mode':'PROVISIONED',
-                        'write_capacity_units':15000,
-                        'read_capacity_units':10000
-                        } AND  CLUSTERING ORDER BY (cc ASC)    	
+* Create the replicator keyspace, and an internal table to store stats in Amazon Keyspaces:
+```
+    CREATE TABLE replicator.stats (
+        tile int,
+        keyspacename text,
+        tablename text,
+        ops text,
+        "rows" counter,
+        PRIMARY KEY ((tile, keyspacename, tablename, ops))
+    )
+```
+* For production purposes pre-warm the target table    	
                  
 After the table has been created, switch the table to on-demand mode to pre-warm the table and avoid throttling failures. 
 The following script will update the throughput mode. 
 
-    ALTER TABLE replicator.ledger_v4 WITH CUSTOM_PROPERTIES = {'capacity_mode':{'throughput_mode':'PAY_PER_REQUEST' } }    
-    
 * Run one cassandra instance:
    ```docker run --name test-cql-replicator -d -e CASSANDRA_NUM_TOKENS=8 -p 9042:9042 cassandra:3.11```
 * Generate cassandra workload:
@@ -122,6 +76,16 @@ There are two options to use and store credentials for Cassandra and Amazon Keys
 
 * Explicitly updating the username and the password in respective configuration files and uploading to the S3 bucket (Default option)
 * Use AWS Systems Manager Parameter Store by declaring an env variable "AWS_SMPS_MODE". For example: `export AWS_SMPS_MODE = true` 
+
+# Monitoring
+Monitoring is an important part of migration process. You should collect monitoring data from all replicated
+operations from Cassandra to Amazon Keyspaces so that you can easily ensure in data completeness.
+There are two options to monitor the migration process:
+    * Use Amazon CloudWatch
+    * Use replicator.stats table in Amazon Keyspaces 
+
+You can enable a preferred option in config.properties file, for example, if you want to 
+use Amazon CloudWatch set `ENABLE_CLOUD_WATCH` to true and set `CLOUD_WATCH_REGION` to your AWS region.
 
 # Clean up
 Let's clean up the testing environment to avoid extra charges and resource consumption

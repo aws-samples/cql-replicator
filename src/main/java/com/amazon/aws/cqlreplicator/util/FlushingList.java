@@ -11,9 +11,9 @@ import java.util.List;
 public abstract class FlushingList<T> {
 
   private final List<T> queue = new ArrayList<>();
-  private int maxCacheSize;
+  private final int maxCacheSize;
 
-  public FlushingList(int maxCacheSize) {
+  public FlushingList(final int maxCacheSize) {
     this.maxCacheSize = maxCacheSize;
   }
 

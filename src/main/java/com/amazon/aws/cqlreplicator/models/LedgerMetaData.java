@@ -4,8 +4,6 @@ package com.amazon.aws.cqlreplicator.models;
 
 import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
 
-import java.time.ZonedDateTime;
-
 /** Defines ledger's metadata */
 public class LedgerMetaData {
   private final int tile;
@@ -13,7 +11,7 @@ public class LedgerMetaData {
   private final String clusteringColumns;
   private final String keyspaceName;
   private final String tableName;
-  private final ZonedDateTime lastRun;
+  private final long lastRun;
   private final long lastWriteTime;
 
   public LedgerMetaData(
@@ -22,7 +20,7 @@ public class LedgerMetaData {
       final String keyspaceName,
       final String tableName,
       final int tile,
-      final ZonedDateTime lastRun,
+      final long lastRun,
       final long lastWriteTime) {
     this.partitionKeys = partitionKeys;
     this.clusteringColumns = clusteringColumns;
@@ -49,7 +47,7 @@ public class LedgerMetaData {
     return tableName;
   }
 
-  public ZonedDateTime getLastRun() {
+  public long getLastRun() {
     return lastRun;
   }
 

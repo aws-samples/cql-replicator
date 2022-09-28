@@ -2,13 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.amazon.aws.cqlreplicator.task.replication;
 
-import com.amazon.aws.cqlreplicator.models.DeleteTargetOperation;
 import com.amazon.aws.cqlreplicator.models.PartitionMetaData;
-import com.amazon.aws.cqlreplicator.models.QueryLedgerItemByPk;
-import com.amazon.aws.cqlreplicator.models.StatsMetaData;
 import com.amazon.aws.cqlreplicator.storage.*;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
-import com.amazon.aws.cqlreplicator.util.StatsCounter;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
 import com.datastax.oss.driver.api.core.cql.Row;
@@ -39,12 +35,10 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(PartitionDiscoveryTask.class);
   private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
-  private static final int ADVANCED_CACHE_SIZE = 1000;
+  private static int ADVANCED_CACHE_SIZE;
   private static SourceStorageOnCassandra sourceStorageOnCassandra;
   private static Map<String, LinkedHashMap<String, String>> metaData;
-  private static StatsCounter statsCounter;
-  private static LedgerStorageOnKeyspaces ledgerStorageOnKeyspaces;
-  private static TargetStorageOnKeyspaces targetStorageOnKeyspaces;
+  private static LedgerStorageOnLevelDB ledgerStorageOnLevelDB;
   private final Properties config;
 
   /**
@@ -52,13 +46,13 @@ public class PartitionDiscoveryTask extends AbstractTask {
    *
    * @param config the array to be sorted
    */
-  public PartitionDiscoveryTask(Properties config) {
+  public PartitionDiscoveryTask(Properties config) throws IOException {
     this.config = config;
+    ADVANCED_CACHE_SIZE =
+        Integer.parseInt(config.getProperty("EXTERNAL_MEMCACHED_PAGE_SIZE_PER_TILE"));
     sourceStorageOnCassandra = new SourceStorageOnCassandra(config);
     metaData = sourceStorageOnCassandra.getMetaData();
-    statsCounter = new StatsCounter();
-    ledgerStorageOnKeyspaces = new LedgerStorageOnKeyspaces(config);
-    targetStorageOnKeyspaces = new TargetStorageOnKeyspaces(config);
+    ledgerStorageOnLevelDB = new LedgerStorageOnLevelDB(config);
   }
 
   /** Scan and compare partition keys. */
@@ -98,7 +92,6 @@ public class PartitionDiscoveryTask extends AbstractTask {
       var rangeStart = Long.parseLong(range.left);
       var rangeEnd = Long.parseLong(range.right);
 
-      // TODO: Move to async paging
       var resultSetRange =
           sourceStorageOnCassandra.findPartitionsByTokenRange(pksStr, rangeStart, rangeEnd);
 
@@ -145,157 +138,75 @@ public class PartitionDiscoveryTask extends AbstractTask {
   }
 
   private void syncPartitionKeys(PartitionMetaData partitionMetaData) {
-    ledgerStorageOnKeyspaces.writePartitionMetadata(partitionMetaData);
+    ledgerStorageOnLevelDB.writePartitionMetadata(partitionMetaData);
   }
 
-  private void removePartitions(String[] pks, CacheStorage pkCache, int chunk)
+  private void deletePartitions(String[] pks, CacheStorage pkCache, int chunk)
       throws IOException, InterruptedException, ExecutionException, TimeoutException {
-    Collection<?> collection = null;
 
-    if (pkCache instanceof MemcachedCacheStorage) {
+    var keyOfChunkFirst = String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), chunk);
+    var compressedPayloadFirst = (byte[]) pkCache.get(keyOfChunkFirst);
+    var cborPayloadFirst = Utils.decompress(compressedPayloadFirst);
+    var collection = Utils.cborDecoder(cborPayloadFirst);
 
-      var keyOfChunk = String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), chunk);
-      var compressedPayload = (byte[]) pkCache.get(keyOfChunk);
-      byte[] cborPayload;
-      cborPayload = Utils.decompress(compressedPayload);
-      collection = Utils.cborDecoder(cborPayload);
-    }
+    var finalClonedCollection = new ArrayList<>(collection);
+    collection.forEach(
+        key -> {
+          BoundStatementBuilder boundStatementCassandraBuilder =
+              sourceStorageOnCassandra.getCassandraPreparedStatement().boundStatementBuilder();
 
-    if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) {
-      collection = pkCache.keySet();
-    }
+          if (pkCache instanceof MemcachedCacheStorage)
+            LOGGER.debug("Processing partition key: {}", key);
+          var pk = REGEX_PIPE.split((String) key);
 
-    Collection<?> finalClonedCollection = new ArrayList<>(collection);
-    collection.stream()
-        .forEach(
-            key -> {
-              String[] pk;
-              BoundStatementBuilder boundStatementCassandraBuilder =
-                  sourceStorageOnCassandra.getCassandraPreparedStatement().boundStatementBuilder();
-              if (pkCache instanceof MemcachedCacheStorage)
-                LOGGER.debug("Processing partition key: {}", key);
-              pk = REGEX_PIPE.split((String) key);
+          var i = 0;
 
-              if (pkCache instanceof SimpleConcurrentHashMapCacheStorage)
-                pk = REGEX_PIPE.split((String) key);
+          for (String cl : pks) {
+            var type = metaData.get("partition_key").get(cl);
+            try {
+              boundStatementCassandraBuilder =
+                  Utils.aggregateBuilder(type, cl, pk[i], boundStatementCassandraBuilder);
+            } catch (Exception e) {
+              throw new RuntimeException(e);
+            }
+            i++;
+          }
 
-              var i = 0;
+          List<Row> cassandraResult =
+              sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
 
-              for (String cl : pks) {
-                var type = metaData.get("partition_key").get(cl);
-                try {
-                  boundStatementCassandraBuilder =
-                      Utils.aggregateBuilder(type, cl, pk[i], boundStatementCassandraBuilder);
-                } catch (Exception e) {
-                  LOGGER.error(e.getMessage());
-                }
-                i++;
+          // Found deleted partition key
+          if (cassandraResult.size() == 0) {
+            LOGGER.debug("Found deleted partition key {}", key);
+
+            // Remove partition key from the cache
+            if (pkCache instanceof MemcachedCacheStorage) {
+              try {
+                pkCache.remove(Integer.parseInt(config.getProperty("TILE")), (key));
+              } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                throw new RuntimeException(e);
               }
-              // TODO: Move to async paging
-              List<Row> cassandraResult =
-                  sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
-              // Found deleted key
-              if (cassandraResult.size() == 0) {
-                LOGGER.debug("Found deleted partition key {}", key);
-                // Delete from Ledger
+              finalClonedCollection.remove(key);
+            }
 
-                QueryLedgerItemByPk queryLedgerItemByPk = null;
-                PartitionMetaData partitionMetaData = null;
+            // Delete partition from Ledger
+            ledgerStorageOnLevelDB.deletePartitionMetadata(
+                new PartitionMetaData(
+                    Integer.parseInt(config.getProperty("TILE")),
+                    config.getProperty("TARGET_KEYSPACE"),
+                    config.getProperty("TARGET_TABLE"),
+                    (String) key));
+          }
+        });
 
-                if (pkCache instanceof MemcachedCacheStorage) {
-                  queryLedgerItemByPk =
-                      new QueryLedgerItemByPk(
-                          (String) key,
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"));
-                }
-
-                if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) {
-                  queryLedgerItemByPk =
-                      new QueryLedgerItemByPk(
-                          (String) key,
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"));
-
-                  partitionMetaData =
-                      new PartitionMetaData(
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"),
-                          (String) key);
-                }
-                // Remove clustering columns associated with the partition key from the cache
-                if (pkCache instanceof MemcachedCacheStorage) {
-                  var ledgerResultSet =
-                      ledgerStorageOnKeyspaces.readRowMetaData(queryLedgerItemByPk);
-                  ledgerResultSet.stream()
-                      .forEach(
-                          deleteRow -> {
-                            try {
-                              pkCache.remove(
-                                  Integer.parseInt(config.getProperty("TILE")),
-                                  "rd",
-                                  String.format(
-                                      "%s|%s", ((String) key), deleteRow.getString("cc")));
-                            } catch (InterruptedException
-                                | ExecutionException
-                                | TimeoutException e) {
-                              throw new RuntimeException(e);
-                            }
-                          });
-
-                  partitionMetaData =
-                      new PartitionMetaData(
-                          Integer.parseInt(config.getProperty("TILE")),
-                          config.getProperty("TARGET_KEYSPACE"),
-                          config.getProperty("TARGET_TABLE"),
-                          ((String) key));
-                }
-
-                // Delete from Target table
-                DeleteTargetOperation deleteTargetOperation =
-                    new DeleteTargetOperation(
-                        config.getProperty("TARGET_KEYSPACE"),
-                        config.getProperty("TARGET_TABLE"),
-                        pk,
-                        pks,
-                        metaData.get("partition_key"));
-                ledgerStorageOnKeyspaces.deletePartitionMetadata(partitionMetaData);
-                ledgerStorageOnKeyspaces.deleteRowMetadata(queryLedgerItemByPk);
-                targetStorageOnKeyspaces.delete(deleteTargetOperation);
-
-                // Remove partition key from the cache
-                if (pkCache instanceof MemcachedCacheStorage) {
-                  try {
-                    pkCache.remove(Integer.parseInt(config.getProperty("TILE")), ((String) key));
-                  } catch (InterruptedException | ExecutionException | TimeoutException e) {
-                    throw new RuntimeException(e);
-                  }
-                  finalClonedCollection.remove(key);
-                }
-
-                if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) {
-                  try {
-                    pkCache.remove(Integer.parseInt(config.getProperty("TILE")), ((String) key));
-                  } catch (InterruptedException | ExecutionException | TimeoutException e) {
-                    throw new RuntimeException(e);
-                  }
-                }
-
-                statsCounter.incrementStat("DELETE");
-              }
-            });
-    if (pkCache instanceof MemcachedCacheStorage
-        && finalClonedCollection.size() < collection.size()) {
-      var cborPayload = Utils.cborEncoder((List<String>) finalClonedCollection);
+    if (finalClonedCollection.size() < collection.size()) {
+      var cborPayload = Utils.cborEncoder(finalClonedCollection);
       var compressedPayload = Utils.compress(cborPayload);
       var keyOfChunk = String.format("%s|%s|%s", "pksChunk", config.getProperty("TILE"), chunk);
       pkCache.put(keyOfChunk, compressedPayload);
     }
 
-    if (pkCache instanceof MemcachedCacheStorage && finalClonedCollection.size() == 0) {
+    if (finalClonedCollection.size() == 0) {
       var keyOfChunk = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
       ((MemcachedCacheStorage) pkCache).decrByOne(keyOfChunk);
     }
@@ -311,13 +222,12 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
     if (taskName.equals(Utils.CassandraTaskTypes.SYNC_DELETED_PARTITION_KEYS)) {
       LOGGER.info("Syncing deleted partition keys between C* and Amazon Keyspaces");
-      if (pkCache instanceof SimpleConcurrentHashMapCacheStorage) removePartitions(pks, pkCache, 0);
       if (pkCache instanceof MemcachedCacheStorage) {
         var totalChunks = String.format("%s|%s", config.getProperty("TILE"), "totalChunks");
-        var totalChunk = Integer.parseInt(((String) pkCache.get(totalChunks)).trim());
+        var chunks = Integer.parseInt(((String) pkCache.get(totalChunks)).trim());
         // remove each chunk of partition keys
-        for (int chunk = 0; chunk < totalChunk; chunk++) {
-          removePartitions(pks, pkCache, chunk);
+        for (int chunk = 0; chunk < chunks; chunk++) {
+          deletePartitions(pks, pkCache, chunk);
         }
       }
     }
@@ -349,17 +259,10 @@ public class PartitionDiscoveryTask extends AbstractTask {
     LOGGER.info("The current tile: {}", currentTile);
 
     scanAndCompare(rangeList, (CacheStorage<String, Long>) pkCache, pks);
-    scanAndRemove((CacheStorage<String, Long>) pkCache, pks, taskName);
+    if (config.getProperty("REPLICATE_DELETES").equals("true")) {
+      scanAndRemove((CacheStorage<String, Long>) pkCache, pks, taskName);
+    }
 
-    var statsMetaDataInserts =
-        new StatsMetaData(
-            Integer.parseInt(config.getProperty("TILE")),
-            config.getProperty("TARGET_KEYSPACE"),
-            config.getProperty("TARGET_TABLE"),
-            "DELETE");
-    statsMetaDataInserts.setValue(statsCounter.getStat("DELETE"));
-    targetStorageOnKeyspaces.writeStats(statsMetaDataInserts);
-    statsCounter.resetStat("DELETE");
     LOGGER.info("Caching and comparing stage is completed");
     LOGGER.info(
         "The number of pre-loaded elements in the cache is {} ",

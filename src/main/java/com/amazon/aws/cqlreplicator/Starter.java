@@ -6,7 +6,6 @@ import com.amazon.aws.cqlreplicator.config.ConfigReader;
 import com.amazon.aws.cqlreplicator.models.StatsAggrQuery;
 import com.amazon.aws.cqlreplicator.storage.CacheStorage;
 import com.amazon.aws.cqlreplicator.storage.MemcachedCacheStorage;
-import com.amazon.aws.cqlreplicator.storage.SimpleConcurrentHashMapCacheStorage;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
 import com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTask;
 import com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTask;
@@ -94,7 +93,7 @@ public class Starter implements Callable<Integer> {
       arg++;
     }
 
-    if (pathToConfig == "") pathToConfig = System.getenv("CQLREPLICATOR_CONF");
+    if (pathToConfig.isBlank()) pathToConfig = System.getenv("CQLREPLICATOR_CONF");
 
     var configReader = new ConfigReader(pathToConfig);
 
@@ -107,14 +106,14 @@ public class Starter implements Callable<Integer> {
 
     replicationDelay =
         TimeUnit.SECONDS.toMillis(
-            Long.parseLong(config.getProperty("REPLICATE_REFRESH_PERIOD_SEC")));
+            Long.parseLong(config.getProperty("POOLING_PERIOD")));
     statsDelay =
-        TimeUnit.SECONDS.toMillis(Long.parseLong(config.getProperty("STATS_REFRESH_PERIOD_SEC")));
+        TimeUnit.SECONDS.toMillis(Long.parseLong(config.getProperty("POOLING_STATS_DATA")));
 
     if (isStats) delay = statsDelay;
     else delay = replicationDelay;
 
-    Runtime.getRuntime().addShutdownHook(new Stopper());
+    Runtime.getRuntime().addShutdownHook(new Thread(new Stopper()));
 
     task =
         new TimerTask() {
@@ -146,9 +145,9 @@ public class Starter implements Callable<Integer> {
     if (syncPartitionKeys) {
 
       if (abstractTaskPartitionKeys == null) {
+        config.setProperty("PROCESS_NAME", "pd");
         abstractTaskPartitionKeys = new PartitionDiscoveryTask(config);
         if (config.getProperty("EXTERNAL_MEMCACHED_STORAGE").equals("false")) {
-          pkCacheForPartitionKeys = new SimpleConcurrentHashMapCacheStorage(config);
         } else {
           pkCacheForPartitionKeys = new MemcachedCacheStorage(config, "pd");
         }
@@ -163,9 +162,9 @@ public class Starter implements Callable<Integer> {
     }
     if (syncClusteringColumns) {
       if (abstractTaskClusteringKeys == null) {
+        config.setProperty("PROCESS_NAME", "rd");
         abstractTaskClusteringKeys = new CassandraReplicationTask(config);
         if (config.getProperty("EXTERNAL_MEMCACHED_STORAGE").equals("false")) {
-          pkCacheForClusteringKeys = new SimpleConcurrentHashMapCacheStorage(config);
         } else {
           pkCacheForClusteringKeys = new MemcachedCacheStorage(config, "rd");
         }

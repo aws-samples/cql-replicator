@@ -23,6 +23,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 
 import static com.datastax.oss.driver.api.querybuilder.QueryBuilder.selectFrom;
 import static com.datastax.oss.driver.api.querybuilder.QueryBuilder.truncate;
@@ -37,7 +38,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 public class CqlReplicatorTest {
   private static final Logger LOGGER = LoggerFactory.getLogger(CqlReplicatorTest.class);
   private static final String keyspaceName = "ks_test_cql_replicator";
-  private static final String tableName = "test_cql_replicator";
+  private static final String tableName = "test_cql_replicator2";
   private static final String pathToConfig = System.getenv("CQLREPLICATOR_CONF");
   private static final File configFileK =
       new File(String.format("%s/%s", pathToConfig, "KeyspacesConnector.conf"));
@@ -117,7 +118,7 @@ public class CqlReplicatorTest {
   @Test
   @Order(3)
   void updateAssumption() throws InterruptedException {
-    Select query = selectFrom(keyspaceName, tableName).columns("key", "col0");
+    Select query = selectFrom(keyspaceName, tableName).columns("key1", "key2", "col0", "col00");
     SimpleStatement statement = query.build();
     ResultSet rsSource = cassandraConnectorSession.execute(statement);
     rsSource
@@ -125,19 +126,23 @@ public class CqlReplicatorTest {
         .forEach(
             row -> {
               LocalDate localDate = LocalDate.now();
-              UUID uuid = row.getUuid("key");
+              UUID uuid1 = row.getUuid("key1");
+              UUID uuid2 = row.getUuid("key2");
               byte col0 = row.getByte("col0");
+              byte col00 = row.getByte("col00");
 
               PreparedStatement updatePreparedStatement =
                   cassandraConnectorSession.prepare(
                       String.format(
-                          "UPDATE %s.%s SET COL2=:COL2 WHERE KEY=:KEY AND COL0=:COL0 ",
+                          "UPDATE %s.%s SET COL2=:COL2 WHERE KEY1=:KEY1 AND KEY2=:KEY2 AND COL0=:COL0 AND COL00=:COL00",
                           keyspaceName, tableName));
               BoundStatementBuilder boundStatementBuilder =
                   updatePreparedStatement
                       .boundStatementBuilder()
-                      .setUuid("key", uuid)
+                      .setUuid("key1", uuid1)
+                      .setUuid("key2", uuid2)
                       .setByte("col0", col0)
+                      .setByte("col00", col00)
                       .setLocalDate("col2", localDate)
                       .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
               cassandraConnectorSession.execute(boundStatementBuilder.build());
@@ -154,7 +159,7 @@ public class CqlReplicatorTest {
   @Test
   @Order(4)
   void deleteAssumption() throws InterruptedException {
-    Select query = selectFrom(keyspaceName, tableName).columns("key", "col0");
+    Select query = selectFrom(keyspaceName, tableName).columns("key1","key2","col0","col00");
     SimpleStatement statement = query.build();
     ResultSet rsTarget = keyspacesConnectorSession.execute(statement);
     AtomicLong trgCnt = new AtomicLong();

@@ -20,6 +20,8 @@ import java.util.*;
 import java.util.concurrent.CompletionStage;
 import java.util.regex.Pattern;
 
+import static com.amazon.aws.cqlreplicator.util.Utils.doubleQuoteResolver;
+
 /** Responsible for providing extracting logic from source cluster */
 public class SourceStorageOnCassandra {
   private static final SimpleStatement statement =
@@ -62,7 +64,7 @@ public class SourceStorageOnCassandra {
 
     String selectStatement =
         String.format(
-            "SELECT %s FROM %s.%s WHERE %s",
+            doubleQuoteResolver("SELECT %s FROM %s.%s WHERE %s", config.getProperty("SOURCE_CQL_QUERY")),
             pks,
             config.getProperty("TARGET_KEYSPACE"),
             config.getProperty("TARGET_TABLE"),
@@ -161,7 +163,7 @@ public class SourceStorageOnCassandra {
 
     String finalCqlStatement =
         String.format(
-            "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
+            doubleQuoteResolver("select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2", config.getProperty("SOURCE_CQL_QUERY")),
             partitionKeyStr,
             config.getProperty("TARGET_KEYSPACE"),
             config.getProperty("TARGET_TABLE"),
@@ -171,7 +173,7 @@ public class SourceStorageOnCassandra {
     if (startRange < endRange) {
       finalCqlStatement =
           String.format(
-              "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
+              doubleQuoteResolver("select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2", config.getProperty("SOURCE_CQL_QUERY")),
               partitionKeyStr,
               config.getProperty("TARGET_KEYSPACE"),
               config.getProperty("TARGET_TABLE"),
@@ -180,7 +182,7 @@ public class SourceStorageOnCassandra {
     } else if (endRange < startRange) {
       finalCqlStatement =
           String.format(
-              "select distinct %s from %s.%s where token(%s)>=:r1",
+              doubleQuoteResolver("select distinct %s from %s.%s where token(%s)>=:r1", config.getProperty("SOURCE_CQL_QUERY")),
               partitionKeyStr,
               config.getProperty("TARGET_KEYSPACE"),
               config.getProperty("TARGET_TABLE"),

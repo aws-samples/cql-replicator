@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -31,6 +32,16 @@ public class Utils {
   private static final Pattern REGEX_COM = Pattern.compile(",");
   private static final Pattern REGEX_REG_SPACE = Pattern.compile(" ");
   private static final Logger LOGGER = LoggerFactory.getLogger(Utils.class);
+  private static final Pattern REGEX_DQ = Pattern.compile("\"[^\"]*\"");
+
+  public static String doubleQuoteResolver(String source, String input) {
+    var matcher = REGEX_DQ.matcher(input);
+    var action = matcher.find();
+    if (action) {
+      return source.replace("%s.%s", "\"%s\".\"%s\"");
+    } else
+      return source;
+  }
 
   public static byte[] compress(byte[] payload) throws IOException {
     return Snappy.compress(payload);

@@ -5,13 +5,18 @@ package com.amazon.aws.cqlreplicator.task.replication;
 import com.amazon.aws.cqlreplicator.models.*;
 import com.amazon.aws.cqlreplicator.storage.*;
 import com.amazon.aws.cqlreplicator.task.AbstractTask;
+import com.amazon.aws.cqlreplicator.util.CustomResultSetSerializer;
 import com.amazon.aws.cqlreplicator.util.StatsCounter;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.ConsistencyLevel;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
+import com.datastax.oss.driver.api.core.cql.Row;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.shaded.guava.common.collect.MapDifference;
 import com.datastax.oss.driver.shaded.guava.common.collect.Maps;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.module.SimpleModule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.regions.Region;
@@ -32,6 +37,7 @@ import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 import static com.amazon.aws.cqlreplicator.util.Utils.aggregateBuilder;
+import static com.amazon.aws.cqlreplicator.util.Utils.doubleQuoteResolver;
 
 /** Responsible for replication logic between Cassandra and Amazon Keyspaces */
 public class CassandraReplicationTask extends AbstractTask {
@@ -51,6 +57,9 @@ public class CassandraReplicationTask extends AbstractTask {
   private static int MAX_CORE_POOL_SIZE;
   private static int CORE_POOL_TIMEOUT;
   private static CloudWatchClient cloudWatchClient;
+  private static boolean useCustomJsonSerializer = false;
+  private static final ObjectMapper mapper = new ObjectMapper();
+  private static final SimpleModule module = new SimpleModule();
 
   public CassandraReplicationTask(final Properties cfg) throws IOException {
     config = cfg;
@@ -62,6 +71,11 @@ public class CassandraReplicationTask extends AbstractTask {
     statsCounter = new StatsCounter();
     targetStorageOnKeyspaces = new TargetStorageOnKeyspaces(config);
     ledgerStorageOnLevelDB = new LedgerStorageOnLevelDB(config);
+    useCustomJsonSerializer = !cfg.getProperty("SOURCE_CQL_QUERY").split(" ")[1].toLowerCase().equals("json");
+    if (useCustomJsonSerializer) {
+      module.addSerializer(Row.class, new CustomResultSetSerializer());
+      mapper.registerModule(module);
+    }
 
     if (config.getProperty("ENABLE_CLOUD_WATCH").equals("true")) {
       cloudWatchClient =
@@ -90,7 +104,7 @@ public class CassandraReplicationTask extends AbstractTask {
     if (config.getProperty("REPLICATE_WITH_TIMESTAMP").equals("true")) {
       query =
           String.format(
-              "INSERT INTO %s.%s JSON '%s' USING TIMESTAMP %s",
+              doubleQuoteResolver("INSERT INTO %s.%s JSON '%s' USING TIMESTAMP %s", config.getProperty("SOURCE_CQL_QUERY")),
               config.getProperty("TARGET_KEYSPACE"),
               config.getProperty("TARGET_TABLE"),
               payload,
@@ -98,7 +112,7 @@ public class CassandraReplicationTask extends AbstractTask {
     } else {
       query =
           String.format(
-              "INSERT INTO %s.%s JSON '%s'",
+              doubleQuoteResolver("INSERT INTO %s.%s JSON '%s'", config.getProperty("SOURCE_CQL_QUERY")),
               config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"), payload);
     }
     return query;
@@ -188,6 +202,17 @@ public class CassandraReplicationTask extends AbstractTask {
         putMetricData(cloudWatchClient, Double.valueOf(String.valueOf(metricVal)), metricName);
       }
     }
+  }
+
+  private static String getSerializedCassandraRow(Row row) throws JsonProcessingException {
+    String payload;
+    if (useCustomJsonSerializer) {
+      payload = mapper.writeValueAsString(row).replace("\\\"writetime(", "writetime(").replace(")\\\"",")");
+    } else
+    {
+      payload = row.getString(0);
+    }
+    return payload;
   }
 
   @Override
@@ -444,15 +469,19 @@ public class CassandraReplicationTask extends AbstractTask {
       cassandraResult.parallelStream()
           .forEach(
               compareRow -> {
-                var jsonPayload =
-                    Utils.convertToJson(
-                        compareRow.getString(0), config.getProperty("WRITETIME_COLUMNS"), cls, pks);
+                Payload jsonPayload = null;
+                try {
+                  jsonPayload = Utils.convertToJson(
+                          getSerializedCassandraRow(compareRow),
+                          config.getProperty("WRITETIME_COLUMNS"),
+                          cls,
+                          pks);
+                } catch (JsonProcessingException e) {
+                  throw new RuntimeException(e);
+                }
                 var ts = jsonPayload.getTimestamp();
-
                 Map<String, String> clusteringColumnsMapping = jsonPayload.getClusteringColumns();
-
                 List<String> clTmp = new ArrayList<>();
-
                 for (String cln : cls) {
                   if (!cln.equals(CLUSTERING_COLUMN_ABSENT)) {
                     var val = clusteringColumnsMapping.get(cln);

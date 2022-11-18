@@ -75,10 +75,10 @@ Grant SELECT permissions to the migration user or the existing user
 2. Check IAM Role [Spark-cassandra-connector](https://docs.aws.amazon.com/keyspaces/latest/devguide/spark-tutorial-step1.html)
 
 ### Configure Amazon Keyspaces conf file
-You can use an example from the repository [KeyspacesConnector.conf](main/conf/KeyspacesConnector.conf).
+You can use an example from the repository [KeyspacesConnector.conf](spark/conf/KeyspacesConnector.conf).
 
 ### Configure the Cassandra file
-You can use an example from the repository [CassandraConnector.conf](main/conf/CassandraConnector.conf).
+You can use an example from the repository [CassandraConnector.conf](spark/conf/CassandraConnector.conf).
 
 ### Configure config.json
 config.json helps you to manage migration process of multiple keyspaces/tables, you can control `write concurrency`, 
@@ -101,7 +101,7 @@ config.json helps you to manage migration process of multiple keyspaces/tables, 
     }]
 }
 ``` 
-## Set essential parameters in the `bulk-migrator.sh
+## Set essential parameters in the `bulk-migrator.sh`
 1. `WORKING_DIR` path to intermediate parquet files
 2. `SPARK_HOME` path to the Spark binaries
 3. `JAVA_HOME` path to Java JRE/JDK

@@ -69,7 +69,7 @@ public class CustomResultSetSerializer extends StdSerializer<Row> {
       collectionValue = row.getSet(i, Boolean.class);
       jsonType = JsonTypes.STRING;
     } else if (DataTypes.setOf(DataTypes.COUNTER).equals(row.getType(i))) {
-      collectionValue = row.getSet(i, Integer.class);
+      collectionValue = row.getSet(i, Long.class);
       jsonType = JsonTypes.NUMBER;
     } else if (DataTypes.setOf(DataTypes.DATE).equals(row.getType(i))) {
       collectionValue = row.getSet(i, LocalDate.class);

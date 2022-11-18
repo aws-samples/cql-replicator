@@ -11,6 +11,12 @@ import com.datastax.spark.connector.cql.CassandraConnector
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.expressions.Window
+
+import scala.reflect.io.Directory
+import java.io.File
+
 val args = sc.getConf.get("spark.driver.args").split("\\s+")
 val tablename = args(0)
 val keyspacename = args(1)
@@ -31,10 +37,10 @@ def getPrimaryKey(ks: String, tb: String): ListBuffer[String] = {
 
 val pkFinal = getPrimaryKey(keyspacename, tablename).toSeq
 
-val df = spark.read.format("org.apache.spark.sql.cassandra").options(Map( "table" -> tablename, "keyspace" -> keyspacename, "writetime."+columnTs -> "ts")).load()
-val fullDF = df.persist(StorageLevel.MEMORY_AND_DISK)
+val sourceDF = spark.read.format("org.apache.spark.sql.cassandra").options(Map( "table" -> tablename, "keyspace" -> keyspacename, "writetime."+columnTs -> "ts")).load()
+val fullDF = sourceDF.persist(StorageLevel.MEMORY_AND_DISK)
 
-val snapshot = spark.read.parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
+val snapshot = spark.read.parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename)).persist(StorageLevel.MEMORY_AND_DISK)
 
 val cond = pkFinal.map(x => col(String.format("%s.%s", "T0", x)) === col(String.format("%s.%s", "T1", x))).reduce(_ && _)
 // Detected inserts
@@ -43,8 +49,7 @@ val cntNewRows = newInsertsDF.count()
 // Detected updates
 val columnsIncUpdate = fullDF.columns
 val newUpdatesDF = fullDF.as("T1").join(snapshot.as("T0"), cond, "inner")
-  .filter($"T1.ts">$"T0.ts").selectExpr(columnsIncUpdate.map(x => String.format("%s.%s", "T1", x)): _*).drop("ts")
-
+  .filter($"T1.ts">$"T0.ts").selectExpr(columnsIncUpdate.map(x => String.format("%s.%s", "T1", x)): _*)
 val cntUpdatedRows = newUpdatesDF.count()
 // Detected deletes
 val newDeletesDf = snapshot.as("T0").join(fullDF.as("T1"), cond, "leftanti")
@@ -59,34 +64,57 @@ if (!"".equals(nulls) && !"\"\"".equals(nulls)){
   mapper.registerModule(DefaultScalaModule)
   val replaceNulls = mapper.readValue(nulls, classOf[Map[String, String]])
   newInsertsDF.na.fill(replaceNulls).write.mode("overwrite").parquet(String.format("%s/%s/%s/%s/%s",targetFolder, "keyspaces/incremental/", keyspacename, tablename,"inserts"))
-  newUpdatesDF.na.fill(replaceNulls).write.mode("overwrite").parquet(String.format("%s/%s/%s/%s/%s",targetFolder, "keyspaces/incremental/", keyspacename, tablename,"updates"))
+  newUpdatesDF.drop("ts").na.fill(replaceNulls).write.mode("overwrite").parquet(String.format("%s/%s/%s/%s/%s",targetFolder, "keyspaces/incremental/", keyspacename, tablename,"updates"))
 
 } else
   {
     String.format("%s/%s/%s/%s",targetFolder, "keyspaces/incremental", keyspacename, tablename)
     newInsertsDF.write.mode("overwrite").parquet(String.format("%s/%s/%s/%s/%s",targetFolder, "keyspaces/incremental", keyspacename, tablename, "inserts"))
-    newUpdatesDF.write.mode("overwrite").parquet(String.format("%s/%s/%s/%s/%s",targetFolder, "keyspaces/incremental", keyspacename, tablename, "updates"))
+    newUpdatesDF.drop("ts").write.mode("overwrite").parquet(String.format("%s/%s/%s/%s/%s",targetFolder, "keyspaces/incremental", keyspacename, tablename, "updates"))
   }
 
 newDeletesDf.write.mode("overwrite").parquet(String.format("%s/%s/%s/%s/%s",targetFolder, "keyspaces/incremental", keyspacename, tablename, "deletes"))
 
-// Update snapshots
 if (cntNewRows>0) {
   spark.catalog.refreshByPath(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
   var pkList = getPrimaryKey(keyspacename, tablename)
   pkList+=("ts")
-  val pkFinal = pkList.toSeq
-  fullDF.selectExpr(pkFinal.map(c => c): _*).write.mode("overwrite").parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
+  val pkWithTs = pkList.toSeq
+  fullDF.selectExpr(pkWithTs.map(c => c): _*).write.mode("overwrite").parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
 }
 
-// TODO Update snapshots
-if (cntUpdatedRows>0) {
-  // TODO
+if (cntUpdatedRows>0 && cntNewRows == 0) {
+  var pkList = getPrimaryKey(keyspacename, tablename)
+  val pkWithoutTs = pkList.map(x=>col(x))
+  pkList+=("ts")
+  val pkWithTs = pkList.toSeq
+  val dfUpdates = newUpdatesDF.selectExpr(pkWithTs.map(c => c): _*).persist(StorageLevel.MEMORY_AND_DISK)
+  val dfUnionAllUpdatesAndInserts = snapshot.unionAll(dfUpdates)
+  val wf = Window.partitionBy(pkWithoutTs:_*).orderBy(col("ts").desc)
+  val finalSnapshot = dfUnionAllUpdatesAndInserts.withColumn("row", row_number.over(wf)).where($"row" === 1).drop("row")
+  finalSnapshot.selectExpr(pkWithTs.map(c => c): _*).write.mode("overwrite").parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename+"_tmp"))
+  spark.catalog.refreshByPath(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
+  val dfTemp = spark.read.parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename+"_tmp"))
+  dfTemp.write.mode("overwrite").parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
+
+  val dir = new Directory(new File(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename+"_tmp")))
+  dir.deleteRecursively()
+
 }
 
-// TODO Delete snapshots
 if (cntDeletedRows>0) {
-  // TODO
+  var pkList = getPrimaryKey(keyspacename, tablename)
+  val pkWithoutTs = pkList.map(x=>col(x))
+  pkList+=("ts")
+  val pkWithTs = pkList.toSeq
+  val finalSnapshot = snapshot.except(newDeletesDf)
+  finalSnapshot.selectExpr(pkWithTs.map(c => c): _*).write.mode("overwrite").parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename+"_tmp"))
+  spark.catalog.refreshByPath(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
+  val dfTemp = spark.read.parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename+"_tmp"))
+  dfTemp.write.mode("overwrite").parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
+  val dir = new Directory(new File(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename+"_tmp")))
+  dir.deleteRecursively()
+
 }
 
 sys.exit(0)

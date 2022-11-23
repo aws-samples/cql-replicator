@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.databind.CBORMapper;
+import org.apache.commons.codec.digest.MurmurHash3;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +34,11 @@ public class Utils {
   private static final Pattern REGEX_REG_SPACE = Pattern.compile(" ");
   private static final Logger LOGGER = LoggerFactory.getLogger(Utils.class);
   private static final Pattern REGEX_DQ = Pattern.compile("\"[^\"]*\"");
+
+  public static String hashIt(byte[] data) {
+    var hash3 = MurmurHash3.hash128x64(data);
+    return Arrays.stream(hash3).mapToObj(String::valueOf).collect(Collectors.joining("|"));
+  }
 
   public static String doubleQuoteResolver(String source, String input) {
     var matcher = REGEX_DQ.matcher(input);

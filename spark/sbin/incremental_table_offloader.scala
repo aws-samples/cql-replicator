@@ -83,7 +83,7 @@ if (cntNewRows>0) {
   fullDF.selectExpr(pkWithTs.map(c => c): _*).write.mode("overwrite").parquet(String.format("%s/%s/%s/%s",targetFolder, "keyspaces/snapshots", keyspacename, tablename))
 }
 
-if (cntUpdatedRows>0 && cntNewRows == 0) {
+if (cntUpdatedRows>0) {
   var pkList = getPrimaryKey(keyspacename, tablename)
   val pkWithoutTs = pkList.map(x=>col(x))
   pkList+=("ts")

@@ -27,6 +27,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   private final String externalMemcachedStoragePort;
   private MemcachedClient memCachedClient;
   private String prefix;
+  private final static Utils.HashingFunctions hashingType = Utils.HashingFunctions.SHA_256;
 
   public MemcachedCacheStorage(Properties config, String operation) {
     this.operation = operation;
@@ -36,7 +37,6 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
         config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT");
     this.externalMemcachedStoragePort = config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT");
   }
-
 
   @Override
   public void connect() throws IOException {
@@ -54,7 +54,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
     var cntKey = hashIt(
                 String.format(
                         "%s|%s|%s|%s|%s", tile, operation, "counter", targetKeyspace, targetTable)
-                    .getBytes());
+                    .getBytes(), hashingType);
     var contains = memCachedClient.asyncGet(cntKey) != null;
     if (!contains) {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -68,7 +68,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
                 String.format(
                         "%s|%s|%s|%s|%s",
                         tile, operationType, "counter", targetKeyspace, targetTable)
-                    .getBytes());
+                    .getBytes(), hashingType);
     var contains = memCachedClient.get(cntKey) != null;
     if (contains) {
       memCachedClient.asyncDecr(cntKey, 1);
@@ -83,7 +83,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   @Override
   public Object get(Object key) {
     return memCachedClient.get(
-        hashIt(String.format("%s|%s", prefix, key).getBytes()));
+        hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType));
   }
 
   public int getTotalChunks(int tile) {
@@ -94,7 +94,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
                     String.format(
                             "%s|%s|%s|%s|%s",
                             "pd", targetKeyspace, targetTable, tile, "totalChunks")
-                        .getBytes()));
+                        .getBytes(), hashingType));
 
     if (chunks != null) result = Integer.parseInt((String) chunks);
 
@@ -106,7 +106,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
         String.format(
             "%s|%s|%s|%s|%s|%s", "pd", targetKeyspace, targetTable, "pksChunk", tile, chunk);
     var compressedPayload =
-        (byte[]) memCachedClient.get(hashIt(keyOfChunk.getBytes()));
+        (byte[]) memCachedClient.get(hashIt(keyOfChunk.getBytes(), hashingType));
     var cborPayload = Utils.decompress(compressedPayload);
     return Utils.cborDecoder(cborPayload);
   }
@@ -116,7 +116,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
         .set(
-            hashIt(String.format("%s|%s", prefix, key).getBytes()),
+            hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType),
             0,
             value)
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -127,7 +127,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
         .add(
-            hashIt(String.format("%s|%s", prefix, key).getBytes()),
+            hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType),
             0,
             value)
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -144,7 +144,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
     var cntKey =
         hashIt(String.format(
                         "%s|%s|%s|%s|%s", tile, operation, "counter", targetKeyspace, targetTable)
-                    .getBytes());
+                    .getBytes(), hashingType);
     var contains = memCachedClient.asyncGet(cntKey).get(TIMEOUT_IN_SEC, TimeUnit.SECONDS) != null;
     if (!contains) {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -159,7 +159,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
     contains =
         memCachedClient
                 .asyncGet(
-                    hashIt(String.format("%s|%s", prefix, key).getBytes()))
+                    hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType))
                 .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS)
             != null;
     return contains;
@@ -169,7 +169,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   public void remove(int tile, Object key)
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
-        .delete(hashIt(String.format("%s|%s", prefix, key).getBytes()))
+        .delete(hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType))
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     counterDecrement(tile, operation);
   }
@@ -181,7 +181,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
     memCachedClient
         .delete(
             hashIt(
-                    String.format("%s|%s|%s", operationType, ksAndTable, key).getBytes()))
+                    String.format("%s|%s|%s", operationType, ksAndTable, key).getBytes(), hashingType))
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     counterDecrement(tile, operationType);
   }
@@ -195,7 +195,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
       throws InterruptedException, ExecutionException, TimeoutException {
     var cntKey =
         hashIt(
-                String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key).getBytes());
+                String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key).getBytes(), hashingType);
     var contains = memCachedClient.asyncGet(cntKey).get(TIMEOUT_IN_SEC, TimeUnit.SECONDS) != null;
     if (!contains) {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -206,7 +206,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   public void decrByOne(Object key) {
     var cntKey =
         hashIt(
-                String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key).getBytes());
+                String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key).getBytes(), hashingType);
     var contains = memCachedClient.get(cntKey) != null;
     if (contains) {
       memCachedClient.asyncDecr(cntKey, 1);

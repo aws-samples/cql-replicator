@@ -36,8 +36,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import static com.amazon.aws.cqlreplicator.util.Utils.aggregateBuilder;
-import static com.amazon.aws.cqlreplicator.util.Utils.doubleQuoteResolver;
+import static com.amazon.aws.cqlreplicator.util.Utils.*;
 
 /** Responsible for replication logic between Cassandra and Amazon Keyspaces */
 public class CassandraReplicationTask extends AbstractTask {
@@ -78,10 +77,14 @@ public class CassandraReplicationTask extends AbstractTask {
     }
 
     if (config.getProperty("ENABLE_CLOUD_WATCH").equals("true")) {
-      cloudWatchClient =
-          CloudWatchClient.builder()
-              .region(Region.of(config.getProperty("CLOUD_WATCH_REGION")))
-              .build();
+      try {
+        cloudWatchClient =
+            CloudWatchClient.builder()
+                .region(Region.of(config.getProperty("CLOUD_WATCH_REGION")))
+                .build();
+      } catch (CloudWatchException e) {
+        throw new RuntimeException(e);
+      }
       }
   }
 
@@ -166,30 +169,6 @@ public class CassandraReplicationTask extends AbstractTask {
                         throw new RuntimeException(e);
                       }
                     }));
-  }
-
-  private static void putMetricData(CloudWatchClient cw, Double dataPoint, String metricName) {
-      Dimension dimension = Dimension.builder()
-              .name("OPERATIONS")
-              .value("REPLICA")
-              .build();
-
-      // Set an Instant object
-      String time = ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT);
-      Instant instant = Instant.parse(time);
-
-      MetricDatum datum = MetricDatum.builder()
-              .metricName(metricName)
-              .unit(StandardUnit.COUNT)
-              .value(dataPoint)
-              .timestamp(instant)
-              .dimensions(dimension).build();
-
-      PutMetricDataRequest request = PutMetricDataRequest.builder()
-              .namespace("CQL-REPLICATOR")
-              .metricData(datum).build();
-
-      cw.putMetricData(request);
   }
 
   private static void persistMetrics(StatsMetaData statsMetadata){

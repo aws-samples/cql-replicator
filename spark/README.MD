@@ -121,7 +121,7 @@ Run the full data load from the Cassandra to Amazon Keyspaces run the following 
 
 ### Incremental data load
 To run incremental data load set `sync_type` to `incremental` in config.json and run the following command
-`./bulk-migrator.sh --increment-keyspace ks_test_cql_replicator`. You can run the incremental data load only after
+`$./bulk-migrator.sh --increment-keyspace ks_test_cql_replicator`. You can run the incremental data load only after
 running the full data load at least once.
 
 ## Scheduling incremental migration with CRON

@@ -78,7 +78,7 @@ public class Starter implements Callable<Integer> {
   CountDownLatch countDownLatch = new CountDownLatch(1);
 
   /** Responsible for running each task in a timer loop */
-  public static void main(String[] args) {
+  public static void main(String[] args){
     var delay = 0L;
     var isStats = false;
 
@@ -113,6 +113,18 @@ public class Starter implements Callable<Integer> {
     if (isStats) delay = statsDelay;
     else delay = replicationDelay;
 
+    if (config.getProperty("PRE_FLIGHT_CHECK").equals("true")) {
+      config.setProperty("PATH_TO_CONFIG", pathToConfig);
+      PreflightCheck preflightCheck = new PreflightCheck(config);
+      try {
+      preflightCheck.runPreFlightCheck();
+      } catch (PreFlightCheckException e) {
+        System.exit(-1);
+      }
+
+
+    }
+
     Runtime.getRuntime().addShutdownHook(new Thread(new Stopper()));
 
     task =
@@ -141,6 +153,7 @@ public class Starter implements Callable<Integer> {
     config.setProperty("TILE", String.valueOf(tile));
     config.setProperty("TILES", String.valueOf(tiles));
     config.setProperty("PATH_TO_CONFIG", pathToConfig);
+
 
     if (syncPartitionKeys) {
 

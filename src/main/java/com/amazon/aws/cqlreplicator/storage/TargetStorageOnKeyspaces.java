@@ -29,6 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static com.amazon.aws.cqlreplicator.util.Utils.doubleQuoteResolver;
+
 public class TargetStorageOnKeyspaces
     extends TargetStorage<Object, List<Row>, BatchStatementBuilder, SimpleStatement> {
 
@@ -76,10 +78,6 @@ public class TargetStorageOnKeyspaces
 
     this.config = properties;
     this.psKeyspaces = cqlSession.prepare(properties.getProperty("SOURCE_CQL_QUERY"));
-  }
-
-  public PreparedStatement getCassandraPreparedStatement() {
-    return psKeyspaces;
   }
 
   @Override
@@ -181,7 +179,7 @@ public class TargetStorageOnKeyspaces
 
     String deleteStatement =
         String.format(
-            "DELETE FROM %s.%s WHERE %s",
+            doubleQuoteResolver("DELETE FROM %s.%s WHERE %s", config.getProperty("SOURCE_CQL_QUERY")),
             config.getProperty("TARGET_KEYSPACE"),
             config.getProperty("TARGET_TABLE"),
             finalWhereClause);
@@ -230,7 +228,7 @@ public class TargetStorageOnKeyspaces
     // Build the DELETE statement
     String deleteStatement =
         String.format(
-            "DELETE FROM %s.%s WHERE %s",
+            doubleQuoteResolver("DELETE FROM %s.%s WHERE %s", config.getProperty("SOURCE_CQL_QUERY")),
             deleteTargetOperation.getKeyspaceName(),
             deleteTargetOperation.getTableName(),
             finalWhereClause);

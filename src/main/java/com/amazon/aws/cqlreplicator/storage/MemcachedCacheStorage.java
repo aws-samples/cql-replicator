@@ -8,13 +8,14 @@ package com.amazon.aws.cqlreplicator.storage;
 import com.amazon.aws.cqlreplicator.connector.ConnectionFactory;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import net.spy.memcached.MemcachedClient;
-import org.apache.commons.codec.binary.Base64;
 
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+
+import static com.amazon.aws.cqlreplicator.util.Utils.hashIt;
 
 public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
 
@@ -26,6 +27,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   private final String externalMemcachedStoragePort;
   private MemcachedClient memCachedClient;
   private String prefix;
+  private final static Utils.HashingFunctions hashingType = Utils.HashingFunctions.SHA_256;
 
   public MemcachedCacheStorage(Properties config, String operation) {
     this.operation = operation;
@@ -49,12 +51,10 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
 
   public void counterIncrement(int tile)
       throws InterruptedException, ExecutionException, TimeoutException {
-    var cntKey =
-        new String(
-            Base64.encodeBase64(
+    var cntKey = hashIt(
                 String.format(
                         "%s|%s|%s|%s|%s", tile, operation, "counter", targetKeyspace, targetTable)
-                    .getBytes()));
+                    .getBytes(), hashingType);
     var contains = memCachedClient.asyncGet(cntKey) != null;
     if (!contains) {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -64,12 +64,11 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
 
   private void counterDecrement(int tile, String operationType) {
     var cntKey =
-        new String(
-            Base64.encodeBase64(
+        hashIt(
                 String.format(
                         "%s|%s|%s|%s|%s",
                         tile, operationType, "counter", targetKeyspace, targetTable)
-                    .getBytes()));
+                    .getBytes(), hashingType);
     var contains = memCachedClient.get(cntKey) != null;
     if (contains) {
       memCachedClient.asyncDecr(cntKey, 1);
@@ -84,19 +83,18 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   @Override
   public Object get(Object key) {
     return memCachedClient.get(
-        new String(Base64.encodeBase64(String.format("%s|%s", prefix, key).getBytes())));
+        hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType));
   }
 
   public int getTotalChunks(int tile) {
     var result = 0;
     var chunks =
         memCachedClient.get(
-            new String(
-                Base64.encodeBase64(
+           hashIt(
                     String.format(
                             "%s|%s|%s|%s|%s",
                             "pd", targetKeyspace, targetTable, tile, "totalChunks")
-                        .getBytes())));
+                        .getBytes(), hashingType));
 
     if (chunks != null) result = Integer.parseInt((String) chunks);
 
@@ -108,7 +106,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
         String.format(
             "%s|%s|%s|%s|%s|%s", "pd", targetKeyspace, targetTable, "pksChunk", tile, chunk);
     var compressedPayload =
-        (byte[]) memCachedClient.get(new String(Base64.encodeBase64(keyOfChunk.getBytes())));
+        (byte[]) memCachedClient.get(hashIt(keyOfChunk.getBytes(), hashingType));
     var cborPayload = Utils.decompress(compressedPayload);
     return Utils.cborDecoder(cborPayload);
   }
@@ -118,7 +116,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
         .set(
-            new String(Base64.encodeBase64(String.format("%s|%s", prefix, key).getBytes())),
+            hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType),
             0,
             value)
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -129,7 +127,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
         .add(
-            new String(Base64.encodeBase64(String.format("%s|%s", prefix, key).getBytes())),
+            hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType),
             0,
             value)
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -144,11 +142,9 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   @Override
   public long getSize(int tile) throws InterruptedException, ExecutionException, TimeoutException {
     var cntKey =
-        new String(
-            Base64.encodeBase64(
-                String.format(
+        hashIt(String.format(
                         "%s|%s|%s|%s|%s", tile, operation, "counter", targetKeyspace, targetTable)
-                    .getBytes()));
+                    .getBytes(), hashingType);
     var contains = memCachedClient.asyncGet(cntKey).get(TIMEOUT_IN_SEC, TimeUnit.SECONDS) != null;
     if (!contains) {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -163,7 +159,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
     contains =
         memCachedClient
                 .asyncGet(
-                    new String(Base64.encodeBase64(String.format("%s|%s", prefix, key).getBytes())))
+                    hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType))
                 .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS)
             != null;
     return contains;
@@ -173,7 +169,7 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   public void remove(int tile, Object key)
       throws InterruptedException, ExecutionException, TimeoutException {
     memCachedClient
-        .delete(new String(Base64.encodeBase64(String.format("%s|%s", prefix, key).getBytes())))
+        .delete(hashIt(String.format("%s|%s", prefix, key).getBytes(), hashingType))
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     counterDecrement(tile, operation);
   }
@@ -184,9 +180,8 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
     var ksAndTable = String.format("%s|%s", targetKeyspace, targetTable);
     memCachedClient
         .delete(
-            new String(
-                Base64.encodeBase64(
-                    String.format("%s|%s|%s", operationType, ksAndTable, key).getBytes())))
+            hashIt(
+                    String.format("%s|%s|%s", operationType, ksAndTable, key).getBytes(), hashingType))
         .get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
     counterDecrement(tile, operationType);
   }
@@ -199,9 +194,8 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
   public void incrByOne(Object key)
       throws InterruptedException, ExecutionException, TimeoutException {
     var cntKey =
-        new String(
-            Base64.encodeBase64(
-                String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key).getBytes()));
+        hashIt(
+                String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key).getBytes(), hashingType);
     var contains = memCachedClient.asyncGet(cntKey).get(TIMEOUT_IN_SEC, TimeUnit.SECONDS) != null;
     if (!contains) {
       memCachedClient.add(cntKey, 0, "0").get(TIMEOUT_IN_SEC, TimeUnit.SECONDS);
@@ -211,9 +205,8 @@ public class MemcachedCacheStorage extends CacheStorage<Object, Object> {
 
   public void decrByOne(Object key) {
     var cntKey =
-        new String(
-            Base64.encodeBase64(
-                String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key).getBytes()));
+        hashIt(
+                String.format("%s|%s|%s|%s", "pd", targetKeyspace, targetTable, key).getBytes(), hashingType);
     var contains = memCachedClient.get(cntKey) != null;
     if (contains) {
       memCachedClient.asyncDecr(cntKey, 1);

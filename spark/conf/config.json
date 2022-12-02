@@ -1,0 +1,10 @@
+{
+  "ks_test_cql_replicator": [
+    {
+      "table_name": "test_cql_replicator",
+      "timestamp_column": "col3",
+      "concurrent_writes": "3",
+      "sync_type": "incremental",
+      "replace_nulls": "\"\""
+    }]
+}

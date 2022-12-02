@@ -23,6 +23,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 
 import static com.datastax.oss.driver.api.querybuilder.QueryBuilder.selectFrom;
 import static com.datastax.oss.driver.api.querybuilder.QueryBuilder.truncate;
@@ -117,7 +118,7 @@ public class CqlReplicatorTest {
   @Test
   @Order(3)
   void updateAssumption() throws InterruptedException {
-    Select query = selectFrom(keyspaceName, tableName).columns("key", "col0");
+    Select query = selectFrom(keyspaceName, tableName).columns("key",  "col0");
     SimpleStatement statement = query.build();
     ResultSet rsSource = cassandraConnectorSession.execute(statement);
     rsSource
@@ -125,18 +126,18 @@ public class CqlReplicatorTest {
         .forEach(
             row -> {
               LocalDate localDate = LocalDate.now();
-              UUID uuid = row.getUuid("key");
+              UUID uuid1 = row.getUuid("key");
               byte col0 = row.getByte("col0");
 
               PreparedStatement updatePreparedStatement =
                   cassandraConnectorSession.prepare(
                       String.format(
-                          "UPDATE %s.%s SET COL2=:COL2 WHERE KEY=:KEY AND COL0=:COL0 ",
+                          "UPDATE %s.%s SET COL2=:COL2 WHERE KEY=:KEY AND COL0=:COL0",
                           keyspaceName, tableName));
               BoundStatementBuilder boundStatementBuilder =
                   updatePreparedStatement
                       .boundStatementBuilder()
-                      .setUuid("key", uuid)
+                      .setUuid("key", uuid1)
                       .setByte("col0", col0)
                       .setLocalDate("col2", localDate)
                       .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
@@ -154,7 +155,7 @@ public class CqlReplicatorTest {
   @Test
   @Order(4)
   void deleteAssumption() throws InterruptedException {
-    Select query = selectFrom(keyspaceName, tableName).columns("key", "col0");
+    Select query = selectFrom(keyspaceName, tableName).columns("key","col0");
     SimpleStatement statement = query.build();
     ResultSet rsTarget = keyspacesConnectorSession.execute(statement);
     AtomicLong trgCnt = new AtomicLong();

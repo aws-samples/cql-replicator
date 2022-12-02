@@ -10,16 +10,22 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.databind.CBORMapper;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.codec.digest.MurmurHash3;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xerial.snappy.Snappy;
+import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
+import software.amazon.awssdk.services.cloudwatch.model.*;
 
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -28,9 +34,76 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Utils {
+
+  public enum HashingFunctions  {
+    MURMUR_HASH3_128_X64,
+    SHA_256
+  };
+
   private static final Pattern REGEX_COM = Pattern.compile(",");
   private static final Pattern REGEX_REG_SPACE = Pattern.compile(" ");
   private static final Logger LOGGER = LoggerFactory.getLogger(Utils.class);
+  private static final Pattern REGEX_DQ = Pattern.compile("\"[^\"]*\"");
+
+  public static String hashIt(byte[] data, HashingFunctions hashingFunctions) {
+    String hashValue = "";
+    if (hashingFunctions.equals(HashingFunctions.MURMUR_HASH3_128_X64)) {
+      var hash3 = MurmurHash3.hash128x64(data);
+      hashValue = Arrays.stream(hash3).mapToObj(String::valueOf).collect(Collectors.joining("|"));
+    }
+    if (hashingFunctions.equals(HashingFunctions.SHA_256)) {
+      var sha256 = DigestUtils.sha256(data);
+      hashValue = toHexString(sha256);
+    }
+    return hashValue;
+  }
+
+  private static String toHexString(byte[] data) {
+    var rs = new Formatter();
+    try (rs) {
+      for (var b: data) {
+        rs.format("%02x", b & 0xff);
+      }
+      return rs.toString();
+    }
+  }
+
+  public static void putMetricData(CloudWatchClient cw, Double dataPoint, String metricName) {
+    try {
+      Dimension dimension = Dimension.builder()
+              .name("OPERATIONS")
+              .value("REPLICA")
+              .build();
+
+      // Set an Instant object
+      String time = ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT);
+      Instant instant = Instant.parse(time);
+
+      MetricDatum datum = MetricDatum.builder()
+              .metricName(metricName)
+              .unit(StandardUnit.COUNT)
+              .value(dataPoint)
+              .timestamp(instant)
+              .dimensions(dimension).build();
+
+      PutMetricDataRequest request = PutMetricDataRequest.builder()
+              .namespace("CQL-REPLICATOR")
+              .metricData(datum).build();
+
+      cw.putMetricData(request);
+    } catch (CloudWatchException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static String doubleQuoteResolver(String source, String input) {
+    var matcher = REGEX_DQ.matcher(input);
+    var action = matcher.find();
+    if (action) {
+      return source.replace("%s.%s", "\"%s\".\"%s\"");
+    } else
+      return source;
+  }
 
   public static byte[] compress(byte[] payload) throws IOException {
     return Snappy.compress(payload);

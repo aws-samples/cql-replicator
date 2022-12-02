@@ -8,6 +8,7 @@
 target/
 deploy/
 build/
+opt/
 ledger_v4_0_pd.ldb/
 ledger_v4_0_rd.ldb/
 ledger_v4_0_pd.ldb-snapshot/
@@ -20,3 +21,5 @@ gradle-app.setting
 
 # Cache of project
 .gradletasknamecache
+/spark/keyspaces/
+/spark/tmp/

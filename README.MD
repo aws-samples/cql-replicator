@@ -81,8 +81,8 @@ There are two options to use and store credentials for Cassandra and Amazon Keys
 Monitoring is an important part of migration process. You should collect monitoring data from all replicated
 operations from Cassandra to Amazon Keyspaces so that you can easily ensure in data completeness.
 There are two options to monitor the migration process:
-    * Use Amazon CloudWatch
-    * Use replicator.stats table in Amazon Keyspaces 
+   * Use `Amazon CloudWatch`
+   * Use the `replicator.stats` table in Amazon Keyspaces 
 
 You can enable a preferred option in config.properties file, for example, if you want to 
 use Amazon CloudWatch set `ENABLE_CLOUD_WATCH` to true and set `CLOUD_WATCH_REGION` to your AWS region.

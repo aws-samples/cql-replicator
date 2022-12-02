@@ -121,8 +121,6 @@ public class Starter implements Callable<Integer> {
       } catch (PreFlightCheckException e) {
         System.exit(-1);
       }
-
-
     }
 
     Runtime.getRuntime().addShutdownHook(new Thread(new Stopper()));

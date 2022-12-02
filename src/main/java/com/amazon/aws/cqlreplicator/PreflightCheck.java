@@ -8,7 +8,6 @@ package com.amazon.aws.cqlreplicator;
 import com.amazon.aws.cqlreplicator.connector.ConnectionFactory;
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.datastax.oss.driver.api.core.servererrors.*;
-import net.spy.memcached.MemcachedClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -18,7 +17,7 @@ import software.amazon.awssdk.services.cloudwatch.model.CloudWatchException;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.ConnectException;
+import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
@@ -28,13 +27,10 @@ import static com.amazon.aws.cqlreplicator.util.Utils.putMetricData;
 
 public class PreflightCheck implements AutoCloseable {
 
-    private MemcachedClient buildMemcachedSession;
-
     @Override
     public void close() {
         keyspacesConnector.close();
         cassandraConnector.close();
-        buildMemcachedSession.shutdown();
     }
 
     private enum PreflightCheckStatus {
@@ -60,6 +56,7 @@ public class PreflightCheck implements AutoCloseable {
     private String rsSample;
     private String[] source;
     private final String writeColumns;
+    private final Map<String, String> memcachedEndpoint = new HashMap<>();
 
     public PreflightCheck(Properties config) {
         this.connectionFactory = new ConnectionFactory(config);
@@ -70,6 +67,8 @@ public class PreflightCheck implements AutoCloseable {
         this.isCloudWatch = config.getProperty("ENABLE_CLOUD_WATCH").equals("true");
         this.cloudWatchRegion = isCloudWatch ? config.getProperty("CLOUD_WATCH_REGION") : "";
         this.writeColumns = config.getProperty("WRITETIME_COLUMNS");
+        this.memcachedEndpoint.put("STORAGE_ENDPOINT", config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT"));
+        this.memcachedEndpoint.put("STORAGE_PORT", config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT"));
     }
 
     private String prepareOutput(String statement, PreflightCheckStatus status ){
@@ -138,12 +137,16 @@ public class PreflightCheck implements AutoCloseable {
     }
 
     private PreflightCheckStatus checkMemcachedConnectivity() {
+        var pfcs = PreflightCheckStatus.FAILED;
         try {
-            buildMemcachedSession = connectionFactory.buildMemcachedSession();
+            var clientSocket = new Socket(memcachedEndpoint.
+                    get("STORAGE_ENDPOINT"),
+                    Integer.parseInt(memcachedEndpoint.get("STORAGE_PORT")));
+            pfcs = PreflightCheckStatus.PASSED;
         } catch (IOException e) {
-            return PreflightCheckStatus.FAILED;
+            pfcs = PreflightCheckStatus.FAILED;
         }
-        return PreflightCheckStatus.PASSED;
+        return pfcs;
     }
 
     private PreflightCheckStatus checkLocalStorageAvailability() {

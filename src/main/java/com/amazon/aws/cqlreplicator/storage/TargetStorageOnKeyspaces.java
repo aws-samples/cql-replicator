@@ -73,7 +73,8 @@ public class TargetStorageOnKeyspaces
     var registry = RetryRegistry.of(retryConfig);
     retry = registry.retry("TargetKeyspacesStorage");
     publisher = retry.getEventPublisher();
-
+    publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event));
+    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event));
     this.config = properties;
     this.psKeyspaces = cqlSession.prepare(properties.getProperty("SOURCE_CQL_QUERY"));
   }
@@ -90,32 +91,24 @@ public class TargetStorageOnKeyspaces
   @Override
   public List<Row> execute(BatchStatementBuilder batchableStatement) {
     Supplier<List<Row>> supplier = () -> cqlSession.execute(batchableStatement.build()).all();
-    publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event.toString()));
-    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
     return Retry.decorateSupplier(retry, supplier).get();
   }
 
   public List<Row> extract(BoundStatementBuilder boundStatementBuilder) {
     Supplier<List<Row>> supplier = () -> cqlSession.execute(boundStatementBuilder.build()).all();
-    publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event.toString()));
-    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
     return Retry.decorateSupplier(retry, supplier).get();
   }
 
   public boolean execute(SimpleStatement simpleStatement) {
-    AtomicBoolean result = new AtomicBoolean(true);
     Supplier<Row> supplier = () -> cqlSession.execute(simpleStatement).one();
-    Retry.decorateSupplier(retry, supplier).get();
-    publisher.onError(
-        event -> {
-          LOGGER.error("Operation was failed on event {}", event.toString());
-          result.set(false);
-        });
-    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
-    // if a request is not succeeded set result to false
-    publisher.onSuccess(event -> result.set(true));
-
-    return result.get();
+    try {
+      Retry.decorateSupplier(retry, supplier).get();
+      return true;
+    }
+      catch (RuntimeException e) {
+      LOGGER.error("Exception occured executing this statement: " + simpleStatement.getQuery(),e);
+      return false;
+      }
   }
 
   @Override
@@ -210,8 +203,6 @@ public class TargetStorageOnKeyspaces
             .build());
 
     Supplier<Boolean> supplier = () -> cqlSession.execute(batchableStatements.build()).wasApplied();
-    publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event.toString()));
-    publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event.toString()));
     return Retry.decorateSupplier(retry, supplier).get();
   }
 

@@ -11,6 +11,17 @@ Amazon ECS is a fully managed container orchestration service makes it easy for 
 ## Deploy Amazon ElastiCache (memcached)
 Following, this [instruction](https://docs.aws.amazon.com/AmazonElastiCache/latest/mem-ug/deploy-cluster.html), you can deploy the ElastiCache cluster.
 
+## Install JQ and ECS-CLI
+JQ:
+
+```sudo yum install jq```
+
+ECS-CLI - Refer to the [ECS-CLI](https://github.com/aws/amazon-ecs-cli#installing) documentation for the binary-archive download links:
+```
+sudo curl -so /usr/local/bin/ecs-cli https://amazon-ecs-cli.s3.amazonaws.com/<desired-binary>
+sudo chmod +x /usr/local/bin/ecs-cli
+```
+
 ## Copy the config and conf files to the S3 bucket
 Let's create a S3 bucket cqlreplicator with prefix /ks_test_cql_replicator/test_cql_replicator.
 Copy CassandraConnector.conf, KeyspacesConnector.conf, and config.properties to ```s3://cqlreplicator/ks_test_cql_replicator/test_cql_replicator```.
@@ -23,12 +34,17 @@ Let's build the docker image for x86 Linux `docker build -f docker/Dockerfile -t
 or you can build the docker image for [ARM64 Linux](https://docs.docker.com/desktop/multi-arch/) `docker buildx build --platform linux/arm64 --load -f docker/Dockerfile -t cqlreplicator:latest --build-arg AWS_REGION="us-east-1" \
  --build-arg AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID --build-arg AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY --build-arg AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN .`.
 
+**NOTE**: Build the image as per the desired instance type for the ECS cluster.
+
 Retrieve an authentication token and authenticate your Docker client to your registry.
 Use the AWS CLI: ```aws ecr get-login-password --region us-east-1 | docker login --username AWS 
 --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com```.
 
 After the build completes, tag your image, so you can push the image to this repository:
 ```docker tag cqlreplicator:latest 123456789012.dkr.ecr.us-east-1.amazonaws.com/cqlreplicator:latest```
+
+Once you tag the image, create the ECR repository with the name : 'cqlreplicator' either from Management console or using ECR aws cli.
+
 Run the following command to push this image to your newly created AWS repository:
 ```docker push 123456789012.dkr.ecr.us-east-1.amazonaws.com/cqlreplicator:latest```
 
@@ -37,8 +53,11 @@ You must create an IAM policy for your tasks to use that specifies the permissio
 you would like the containers in your tasks to have. You have several ways to create 
 a new IAM permission policy. You can copy a complete AWS managed policy that already 
 does some of what you're looking for and then customize it to your specific requirements. Add
-an inline policies to access Amazon S3 and Keyspaces. 
+an inline policies to access Amazon S3 and Keyspaces and managed ```'AmazonECSTaskExecutionRolePolicy'``` to the role.
+Verify if the trust relationship is set under principal for service ```'ecs-tasks.amazonaws.com'```.
 [ECS task execution role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html)  
+
+
 
 ## Create ECS Role
 Amazon ECS container instances, including both Amazon EC2 and external instances, 
@@ -50,6 +69,8 @@ However, you can manually create the role and attach the managed IAM policy for 
 to allow Amazon ECS to add permissions for future features and enhancements as they are introduced. 
 Use the following procedure to check and see if your account already has the Amazon ECS container 
 instance IAM role and to attach the managed IAM policy if needed.
+Add permissions to have access to Elasticache, keyspaces, S3, ECR, ECS and managed ```'AmazonEC2ContainerServiceforEC2Role'```.
+Verify if the trust relationship is set under principal for service ```'ecs-tasks.amazonaws.com'```.
 [ECS role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html)
 
 ## Define the number of tiles

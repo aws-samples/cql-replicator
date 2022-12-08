@@ -12,6 +12,8 @@ SG=$4
 KEYPAIR_NAME=$5
 CLUSTER_NAME=$6
 
+ecs-cli configure --cluster $CLUSTER_NAME --region us-east-1
+
 ecs-cli up --force --keypair $KEYPAIR_NAME --capability-iam \
            --size $INPUT --instance-type a1.xlarge --subnets $SUBNETS \
            --vpc $VPC --security-group $SG --region us-east-1 --launch-type EC2

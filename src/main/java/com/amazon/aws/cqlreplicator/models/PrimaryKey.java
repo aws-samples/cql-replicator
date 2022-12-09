@@ -24,4 +24,12 @@ public class PrimaryKey implements Serializable {
   public String getClusteringColumns() {
     return clusteringColumns;
   }
+
+  @Override
+  public String toString() {
+    return "PrimaryKey{" +
+            "partitionKeys='" + partitionKeys + '\'' +
+            ", clusteringColumns='" + clusteringColumns + '\'' +
+            '}';
+  }
 }

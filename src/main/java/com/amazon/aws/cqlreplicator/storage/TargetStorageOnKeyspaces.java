@@ -25,7 +25,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -42,7 +41,6 @@ public class TargetStorageOnKeyspaces
   private static Retry retry;
   private static Retry.EventPublisher publisher;
   private final Properties config;
-  private final PreparedStatement psKeyspaces;
 
   public TargetStorageOnKeyspaces(Properties properties) {
     var connectionFactory = new ConnectionFactory(properties);
@@ -78,7 +76,6 @@ public class TargetStorageOnKeyspaces
     publisher.onError(event -> LOGGER.error("Operation was failed on event {}", event));
     publisher.onRetry(event -> LOGGER.warn("Operation was retried on event {}", event));
     this.config = properties;
-    this.psKeyspaces = cqlSession.prepare(properties.getProperty("SOURCE_CQL_QUERY"));
   }
 
   @Override

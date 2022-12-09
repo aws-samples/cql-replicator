@@ -46,7 +46,7 @@ public class SourceStorageOnCassandra {
   }
 
   public boolean findPrimaryKey(
-      PrimaryKey primaryKey, String[] partitionKeyNames, String[] clusteringKeyNames) {
+      PrimaryKey primaryKey, String[] partitionKeyNames, String[] clusteringKeyNames) throws ArrayIndexOutOfBoundsException {
     List<String> whereClause = new ArrayList<>();
 
     var pkValues = REGEX_PIPE.split(primaryKey.getPartitionKeys());

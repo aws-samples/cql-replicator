@@ -25,9 +25,6 @@ import software.amazon.awssdk.services.cloudwatch.model.*;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
@@ -126,7 +123,7 @@ public class CassandraReplicationTask extends AbstractTask {
       final String[] pks,
       final String[] cls,
       CacheStorage<String, String> pkCache)
-      throws IOException, InterruptedException, ExecutionException, TimeoutException {
+      throws IOException, InterruptedException, ExecutionException, TimeoutException, ArrayIndexOutOfBoundsException {
     if (!sourceStorageOnCassandra.findPrimaryKey(primaryKey, pks, cls)) {
       var rowIsDeleted =
           targetStorageOnKeyspaces.delete(primaryKey, pks, cls, cassandraSchemaMetadata);
@@ -163,9 +160,13 @@ public class CassandraReplicationTask extends AbstractTask {
                       try {
                         delete(pk, pks, cls, pkCache);
                       } catch (IOException
+                          | ArrayIndexOutOfBoundsException
                           | InterruptedException
                           | ExecutionException
                           | TimeoutException e) {
+                        if (e instanceof ArrayIndexOutOfBoundsException) {
+                          LOGGER.error("Perhaps one of the columns in your primary key is empty! pks:{}, cls:{}, pk:{}", Arrays.toString(pks), Arrays.toString(cls), pk);
+                        }
                         throw new RuntimeException(e);
                       }
                     }));
@@ -424,6 +425,25 @@ public class CassandraReplicationTask extends AbstractTask {
       }
     }
 
+    public static BoundStatementBuilder prepareCassandraStatement(String[] pk, String[] pks) {
+      BoundStatementBuilder boundStatementCassandraBuilder =
+              sourceStorageOnCassandra.getCassandraPreparedStatement().boundStatementBuilder();
+      int i = 0;
+      try {
+        for (String columnName : pks) {
+          var type = cassandraSchemaMetadata.get("partition_key").get(columnName);
+          boundStatementCassandraBuilder =
+                  aggregateBuilder(type, columnName, pk[i], boundStatementCassandraBuilder);
+          i++;
+        }
+      } catch (ArrayIndexOutOfBoundsException exception) {
+        LOGGER.error("Incorrect pk {} in a position {}", Arrays.toString(pk), i);
+        LOGGER.error("Reason: perhaps one of the column in the primary key is an empty string");
+        throw new RuntimeException(exception);
+      }
+      return boundStatementCassandraBuilder;
+    }
+
     @Override
     public void run() {
 
@@ -432,17 +452,7 @@ public class CassandraReplicationTask extends AbstractTask {
       ConcurrentMap<String, Long> sourceHashMap = new ConcurrentHashMap<>();
       ConcurrentMap<String, String> jsonColumnHashMapPerPartition = new ConcurrentHashMap<>();
 
-      BoundStatementBuilder boundStatementCassandraBuilder =
-          sourceStorageOnCassandra.getCassandraPreparedStatement().boundStatementBuilder();
-
-      int i = 0;
-
-      for (String columnName : pks) {
-        var type = cassandraSchemaMetadata.get("partition_key").get(columnName);
-        boundStatementCassandraBuilder =
-            aggregateBuilder(type, columnName, pk[i], boundStatementCassandraBuilder);
-        i++;
-      }
+      var boundStatementCassandraBuilder = prepareCassandraStatement(pk, pks);
 
       var cassandraResult = sourceStorageOnCassandra.extract(boundStatementCassandraBuilder);
       cassandraResult.parallelStream()

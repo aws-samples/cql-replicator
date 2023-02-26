@@ -45,8 +45,14 @@ public class SourceStorageOnCassandra {
         getColumns(config.getProperty("TARGET_KEYSPACE"), config.getProperty("TARGET_TABLE"));
   }
 
+  public String getPartitioner() {
+    var ring = cassandraSession.getMetadata().getTokenMap();
+    return ring.get().getPartitionerName();
+  }
+
   public boolean findPrimaryKey(
-      PrimaryKey primaryKey, String[] partitionKeyNames, String[] clusteringKeyNames) throws ArrayIndexOutOfBoundsException {
+      PrimaryKey primaryKey, String[] partitionKeyNames, String[] clusteringKeyNames)
+      throws ArrayIndexOutOfBoundsException {
     List<String> whereClause = new ArrayList<>();
 
     var pkValues = REGEX_PIPE.split(primaryKey.getPartitionKeys());
@@ -64,7 +70,8 @@ public class SourceStorageOnCassandra {
 
     String selectStatement =
         String.format(
-            doubleQuoteResolver("SELECT %s FROM %s.%s WHERE %s", config.getProperty("SOURCE_CQL_QUERY")),
+            doubleQuoteResolver(
+                "SELECT %s FROM %s.%s WHERE %s", config.getProperty("SOURCE_CQL_QUERY")),
             pks,
             config.getProperty("TARGET_KEYSPACE"),
             config.getProperty("TARGET_TABLE"),
@@ -118,6 +125,29 @@ public class SourceStorageOnCassandra {
         .all();
   }
 
+  public List<Row> findPartitionsByTokenRange(
+      String pksStr, BigInteger startRange, BigInteger endRange) {
+
+    BoundStatementBuilder psPksbyRange = null;
+
+    if (startRange.compareTo(endRange) == -1) {
+      psPksbyRange =
+          getPartitionKeysByTokenRange(pksStr, startRange, endRange)
+              .boundStatementBuilder()
+              .setBigInteger("r1", startRange)
+              .setBigInteger("r2", endRange);
+    } else if (startRange.compareTo(endRange) == 1) {
+      psPksbyRange =
+          getPartitionKeysByTokenRange(pksStr, startRange, endRange)
+              .boundStatementBuilder()
+              .setBigInteger("r1", startRange);
+    }
+    BoundStatement boundStatement = psPksbyRange.build();
+    return cassandraSession
+        .execute(boundStatement.setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM))
+        .all();
+  }
+
   public List<ImmutablePair<String, String>> getTokenRanges() {
     List<ImmutablePair<String, String>> ranges = new ArrayList<>();
     Metadata metadata = cassandraSession.getMetadata();
@@ -134,7 +164,7 @@ public class SourceStorageOnCassandra {
           ranges.add(new ImmutablePair<>(String.valueOf(Long.MIN_VALUE), String.valueOf(end)));
         }
       }
-      // To support Cassandra<2.1 clusters
+      // Support RandomPartitioner
       if (range.getStart() instanceof RandomToken) {
         BigInteger start = ((RandomToken) range.getStart()).getValue();
         BigInteger end = ((RandomToken) range.getEnd()).getValue();
@@ -163,7 +193,9 @@ public class SourceStorageOnCassandra {
 
     String finalCqlStatement =
         String.format(
-            doubleQuoteResolver("select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2", config.getProperty("SOURCE_CQL_QUERY")),
+            doubleQuoteResolver(
+                "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
+                config.getProperty("SOURCE_CQL_QUERY")),
             partitionKeyStr,
             config.getProperty("TARGET_KEYSPACE"),
             config.getProperty("TARGET_TABLE"),
@@ -173,7 +205,9 @@ public class SourceStorageOnCassandra {
     if (startRange < endRange) {
       finalCqlStatement =
           String.format(
-              doubleQuoteResolver("select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2", config.getProperty("SOURCE_CQL_QUERY")),
+              doubleQuoteResolver(
+                  "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
+                  config.getProperty("SOURCE_CQL_QUERY")),
               partitionKeyStr,
               config.getProperty("TARGET_KEYSPACE"),
               config.getProperty("TARGET_TABLE"),
@@ -182,7 +216,49 @@ public class SourceStorageOnCassandra {
     } else if (endRange < startRange) {
       finalCqlStatement =
           String.format(
-              doubleQuoteResolver("select distinct %s from %s.%s where token(%s)>=:r1", config.getProperty("SOURCE_CQL_QUERY")),
+              doubleQuoteResolver(
+                  "select distinct %s from %s.%s where token(%s)>=:r1",
+                  config.getProperty("SOURCE_CQL_QUERY")),
+              partitionKeyStr,
+              config.getProperty("TARGET_KEYSPACE"),
+              config.getProperty("TARGET_TABLE"),
+              partitionKeyStr);
+    }
+
+    return cassandraSession.prepare(finalCqlStatement);
+  }
+
+  private PreparedStatement getPartitionKeysByTokenRange(
+      String partitionKeyStr, BigInteger startRange, BigInteger endRange) {
+
+    String finalCqlStatement =
+        String.format(
+            doubleQuoteResolver(
+                "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
+                config.getProperty("SOURCE_CQL_QUERY")),
+            partitionKeyStr,
+            config.getProperty("TARGET_KEYSPACE"),
+            config.getProperty("TARGET_TABLE"),
+            partitionKeyStr,
+            partitionKeyStr);
+
+    if (startRange.compareTo(endRange) == -1) {
+      finalCqlStatement =
+          String.format(
+              doubleQuoteResolver(
+                  "select distinct %s from %s.%s where token(%s)>=:r1 and token(%s)<=:r2",
+                  config.getProperty("SOURCE_CQL_QUERY")),
+              partitionKeyStr,
+              config.getProperty("TARGET_KEYSPACE"),
+              config.getProperty("TARGET_TABLE"),
+              partitionKeyStr,
+              partitionKeyStr);
+    } else if (endRange.compareTo(startRange) == -1) {
+      finalCqlStatement =
+          String.format(
+              doubleQuoteResolver(
+                  "select distinct %s from %s.%s where token(%s)>=:r1",
+                  config.getProperty("SOURCE_CQL_QUERY")),
               partitionKeyStr,
               config.getProperty("TARGET_KEYSPACE"),
               config.getProperty("TARGET_TABLE"),

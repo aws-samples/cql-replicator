@@ -1,4 +1,4 @@
-# Migrate historical Cassandra workload to Amazon Keyspaces
+ # Migrate historical Cassandra workload to Amazon Keyspaces
 In general terms, data migration is the transfer of the existing historical data to new storage, system,
 or file format. This process is not as simple as it sounds. It involves a lot of preparation and post-migration
 activities including planning, creating backups, quality testing, and validation of results.

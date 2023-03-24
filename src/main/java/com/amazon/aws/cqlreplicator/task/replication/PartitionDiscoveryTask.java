@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.math.BigInteger;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
@@ -61,6 +62,7 @@ public class PartitionDiscoveryTask extends AbstractTask {
       throws IOException, InterruptedException, ExecutionException, TimeoutException {
 
     AdvancedCache<String> advancedCache = null;
+    List<Row> resultSetRange = new ArrayList<>();
 
     if (pkCache instanceof MemcachedCacheStorage) {
       advancedCache =
@@ -88,12 +90,27 @@ public class PartitionDiscoveryTask extends AbstractTask {
 
     var pksStr = String.join(",", pks);
 
-    for (ImmutablePair<String, String> range : rangeList) {
-      var rangeStart = Long.parseLong(range.left);
-      var rangeEnd = Long.parseLong(range.right);
+    var partitioner = sourceStorageOnCassandra.getPartitioner();
 
-      var resultSetRange =
-          sourceStorageOnCassandra.findPartitionsByTokenRange(pksStr, rangeStart, rangeEnd);
+    LOGGER.info("Partitioner: {}", partitioner);
+
+    for (ImmutablePair<String, String> range : rangeList) {
+
+      Object rangeStart, rangeEnd;
+      if (!partitioner.equals("org.apache.cassandra.dht.RandomPartitioner")) {
+        rangeStart = Long.parseLong(range.left);
+        rangeEnd = Long.parseLong(range.right);
+        resultSetRange =
+                sourceStorageOnCassandra.findPartitionsByTokenRange(
+                        pksStr, (Long) rangeStart, (Long) rangeEnd);
+
+      } else {
+        rangeStart = new BigInteger(range.left);
+        rangeEnd = new BigInteger(range.right);
+        resultSetRange =
+                sourceStorageOnCassandra.findPartitionsByTokenRange(
+                        pksStr, (BigInteger) rangeStart, (BigInteger) rangeEnd);
+      }
 
       LOGGER.trace("Processing a range: {} - {}", rangeStart, rangeEnd);
       for (Row eachResult : resultSetRange) {

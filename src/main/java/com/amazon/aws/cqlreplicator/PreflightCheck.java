@@ -115,19 +115,6 @@ public class PreflightCheck implements AutoCloseable {
         return (cassandraConnector.isClosed()) ? PreflightCheckStatus.FAILED : PreflightCheckStatus.PASSED;
     }
 
-    private PreflightCheckStatus checkMemcachedConnectivity() {
-        var pfcs = PreflightCheckStatus.FAILED;
-        try {
-            var clientSocket = new Socket(memcachedEndpoint.
-                    get("STORAGE_ENDPOINT"),
-                    Integer.parseInt(memcachedEndpoint.get("STORAGE_PORT")));
-            pfcs = PreflightCheckStatus.PASSED;
-        } catch (IOException e) {
-            pfcs = PreflightCheckStatus.FAILED;
-        }
-        return pfcs;
-    }
-
     private PreflightCheckStatus checkLocalStorageAvailability() {
         return (file.canWrite() && file.canRead()) ? PreflightCheckStatus.PASSED : PreflightCheckStatus.FAILED;
     }

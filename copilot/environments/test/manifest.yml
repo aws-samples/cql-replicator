@@ -21,10 +21,10 @@ variables:
   CQLREPLICATOR_HOME: '/root/CQLReplicator'
   KEYSPACENAME: 'ks_test_cql_replicator'
   TABLENAME: 'test_cql_replicator'
-  JAVA_OPTS: '-Xms2048m -Xmx2048m -XX:+UseShenandoahGC'
+  JAVA_OPTS: '-Xms4096m -Xmx4096m -XX:+UseShenandoahGC'
 
-cpu: 2048       # Number of CPU units for the task.
-memory: 4096    # Amount of memory in MiB used by the task.
+cpu: 4096       # Number of CPU units for the task.
+memory: 8192    # Amount of memory in MiB used by the task.
 count: 16       # Number of tasks that should be running in your service.
 exec: true     # Enable running commands in your container.
 platform: linux/arm64

@@ -32,7 +32,7 @@ dependencies {
     implementation 'software.amazon.awssdk:dynamodb:2.17.91'
     implementation 'net.spy:spymemcached:2.12.3'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.12.3'
-    implementation 'org.xerial.snappy:snappy-java:1.1.8.4'
+    implementation 'org.xerial.snappy:snappy-java:1.1.10.1'
     implementation 'io.github.resilience4j:resilience4j-ratelimiter:1.7.1'
     implementation 'org.lz4:lz4-java:1.4.1'
     implementation 'org.iq80.leveldb:leveldb-api:0.12'
@@ -47,7 +47,7 @@ dependencies {
 group = 'groupId'
 version = '1.0-SNAPSHOT'
 description = 'CQLReplicator'
-java.sourceCompatibility = JavaVersion.VERSION_11
+java.sourceCompatibility = JavaVersion.VERSION_17
 
 publishing {
     publications {
@@ -112,10 +112,10 @@ task deploy(type: GradleBuild) {
 }
 
 task buildZip(type: Zip) {
-    mkdir "${project.rootDir}/deploy"
+    mkdir "${project.rootDir}/docker"
     from "$buildDir/dist"
     archiveName "CQLReplicator.zip"
-    destinationDir(new File(project.projectDir.getAbsolutePath() + "/deploy"))
+    destinationDir(new File(project.projectDir.getAbsolutePath() + "/docker"))
 }
 
 tasks.withType(JavaCompile) {

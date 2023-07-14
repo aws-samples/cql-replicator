@@ -9,7 +9,7 @@ import com.amazon.ion.IonSystem;
 import com.amazon.ion.system.IonReaderBuilder;
 import com.amazon.ion.system.IonSystemBuilder;
 import com.amazon.ion.system.IonTextWriterBuilder;
-import kotlin.jvm.functions.Function0;
+import io.vavr.Function0;
 import org.partiql.lang.CompilerPipeline;
 import org.partiql.lang.eval.Bindings;
 import org.partiql.lang.eval.EvaluationSession;
@@ -19,45 +19,47 @@ import org.partiql.lang.eval.Expression;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
-/** Provides intermediate JSON transformation via PartiQL */
+/**
+ * Provides intermediate JSON transformation via PartiQL
+ */
 public class IonEngine {
 
-  private IonSystem ion;
-  private CompilerPipeline pipeline;
+    private final IonSystem ion;
+    private final CompilerPipeline pipeline;
 
-  public IonEngine() {
-    // Initializes the ion system used by PartiQL
-    this.ion = IonSystemBuilder.standard().build();
-    // CompilerPipeline is the main entry point for the PartiQL lib giving you access to the
-    // compiler
-    // and value factories
-    this.pipeline = CompilerPipeline.standard(ion);
-  }
-
-  // Query originalData based on SQL-92 syntax
-  public String query(String sql, String originalData) {
-
-    Expression selectAndFilter = pipeline.compile(sql);
-    try (IonReader ionReader = IonReaderBuilder.standard().build(originalData);
-        var byteArrayOutputStream = new ByteArrayOutputStream();
-        var resultWriter = IonTextWriterBuilder.json().build(byteArrayOutputStream)) {
-      var values = ion.getLoader().load(ionReader);
-      Function0<ExprValue> res = () -> pipeline.getValueFactory().newFromIonValue(values);
-
-      var session =
-          EvaluationSession.builder()
-              .globals(
-                  Bindings.<ExprValue>lazyBindingsBuilder()
-                      .addBinding("inputDocument", res)
-                      .build())
-              .build();
-      var selectAndFilterResult = selectAndFilter.eval(session);
-
-      selectAndFilterResult.getIonValue().writeTo(resultWriter);
-      return byteArrayOutputStream.toString();
-    } catch (IOException e) {
-      System.err.printf("Unable to transform %s%n", e);
+    public IonEngine() {
+        // Initializes the ion system used by PartiQL
+        this.ion = IonSystemBuilder.standard().build();
+        // CompilerPipeline is the main entry point for the PartiQL lib giving you access to the
+        // compiler
+        // and value factories
+        this.pipeline = CompilerPipeline.standard(ion);
     }
-    return sql;
-  }
+
+    // Query originalData based on SQL-92 syntax
+    public String query(String sql, String originalData) {
+
+        Expression selectAndFilter = pipeline.compile(sql);
+        try (IonReader ionReader = IonReaderBuilder.standard().build(originalData);
+             var byteArrayOutputStream = new ByteArrayOutputStream();
+             var resultWriter = IonTextWriterBuilder.json().build(byteArrayOutputStream)) {
+            var values = ion.getLoader().load(ionReader);
+            Function0<ExprValue> res = () -> pipeline.getValueFactory().newFromIonValue(values);
+
+            var session =
+                    EvaluationSession.builder()
+                            .globals(
+                                    Bindings.<ExprValue>lazyBindingsBuilder()
+                                            .addBinding("inputDocument", (kotlin.jvm.functions.Function0<? extends ExprValue>) res)
+                                            .build())
+                            .build();
+            var selectAndFilterResult = selectAndFilter.eval(session);
+
+            selectAndFilterResult.getIonValue().writeTo(resultWriter);
+            return byteArrayOutputStream.toString();
+        } catch (IOException e) {
+            System.err.printf("Unable to transform %s%n", e);
+        }
+        return sql;
+    }
 }

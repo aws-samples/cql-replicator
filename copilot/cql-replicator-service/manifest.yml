@@ -1,0 +1,41 @@
+# The manifest for the "cql-replicator-service" service.
+# Read the full specification for the "Backend Service" type at:
+# https://aws.github.io/copilot-cli/docs/manifest/backend-service/
+
+# Your service name will be used in naming your resources like log groups, ECS services, etc.
+name: cql-replicator-service
+type: Backend Service
+
+# Configuration for your containers and service.
+image:
+  # Docker build arguments. For additional overrides: https://aws.github.io/copilot-cli/docs/manifest/backend-service/#image-build
+  build: /docker/Dockerfile
+  cpuArchitecture: ARM64
+
+network:
+  vpc:
+    id: vpc-46a9863c
+    subnets:
+      public:
+        - id: subnet-d12a33ff
+        - id: subnet-ef1630d1
+
+variables:
+  TILES: 16
+  BUCKETNAME: 'cqlreplicator'
+  CQLREPLICATOR_HOME: '/root/CQLReplicator'
+  KEYSPACENAME: 'ks_test_cql_replicator'
+  TABLENAME: 'test_cql_replicator'
+  JAVA_OPTS: '-Xms4096m -Xmx4096m -XX:+UseShenandoahGC'
+
+cpu: 4096       # Number of CPU units for the task.
+memory: 8192    # Amount of memory in MiB used by the task.
+count: 16       # Number of tasks that should be running in your service.
+exec: true     # Enable running commands in your container.
+platform: linux/arm64
+
+observability:
+  container_insights: true
+
+#storage:
+#  ephemeral: 20

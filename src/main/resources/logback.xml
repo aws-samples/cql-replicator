@@ -17,11 +17,12 @@
         <queueSize>1000</queueSize>
     </appender>
 
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTask" level="INFO" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTaskV2" level="ERROR"
+            additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
 
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTask" level="INFO"
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTaskV2" level="ERROR"
             additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
@@ -30,7 +31,11 @@
         <appender-ref ref="ASYNC"/>
     </logger>
 
-    <logger name="com.amazon.aws.cqlreplicator.task.replication" level="INFO" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.task.replication" level="ERROR" additivity="false">
+        <appender-ref ref="ASYNC"/>
+    </logger>
+
+    <logger name="com.amazon.aws.cqlreplicator.storage.StorageServiceImpl" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
 

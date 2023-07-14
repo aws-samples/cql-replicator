@@ -1,0 +1,34 @@
+# The manifest for the "test" environment.
+# Read the full specification for the "Environment" type at:
+#  https://aws.github.io/copilot-cli/docs/manifest/environment/
+
+# Your environment name will be used in naming your resources like VPC, cluster, etc.
+name: test
+type: Environment
+
+# Import your own VPC and subnets or configure how they should be created.
+network:
+  vpc:
+    id: vpc-46a9863c
+    subnets:
+      public:
+        - id: subnet-d12a33ff
+        - id: subnet-ef1630d1
+
+variables:
+  TILES: 16
+  BUCKETNAME: 'cqlreplicator'
+  CQLREPLICATOR_HOME: '/root/CQLReplicator'
+  KEYSPACENAME: 'ks_test_cql_replicator'
+  TABLENAME: 'test_cql_replicator'
+  JAVA_OPTS: '-Xms4096m -Xmx4096m -XX:+UseShenandoahGC'
+
+cpu: 4096       # Number of CPU units for the task.
+memory: 8192    # Amount of memory in MiB used by the task.
+count: 16       # Number of tasks that should be running in your service.
+exec: true     # Enable running commands in your container.
+platform: linux/arm64
+
+# Configure observability for your environment resources.
+observability:
+  container_insights: true

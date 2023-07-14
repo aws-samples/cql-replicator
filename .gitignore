@@ -9,6 +9,7 @@ target/
 deploy/
 build/
 opt/
+docker/CQLReplicator.zip
 ledger_v4_0_pd.ldb/
 ledger_v4_0_rd.ldb/
 ledger_v4_0_pd.ldb-snapshot/

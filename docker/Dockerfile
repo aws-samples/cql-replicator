@@ -22,14 +22,15 @@ WORKDIR $CQLREPLICATOR_WORKING_DIR
 RUN yum update -y
 RUN rpm --import https://yum.corretto.aws/corretto.key
 RUN curl -L -o /etc/yum.repos.d/corretto.repo https://yum.corretto.aws/corretto.repo
-RUN yum install -y java-11-amazon-corretto-devel
+RUN yum install -y java-17-amazon-corretto-devel
 RUN yum install -y awscli unzip
 RUN yum clean all
 
 ENV JAVA_OPTS=""
+ENV CQLREPLICATOR_NAME_BUCKET_NAME=cqlreplicator
 
 #CQLReplicator SETUP
-COPY deploy/CQLReplicator.zip $CQLREPLICATOR_WORKING_DIR/
+COPY CQLReplicator.zip $CQLREPLICATOR_WORKING_DIR/
 RUN unzip $CQLREPLICATOR_WORKING_DIR/CQLReplicator.zip
 RUN chmod 755 $CQLREPLICATOR_WORKING_DIR/CQLReplicator/bin/cqlreplicator.sh
 ENV PATH="${PATH}:$CQLREPLICATOR_WORKING_DIR/CQLReplicator/bin"

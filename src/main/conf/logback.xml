@@ -13,26 +13,27 @@
         <appender-ref ref="CONSOLE"/>
         <queueSize>1000</queueSize>
     </appender>
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTask" level="ERROR" additivity="false">
-        <appender-ref ref="ASYNC"/>
-    </logger>
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTask" level="ERROR"
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTaskV2" level="ERROR"
             additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-    <logger name="com.amazon.aws.cqlreplicator.Starter" level="ERROR" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTaskV2" level="ERROR"
+            additivity="false">
+        <appender-ref ref="ASYNC"/>
+    </logger>
+    <logger name="com.amazon.aws.cqlreplicator.Starter" level="INFO" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
     <logger name="com.amazon.aws.cqlreplicator.storage.TargetStorageOnKeyspaces" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-    <logger name="com.amazon.aws.cqlreplicator.storage.LedgerStorageOnLevelDB" level="ERROR" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.task.AbstractTaskV2" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-    <logger name="com.amazon.aws.cqlreplicator.storage.MemcachedCacheStorage" level="ERROR" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.storage.StorageServiceImpl" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-    <logger name="com.amazon.aws.cqlreplicator.task.AbstractTask" level="ERROR" additivity="false">
+    <logger name="org.iq80.leveldb.Logger" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
 </configuration>

@@ -13,7 +13,7 @@ CQLReplicator instances.
 
 ### Prerequisites
 
-List any prerequisites or requirements needed to run CQLReplicator, such as:
+List any prerequisites needed to run CQLReplicator, such as:
 
 - AWS account
 - Docker
@@ -21,7 +21,15 @@ List any prerequisites or requirements needed to run CQLReplicator, such as:
 
 ### Getting Started
 
-Explain how to set up and deploy CQLReplicator using [AWS ECS Copilot](https://aws.github.io/copilot-cli/docs/getting-started/install/). Include the following steps:
+ Set up and deploy CQLReplicator using [AWS ECS Copilot](https://aws.github.io/copilot-cli/docs/getting-started/install/). Include the following steps:
+
+### Configuration
+
+- Set TILES to the number of tiles that should be equal to the number of ECS tasks
+- Create a S3 bucket `cqlreplicator` and set it to BUCKETNAME. The bucket stores the artifacts: 
+  `config.properties`, `KeyspacesConnector.conf`, and `CassandraConnector.conf` e.g, s3:/bucketname/keyspace_name/table_name
+- Set KEYSPACENAME to the keyspace name (s3 prefix)
+- Set TABLENAME to the table name (s3 prefix)
 
 1. Clone the repository:
 
@@ -35,22 +43,22 @@ Explain how to set up and deploy CQLReplicator using [AWS ECS Copilot](https://a
    cd cql-replicator
    ```
 
-3. Build CQLReplicator
+3. Build CQLReplicator:
 
    ```bash
    gradle build
    gradle task deploy
    ```
 
-4. Initialize the ECS Copilot environment
+4. Initialize the ECS Copilot environment:
 
 Configure the required resources, such as VPC, S3 buckets etc., using the prompts provided by the `copilot init` command.
 
    ```bash
-   copilot init
+   copilot app init cql-replicator
    ```
 
-5. Configure CQLReplicator in `config.properties`
+5. Configure CQLReplicator in `config.properties`:
 
    1. Configure the source and target tables
    2. Configure migrated columns
@@ -61,25 +69,20 @@ Configure the required resources, such as VPC, S3 buckets etc., using the prompt
    7. Configure connectivity to the target Keyspaces table `KeyspacesConnector.conf`
    8. Copy all artifacts to s3://your-bucket-name/keyspacename/tablename
 
-6. Deploy the CQLReplicator cluster
+6. Deploy the CQLReplicator cluster:
 
 Choose the backend service and name it `cql-replicator-service`
 
    ```bash
    copilot svc init --name cql-replicator-service
+   copilot env deploy --name test
    copilot svc deploy --name cql-replicator-service --env test
    ```
 
-### Configuration
-
-- TILES: This is required, the number of tiles that should be equal to the number of ECS tasks
-- BUCKETNAME: The bucket name with the artifacts, `config.properties`, `KeyspacesConnector.conf`, and `CassandraConnector.conf`
-- KEYSPACENAME: the keyspace name (s3 prefix)
-- TABLENAME: the table name (s3 prefix)
 
 ### Usage
 
-CQLReplicator will immediately start to replicate the Cassandra workload when all tasks are deployed.
+CQLReplicator will immediately start replicating the Cassandra workload when all ECS tasks are running.
 
 ### Cleanup
 

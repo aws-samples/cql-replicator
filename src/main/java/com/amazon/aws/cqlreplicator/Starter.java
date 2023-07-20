@@ -7,6 +7,11 @@ import com.amazon.aws.cqlreplicator.storage.StorageServiceImpl;
 import com.amazon.aws.cqlreplicator.task.AbstractTaskV2;
 import com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTaskV2;
 import com.amazon.aws.cqlreplicator.task.replication.PartitionDiscoveryTaskV2;
+import com.amazon.aws.cqlreplicator.util.ApiEndpoints;
+import io.vertx.core.Vertx;
+import io.vertx.ext.healthchecks.HealthCheckHandler;
+import io.vertx.ext.healthchecks.Status;
+import io.vertx.ext.web.Router;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
@@ -30,6 +35,36 @@ import static com.amazon.aws.cqlreplicator.util.Utils.CassandraTaskTypes.SYNC_DE
         version = "1.1",
         description = "Migration tool for Amazon Keyspaces")
 public class Starter implements Callable<Integer> {
+
+    final static int HTTP_PORT = 8080;
+
+    private static void httpHealthCheck() {
+
+        Vertx vertx = Vertx.vertx();
+
+        var healthCheckHandler = HealthCheckHandler.create(vertx);
+
+        var router = Router.router(vertx);
+
+        healthCheckHandler.register("cql-replicator-health", promise -> {
+            // Upon success do
+            promise.complete(Status.OK());
+            // In case of failure do:
+            promise.complete(Status.KO());
+        });
+
+        router.get(ApiEndpoints.HEALTH_ROUTE).handler(healthCheckHandler);
+
+        vertx.createHttpServer()
+                // Handle every request using the router
+                .requestHandler(router)
+                // Start listening
+                .listen(HTTP_PORT, http -> {
+                    if (http.succeeded()) {
+                        LOGGER.info("HTTP server started on port {}", HTTP_PORT);
+                    }
+                });
+    }
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Starter.class);
     private static final int numCores = Runtime.getRuntime().availableProcessors();
@@ -63,7 +98,7 @@ public class Starter implements Callable<Integer> {
     /**
      * Responsible for running each task in a timer loop
      */
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws Exception {
 
         var delay = 0L;
 
@@ -99,8 +134,7 @@ public class Starter implements Callable<Integer> {
 
         if (config.getProperty("PRE_FLIGHT_CHECK").equals("true")) {
             config.setProperty("PATH_TO_CONFIG", pathToConfig);
-            PreflightCheck preflightCheck = new PreflightCheck(config);
-            try {
+            try (var preflightCheck = new PreflightCheck(config)) {
                 preflightCheck.runPreFlightCheck();
             } catch (PreFlightCheckException e) {
                 System.exit(-1);
@@ -111,6 +145,7 @@ public class Starter implements Callable<Integer> {
         storageService = new StorageServiceImpl(config);
 
         Runtime.getRuntime().addShutdownHook(new Thread(new Stopper()));
+        httpHealthCheck();
 
         task =
                 new TimerTask() {
@@ -140,7 +175,6 @@ public class Starter implements Callable<Integer> {
         config.setProperty("TILE", String.valueOf(tile));
         config.setProperty("TILES", String.valueOf(tiles));
         config.setProperty("PATH_TO_CONFIG", pathToConfig);
-
 
         if (abstractTaskPartitionKeys == null) {
             config.setProperty("PROCESS_NAME", "pd");

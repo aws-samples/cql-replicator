@@ -16,29 +16,32 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.datastax.oss:java-driver-core:4.14.1'
-    implementation 'io.github.resilience4j:resilience4j-retry:1.7.1'
-    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:[2.13.2.1,)'
-    implementation 'org.apache.commons:commons-lang3:3.12.0'
-    implementation 'org.partiql:partiql-lang-kotlin:0.7.0'
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.7.0'
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.7.0'
-    implementation 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.7.0'
-    implementation 'commons-codec:commons-codec:1.15'
-    implementation 'ch.qos.logback:logback-classic:1.2.11'
-    implementation 'info.picocli:picocli:4.6.3'
-    implementation 'com.datastax.oss:java-driver-query-builder:4.14.0'
-    implementation 'software.aws.mcs:aws-sigv4-auth-cassandra-java-driver-plugin:4.0.5'
-    implementation 'software.amazon.awssdk:dynamodb:2.17.91'
-    implementation 'net.spy:spymemcached:2.12.3'
-    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.12.3'
-    implementation 'org.xerial.snappy:snappy-java:1.1.10.1'
-    implementation 'io.github.resilience4j:resilience4j-ratelimiter:1.7.1'
-    implementation 'org.lz4:lz4-java:1.4.1'
-    implementation 'org.iq80.leveldb:leveldb-api:0.12'
-    implementation 'org.iq80.leveldb:leveldb:0.12'
-    implementation 'commons-io:commons-io:2.11.0'
-    implementation 'software.amazon.awssdk:cloudwatch:2.17.276'
+    implementation ("com.datastax.oss:java-driver-core:${project.javaDriverCoreVersion}")
+    implementation ("io.github.resilience4j:resilience4j-retry:${project.resilience4jVersion}")
+    implementation ("org.apache.commons:commons-lang3:${project.commonsLang3Version}")
+    implementation ("org.partiql:partiql-lang-kotlin:${project.partiqlVersion}")
+    implementation ("org.jetbrains.kotlin:kotlin-stdlib-jdk8:${project.kotlinStdlibVersion}")
+    implementation ("org.jetbrains.kotlin:kotlin-stdlib:${project.kotlinStdlibVersion}")
+    implementation ("org.jetbrains.kotlin:kotlin-gradle-plugin:${project.kotlinStdlibVersion}")
+    implementation ("commons-codec:commons-codec:${project.commonsCodecVersion}")
+    implementation ("ch.qos.logback:logback-classic:${project.logbackClassicVersion}")
+    implementation ("info.picocli:picocli:${project.picocliVersion}")
+    implementation ("com.datastax.oss:java-driver-query-builder:${project.javaDriverCoreVersion}")
+    implementation ("software.aws.mcs:aws-sigv4-auth-cassandra-java-driver-plugin:${project.sigv4Version}")
+    implementation ("com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:${project.cborVersion}")
+    implementation ("org.xerial.snappy:snappy-java:${project.snappyVersion}")
+    implementation ("org.lz4:lz4-java:${project.lz4Version}")
+    implementation ("org.iq80.leveldb:leveldb-api:${project.leveldbVersion}")
+    implementation ("org.iq80.leveldb:leveldb:${project.leveldbVersion}")
+    implementation ("commons-io:commons-io:${project.commonsIoVersion}")
+    implementation ("software.amazon.awssdk:cloudwatch:${project.cloudwatchVersion}")
+    compileOnly("org.jetbrains:annotations:${project.annotationsVersion}")
+    implementation("io.vertx:vertx-web:${project.vertxVersion}") {
+        exclude group: 'junit', module: 'junit'
+    }
+    implementation ("io.vertx:vertx-health-check:${project.vertxVersion}")
+    implementation("io.vertx:vertx-dropwizard-metrics:${project.vertxVersion}")
+    implementation("io.vertx:vertx-web-client:${project.vertxVersion}")
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.8.1'
     testImplementation 'org.junit.platform:junit-platform-console-standalone:1.8.1'
     testImplementation 'org.cassandraunit:cassandra-unit:4.3.1.0'

@@ -11,17 +11,36 @@ image:
   # Docker build arguments. For additional overrides: https://aws.github.io/copilot-cli/docs/manifest/backend-service/#image-build
   build: /docker/Dockerfile
   cpuArchitecture: ARM64
+  port: 8080
+
+http:
+  private:
+    ingress:
+      vpc: true
+    subnets:
+      ['subnet-0d30e64134de98745', 'subnet-09c256158704ee9c2']
+  path: '/'
+  healthcheck:
+    path: '/api/health/'
+    success_codes: '200'
+    healthy_threshold: 3
+    unhealthy_threshold: 2
+    interval: 15s
+    timeout: 10s
+    grace_period: 60s
 
 network:
   vpc:
     id: vpc-46a9863c
     subnets:
       public:
-        - id: subnet-d12a33ff
-        - id: subnet-ef1630d1
+        - id: subnet-0d30e64134de98745
+        - id: subnet-0ec2bf15b373759eb
+        - id: subnet-09c256158704ee9c2
+        - id: subnet-0fe150ee34dd6d07e
 
 variables:
-  TILES: 16
+  TILES: 8
   BUCKETNAME: 'cqlreplicator'
   CQLREPLICATOR_HOME: '/root/CQLReplicator'
   KEYSPACENAME: 'ks_test_cql_replicator'
@@ -30,7 +49,7 @@ variables:
 
 cpu: 4096       # Number of CPU units for the task.
 memory: 8192    # Amount of memory in MiB used by the task.
-count: 16       # Number of tasks that should be running in your service.
+count: 8       # Number of tasks that should be running in your service.
 exec: true     # Enable running commands in your container.
 platform: linux/arm64
 

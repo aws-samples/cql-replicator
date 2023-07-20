@@ -37,7 +37,6 @@ public class PreflightCheck implements AutoCloseable {
     private final String targetTable;
     private final boolean isCloudWatch;
     private final String cloudWatchRegion;
-    private final Map<String, String> memcachedEndpoint = new HashMap<>();
     private CqlSession keyspacesConnector;
     private CqlSession cassandraConnector;
     private String rsSample;
@@ -50,8 +49,6 @@ public class PreflightCheck implements AutoCloseable {
         this.source = String.format("%s.%s", config.getProperty("SOURCE_KEYSPACE"), config.getProperty("SOURCE_TABLE"));
         this.isCloudWatch = config.getProperty("ENABLE_CLOUD_WATCH").equals("true");
         this.cloudWatchRegion = isCloudWatch ? config.getProperty("CLOUD_WATCH_REGION") : "";
-        this.memcachedEndpoint.put("STORAGE_ENDPOINT", config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT"));
-        this.memcachedEndpoint.put("STORAGE_PORT", config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT"));
     }
 
     @Override

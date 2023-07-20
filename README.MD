@@ -25,12 +25,6 @@ List any prerequisites needed to run CQLReplicator, such as:
 
 ### Configuration
 
-- Set TILES to the number of tiles that should be equal to the number of ECS tasks
-- Create a S3 bucket `cqlreplicator` and set it to BUCKETNAME. The bucket stores the artifacts: 
-  `config.properties`, `KeyspacesConnector.conf`, and `CassandraConnector.conf` e.g, s3:/bucketname/keyspace_name/table_name
-- Set KEYSPACENAME to the keyspace name (s3 prefix)
-- Set TABLENAME to the table name (s3 prefix)
-
 1. Clone the repository:
 
    ```bash
@@ -42,6 +36,12 @@ List any prerequisites needed to run CQLReplicator, such as:
    ```bash
    cd cql-replicator
    ```
+
+- Set TILES to the number of tiles that should be equal to the number of ECS tasks
+- Create a S3 bucket `cqlreplicator` and set it to BUCKETNAME. The bucket stores the artifacts: 
+  `config.properties`, `KeyspacesConnector.conf`, and `CassandraConnector.conf` e.g, s3:/bucketname/keyspace_name/table_name
+- Set KEYSPACENAME to the keyspace name (s3 prefix)
+- Set TABLENAME to the table name (s3 prefix)
 
 3. Build CQLReplicator:
 
@@ -71,10 +71,11 @@ Configure the required resources, such as VPC, S3 buckets etc., using the prompt
 
 6. Deploy the CQLReplicator cluster:
 
-Initiate and deploy the service and deploy the test environment,
+Initiate and deploy the service, and the test environment,
 
    ```bash
    copilot svc init --name cql-replicator-service
+   copilot env init --name test
    copilot env deploy --name test
    copilot svc deploy --name cql-replicator-service --env test
    ```
@@ -86,9 +87,7 @@ Before restarting or updating the ECS tasks delete `tiles` with the locking file
 
 #### Define the number of tiles
 
-Let's say you want to migrate a Cassandra cluster with 10B primary keys (1KB per primary key), the Cassandra cluster 
-has 64 vnodes and 32 nodes. So that you can spin up to 2048 ecs tasks (tiles). 
-Each ecs task will handle up to 5M primary keys. 
+One CQLReplicator can handle up to 1M primary keys, if you want to handle over 1M please scale up ECS tasks.
 
 You can avoid high ECS costs by replicating the historical workload with AWS Glue and after
 enable `ENABLE_REPLICATION_POINT` to handle only new workload after specific timestamp.
@@ -117,6 +116,12 @@ CQLReplicator might add a CPU overhead due to pooling data periodically.If the C
 the CQLReplicator instances by reducing `REPLICATE_WITH_CORE_POOL_SIZE` and
 `REPLICATE_WITH_MAX_CORE_POOL_SIZE` and decrease the number of CPUs per ECS task. 
 Finally, you might deploy another Cassandra DC to shift your migration workload to it.
+
+### Limitations
+
+CQLReplicator doesn't support:
+ * counters
+ * Cassandra tables with no regular columns
 
 ### Cleanup
 

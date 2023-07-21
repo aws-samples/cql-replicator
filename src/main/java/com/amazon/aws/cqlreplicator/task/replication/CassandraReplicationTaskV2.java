@@ -62,6 +62,10 @@ public class CassandraReplicationTaskV2 extends AbstractTaskV2 {
     private static CloudWatchClient cloudWatchClient;
     private static boolean useCustomJsonSerializer = false;
 
+    private static BlockingQueue<Runnable> blockingQueue;
+
+    private static ThreadPoolExecutor executor;
+
     public CassandraReplicationTaskV2(final Properties cfg) {
         config = cfg;
         CORE_POOL_SIZE = Integer.parseInt(cfg.getProperty("REPLICATE_WITH_CORE_POOL_SIZE"));
@@ -76,6 +80,16 @@ public class CassandraReplicationTaskV2 extends AbstractTaskV2 {
             module.addSerializer(Row.class, new CustomResultSetSerializer());
             mapper.registerModule(module);
         }
+        blockingQueue = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
+
+        executor =
+                new ThreadPoolExecutor(
+                        CORE_POOL_SIZE,
+                        MAX_CORE_POOL_SIZE,
+                        CORE_POOL_TIMEOUT,
+                        TimeUnit.SECONDS,
+                        blockingQueue,
+                        new ThreadPoolExecutor.AbortPolicy());
 
         if (config.getProperty("ENABLE_CLOUD_WATCH").equals("true")) {
             try {
@@ -182,17 +196,6 @@ public class CassandraReplicationTaskV2 extends AbstractTaskV2 {
 
         var clusteringColumnNames =
                 cassandraSchemaMetadata.get("clustering").keySet().toArray(new String[0]);
-
-        BlockingQueue<Runnable> blockingQueue = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
-
-        ThreadPoolExecutor executor =
-                new ThreadPoolExecutor(
-                        CORE_POOL_SIZE,
-                        MAX_CORE_POOL_SIZE,
-                        CORE_POOL_TIMEOUT,
-                        TimeUnit.SECONDS,
-                        blockingQueue,
-                        new ThreadPoolExecutor.AbortPolicy());
 
         var chunks = Utils.bytesToInt(storageService.readTileMetadata(String.format("%s", "totalChunks")));
 

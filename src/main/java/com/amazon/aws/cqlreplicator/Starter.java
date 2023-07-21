@@ -37,7 +37,7 @@ import static com.amazon.aws.cqlreplicator.util.Utils.CassandraTaskTypes.SYNC_DE
 public class Starter implements Callable<Integer> {
 
     final static int HTTP_PORT = 8080;
-
+    final static int BLOCKING_QUEUE_SIZE = 15000;
     private static void httpHealthCheck() {
 
         Vertx vertx = Vertx.vertx();
@@ -94,7 +94,9 @@ public class Starter implements Callable<Integer> {
     private static AbstractTaskV2 abstractTaskPartitionKeys;
     private static StorageServiceImpl storageService;
     CountDownLatch countDownLatch = new CountDownLatch(1);
-
+    protected static BlockingQueue<Runnable> blockingQueue;
+    protected static ThreadPoolExecutor rowExecutor;
+    protected static ExecutorService pdExecutors;
     /**
      * Responsible for running each task in a timer loop
      */
@@ -141,6 +143,18 @@ public class Starter implements Callable<Integer> {
             }
         }
 
+        Starter.blockingQueue = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
+        Starter.rowExecutor = new ThreadPoolExecutor(
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_SIZE")),
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_MAX_CORE_POOL_SIZE")),
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_TIMEOUT")),
+                TimeUnit.SECONDS,
+                blockingQueue,
+                new ThreadPoolExecutor.AbortPolicy());
+
+        int numThreads = Math.max(1, ((numCores >> 1) - 1));
+        Starter.pdExecutors = Executors.newFixedThreadPool(numThreads);
+
         config.setProperty("TILE", String.valueOf(args[1]));
         storageService = new StorageServiceImpl(config);
 
@@ -166,8 +180,6 @@ public class Starter implements Callable<Integer> {
     @Override
     public Integer call() throws Exception {
 
-        final int numThreads = Math.max(1, ((numCores >> 1) - 1));
-
         /*
          * Set the current tile and tiles in config
          */
@@ -186,8 +198,7 @@ public class Starter implements Callable<Integer> {
                 replicationDelay,
                 Instant.now());
 
-        var pdExec = Executors.newFixedThreadPool(numThreads);
-        pdExec.execute(() -> {
+        pdExecutors.execute(() -> {
             try {
                 abstractTaskPartitionKeys.performTask(storageService, SYNC_DELETED_PARTITION_KEYS);
             } catch (IOException | InterruptedException | ExecutionException | TimeoutException e) {
@@ -197,9 +208,9 @@ public class Starter implements Callable<Integer> {
 
         if (abstractTaskClusteringKeys == null) {
             config.setProperty("PROCESS_NAME", "rd");
-            abstractTaskClusteringKeys = new CassandraReplicationTaskV2(config);
+            abstractTaskClusteringKeys = new CassandraReplicationTaskV2(config, rowExecutor, blockingQueue);
         }
-        LOGGER.debug(
+        LOGGER.info(
                 "Cassandra rows synchronization process with refreshPeriodSec {} started at {}",
                 replicationDelay,
                 Instant.now());

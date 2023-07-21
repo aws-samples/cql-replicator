@@ -48,7 +48,6 @@ public class CassandraReplicationTaskV2 extends AbstractTaskV2 {
     public static final String REPLICATION_NOT_APPLICABLE = "replicationNotApplicable";
     public static final Pattern REGEX_PIPE = Pattern.compile("\\|");
     private static final Logger LOGGER = LoggerFactory.getLogger(CassandraReplicationTaskV2.class);
-    private static final int BLOCKING_QUEUE_SIZE = 15000;
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final SimpleModule module = new SimpleModule();
     private static SourceStorageOnCassandra sourceStorageOnCassandra;
@@ -56,21 +55,16 @@ public class CassandraReplicationTaskV2 extends AbstractTaskV2 {
     private static Map<String, LinkedHashMap<String, String>> cassandraSchemaMetadata;
     private static StatsCounter statsCounter;
     private static Properties config = new Properties();
-    private static int CORE_POOL_SIZE;
-    private static int MAX_CORE_POOL_SIZE;
-    private static int CORE_POOL_TIMEOUT;
     private static CloudWatchClient cloudWatchClient;
     private static boolean useCustomJsonSerializer = false;
 
-    private static BlockingQueue<Runnable> blockingQueue;
+    private final ThreadPoolExecutor executor;
+    private final BlockingQueue<Runnable> blockingQueue;
 
-    private static ThreadPoolExecutor executor;
-
-    public CassandraReplicationTaskV2(final Properties cfg) {
+    public CassandraReplicationTaskV2(final Properties cfg, ThreadPoolExecutor executor, BlockingQueue<Runnable> blockingQueue) {
+        this.executor = executor;
+        this.blockingQueue = blockingQueue;
         config = cfg;
-        CORE_POOL_SIZE = Integer.parseInt(cfg.getProperty("REPLICATE_WITH_CORE_POOL_SIZE"));
-        MAX_CORE_POOL_SIZE = Integer.parseInt(cfg.getProperty("REPLICATE_WITH_MAX_CORE_POOL_SIZE"));
-        CORE_POOL_TIMEOUT = Integer.parseInt(cfg.getProperty("REPLICATE_WITH_CORE_POOL_TIMEOUT"));
         sourceStorageOnCassandra = new SourceStorageOnCassandra(config);
         cassandraSchemaMetadata = sourceStorageOnCassandra.getMetaData();
         statsCounter = new StatsCounter();
@@ -80,16 +74,6 @@ public class CassandraReplicationTaskV2 extends AbstractTaskV2 {
             module.addSerializer(Row.class, new CustomResultSetSerializer());
             mapper.registerModule(module);
         }
-        blockingQueue = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
-
-        executor =
-                new ThreadPoolExecutor(
-                        CORE_POOL_SIZE,
-                        MAX_CORE_POOL_SIZE,
-                        CORE_POOL_TIMEOUT,
-                        TimeUnit.SECONDS,
-                        blockingQueue,
-                        new ThreadPoolExecutor.AbortPolicy());
 
         if (config.getProperty("ENABLE_CLOUD_WATCH").equals("true")) {
             try {
@@ -188,8 +172,7 @@ public class CassandraReplicationTaskV2 extends AbstractTaskV2 {
     }
 
     @Override
-    protected void doPerformTask(StorageServiceImpl storageService, CassandraTaskTypes taskName)
-            throws InterruptedException {
+    protected void doPerformTask(StorageServiceImpl storageService, CassandraTaskTypes taskName) {
 
         var partitionKeyNames =
                 cassandraSchemaMetadata.get("partition_key").keySet().toArray(new String[0]);
@@ -272,9 +255,6 @@ public class CassandraReplicationTaskV2 extends AbstractTaskV2 {
         statsCounter.resetStat("INSERT");
         statsCounter.resetStat("UPDATE");
         statsCounter.resetStat("DELETE");
-
-        executor.shutdown();
-        executor.awaitTermination(Integer.MAX_VALUE, TimeUnit.MILLISECONDS);
     }
 
     public static class RowReplicationTask implements Runnable {

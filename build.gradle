@@ -16,6 +16,7 @@ repositories {
 }
 
 dependencies {
+    implementation platform("software.amazon.awssdk:bom:${project.awssdkVersion}")
     implementation ("com.datastax.oss:java-driver-core:${project.javaDriverCoreVersion}")
     implementation ("io.github.resilience4j:resilience4j-retry:${project.resilience4jVersion}")
     implementation ("org.apache.commons:commons-lang3:${project.commonsLang3Version}")
@@ -34,11 +35,12 @@ dependencies {
     implementation ("org.iq80.leveldb:leveldb-api:${project.leveldbVersion}")
     implementation ("org.iq80.leveldb:leveldb:${project.leveldbVersion}")
     implementation ("commons-io:commons-io:${project.commonsIoVersion}")
-    implementation ("software.amazon.awssdk:cloudwatch:${project.cloudwatchVersion}")
     compileOnly("org.jetbrains:annotations:${project.annotationsVersion}")
     implementation("io.vertx:vertx-web:${project.vertxVersion}") {
         exclude group: 'junit', module: 'junit'
     }
+    implementation ("io.micrometer:micrometer-core:${project.micrometerVersion}")
+    implementation ("io.micrometer:micrometer-registry-cloudwatch2:${project.micrometerVersion}")
     implementation ("io.vertx:vertx-health-check:${project.vertxVersion}")
     implementation("io.vertx:vertx-dropwizard-metrics:${project.vertxVersion}")
     implementation("io.vertx:vertx-web-client:${project.vertxVersion}")

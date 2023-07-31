@@ -8,8 +8,6 @@ package com.amazon.aws.cqlreplicator.storage;
 import com.amazon.aws.cqlreplicator.connector.ConnectionFactory;
 import com.amazon.aws.cqlreplicator.models.DeleteTargetOperation;
 import com.amazon.aws.cqlreplicator.models.PrimaryKey;
-import com.amazon.aws.cqlreplicator.models.QueryStats;
-import com.amazon.aws.cqlreplicator.models.StatsMetaData;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.AllNodesFailedException;
 import com.datastax.oss.driver.api.core.ConsistencyLevel;
@@ -100,7 +98,7 @@ public class TargetStorageOnKeyspaces
             Retry.decorateSupplier(retry, supplier).get();
             return true;
         } catch (RuntimeException e) {
-            LOGGER.error("Exception occured executing this statement: " + simpleStatement.getQuery(), e);
+            LOGGER.error("Exception occurred executing this statement: {} ", simpleStatement.getQuery(), e);
             return false;
         }
     }
@@ -108,42 +106,6 @@ public class TargetStorageOnKeyspaces
     @Override
     public boolean write(SimpleStatement statement) {
         return execute(statement);
-    }
-
-    @Override
-    public void writeStats(Object o) {
-        var statsMetadata = (StatsMetaData) o;
-        var boundStatementBuilder =
-                psWriteStats
-                        .boundStatementBuilder()
-                        .setInt("tile", statsMetadata.getTile())
-                        .setString("keyspacename", statsMetadata.getKeyspaceName())
-                        .setString("tablename", statsMetadata.getTableName())
-                        .setString("ops", statsMetadata.getOps())
-                        .setLong("value", statsMetadata.getValue())
-                        .setConsistencyLevel(ConsistencyLevel.LOCAL_QUORUM);
-
-        var batchableStatements = BatchStatement.builder(DefaultBatchType.UNLOGGED);
-        batchableStatements.addStatement(
-                boundStatementBuilder.setConsistencyLevel(ConsistencyLevel.QUORUM).build());
-
-        execute(batchableStatements);
-    }
-
-    @Override
-    public List<Row> readStats(Object o) {
-        var queryStats = (QueryStats) o;
-        var boundStatementBuilder =
-                psReadStats
-                        .boundStatementBuilder()
-                        .setString("ops", queryStats.getOps())
-                        .setString("keyspacename", queryStats.getKeyspaceName())
-                        .setString("tablename", queryStats.getTableName());
-        var batchableStatements = BatchStatement.builder(DefaultBatchType.UNLOGGED);
-        batchableStatements.addStatement(
-                boundStatementBuilder.setConsistencyLevel(ConsistencyLevel.LOCAL_ONE).build());
-
-        return execute(batchableStatements);
     }
 
     public boolean delete(

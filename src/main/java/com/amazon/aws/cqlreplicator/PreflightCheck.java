@@ -16,13 +16,9 @@ import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatch.model.CloudWatchException;
 
 import java.io.File;
-import java.io.IOException;
-import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-
-import static com.amazon.aws.cqlreplicator.util.Utils.putMetricData;
 
 public class PreflightCheck implements AutoCloseable {
 
@@ -88,10 +84,6 @@ public class PreflightCheck implements AutoCloseable {
             var ccwa = checkCloudWatchAvailability();
             resultSet.put(ccwa.name(), 1);
             LOGGER.info(prepareOutput("Checking the CloudWatch availability", ccwa));
-        } else {
-            var cssa = checkStatsAvailability();
-            resultSet.put(cssa.name(), 1);
-            LOGGER.info(prepareOutput("Checking the Replicator.stats availability", cssa));
         }
 
         if (resultSet.get("FAILED") != null) {
@@ -127,17 +119,11 @@ public class PreflightCheck implements AutoCloseable {
                     CloudWatchClient.builder()
                             .region(Region.of(cloudWatchRegion))
                             .build();
-            putMetricData(cloudWatchClient, 1.0, "Pre-flight-check");
             cloudWatchClient.close();
         } catch (CloudWatchException | SdkClientException e) {
             return PreflightCheckStatus.FAILED;
         }
         return PreflightCheckStatus.PASSED;
-    }
-
-    private PreflightCheckStatus checkStatsAvailability() {
-        return (this.keyspacesConnector.getMetadata().getKeyspace("replicator").flatMap(replicator -> replicator.getTable("stats")).isPresent()) ?
-                PreflightCheckStatus.PASSED : PreflightCheckStatus.FAILED;
     }
 
     private PreflightCheckStatus checkWritePermissionToTarget() {

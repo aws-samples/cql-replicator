@@ -14,8 +14,6 @@ import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xerial.snappy.Snappy;
-import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
-import software.amazon.awssdk.services.cloudwatch.model.*;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -23,8 +21,6 @@ import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.time.Instant;
-import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -94,34 +90,6 @@ public class Utils {
                 rs.format("%02x", b & 0xff);
             }
             return rs.toString();
-        }
-    }
-
-    public static void putMetricData(CloudWatchClient cw, Double dataPoint, String metricName) {
-        try {
-            Dimension dimension = Dimension.builder()
-                    .name("OPERATIONS")
-                    .value("REPLICA")
-                    .build();
-
-            // Set an Instant object
-            String time = ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT);
-            Instant instant = Instant.parse(time);
-
-            MetricDatum datum = MetricDatum.builder()
-                    .metricName(metricName)
-                    .unit(StandardUnit.COUNT)
-                    .value(dataPoint)
-                    .timestamp(instant)
-                    .dimensions(dimension).build();
-
-            PutMetricDataRequest request = PutMetricDataRequest.builder()
-                    .namespace("CQL-REPLICATOR")
-                    .metricData(datum).build();
-
-            cw.putMetricData(request);
-        } catch (CloudWatchException e) {
-            throw new RuntimeException(e);
         }
     }
 
@@ -209,6 +177,7 @@ public class Utils {
     }
 
     public static Payload convertToJson(
+            //TODO: Add support without writime columns
             String rawData, String writeTimeColumns, String[] cls, String[] pks) {
         var objectMapper = new ObjectMapper();
 
@@ -259,67 +228,39 @@ public class Utils {
             String cqlType, String columnName, String colValue, BoundStatementBuilder bound) {
 
         switch (cqlType) {
-            case "blob":
-                bound.setByteBuffer(columnName, ByteBuffer.wrap(colValue.getBytes()));
-                break;
-            case "bigint":
-                bound.setLong(columnName, Long.parseLong(colValue));
-                break;
-            case "tinyint":
-                bound.setByte(columnName, Byte.parseByte(colValue));
-                break;
-            case "smallint":
-                bound.setShort(columnName, Short.parseShort(colValue));
-                break;
-            case "int":
-            case "counter":
-                bound.setInt(columnName, Integer.parseInt(colValue));
-                break;
-            case "ascii":
-            case "text":
-            case "varchar":
-                bound.setString(columnName, colValue);
-                break;
-            case "double":
-                bound.setDouble(columnName, Double.parseDouble(colValue));
-                break;
-            case "float":
-                bound.setFloat(columnName, Float.parseFloat(colValue));
-                break;
-            case "date":
+            case "blob" -> bound.setByteBuffer(columnName, ByteBuffer.wrap(colValue.getBytes()));
+            case "bigint" -> bound.setLong(columnName, Long.parseLong(colValue));
+            case "tinyint" -> bound.setByte(columnName, Byte.parseByte(colValue));
+            case "smallint" -> bound.setShort(columnName, Short.parseShort(colValue));
+            case "int", "counter" -> bound.setInt(columnName, Integer.parseInt(colValue));
+            case "ascii", "text", "varchar" -> bound.setString(columnName, colValue);
+            case "double" -> bound.setDouble(columnName, Double.parseDouble(colValue));
+            case "float" -> bound.setFloat(columnName, Float.parseFloat(colValue));
+            case "date" -> {
                 var formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
                 var date = java.time.LocalDate.parse(colValue, formatter);
                 bound.setLocalDate(columnName, date);
-                break;
-            case "timestamp":
+            }
+            case "timestamp" -> {
                 var valueOnClient = ZonedDateTime.parse(colValue.replace("\"", ""));
                 bound.set(columnName, valueOnClient, GenericType.ZONED_DATE_TIME);
-                break;
-            case "timeuuid":
-            case "uuid":
-                bound.setUuid(columnName, UUID.fromString(colValue));
-                break;
-            case "decimal":
-                bound.setBigDecimal(columnName, new BigDecimal(colValue));
-                break;
-            case "varint":
-                bound.setBigInteger(columnName, new BigInteger(colValue));
-                break;
-            case "boolean":
-                bound.setBoolean(columnName, Boolean.parseBoolean(colValue));
-                break;
-            case "inet":
+            }
+            case "timeuuid", "uuid" -> bound.setUuid(columnName, UUID.fromString(colValue));
+            case "decimal" -> bound.setBigDecimal(columnName, new BigDecimal(colValue));
+            case "varint" -> bound.setBigInteger(columnName, new BigInteger(colValue));
+            case "boolean" -> bound.setBoolean(columnName, Boolean.parseBoolean(colValue));
+            case "inet" -> {
                 try {
                     var ipFixed = InetAddress.getByName(colValue.replace("/", ""));
                     bound.setInetAddress(columnName, ipFixed);
                 } catch (UnknownHostException e) {
                     throw new RuntimeException(e);
                 }
-                break;
-            default:
+            }
+            default -> {
                 LOGGER.warn("Unrecognized data type {}", cqlType);
                 bound.setString(columnName, colValue);
-                break;
+            }
         }
         return bound;
     }
@@ -327,98 +268,38 @@ public class Utils {
     public static GenericType getClassType(String cqlType) {
         GenericType genericType;
         switch (cqlType) {
-            case "BIGINT":
-                genericType = GenericType.LONG;
-                break;
-            case "SMALLINT":
-                genericType = GenericType.SHORT;
-                break;
-            case "TINYINT":
-                genericType = GenericType.BYTE;
-                break;
-            case "INT":
-            case "COUNTER":
-                genericType = GenericType.INTEGER;
-                break;
-            case "ASCII":
-            case "TEXT":
-            case "VARCHAR":
-                genericType = GenericType.STRING;
-                break;
-            case "UUID":
-            case "TIMEUUID":
-                genericType = GenericType.UUID;
-                break;
-            case "DOUBLE":
-                genericType = GenericType.DOUBLE;
-                break;
-            case "FLOAT":
-                genericType = GenericType.FLOAT;
-                break;
-            case "DATE":
-                genericType = GenericType.LOCAL_DATE;
-                break;
-            case "DATETIME":
-                genericType = GenericType.LOCAL_DATE_TIME;
-                break;
-            case "DECIMAL":
-                genericType = GenericType.BIG_DECIMAL;
-                break;
-            case "VARINT":
-                genericType = GenericType.BIG_INTEGER;
-                break;
-            case "INET":
-                genericType = GenericType.INET_ADDRESS;
-                break;
-            case "BOOLEAN":
-                genericType = GenericType.BOOLEAN;
-                break;
-            case "BLOB":
-                genericType = GenericType.BYTE_BUFFER;
-                break;
-            case "LIST<TEXT>":
-                genericType = GenericType.listOf(String.class);
-                break;
-            case "LIST<FLOAT>":
-                genericType = GenericType.listOf(Float.class);
-                break;
-            case "LIST<INT>":
-                genericType = GenericType.listOf(Integer.class);
-                break;
-            case "LIST<DATE>":
-                genericType = GenericType.listOf(java.time.LocalDate.class);
-                break;
-            case "LIST<DOUBLE>":
-                genericType = GenericType.listOf(Double.class);
-                break;
-            case "LIST<DECIMAL>":
-                genericType = GenericType.listOf(BigDecimal.class);
-                break;
-            case "LIST<BIGINT>":
-                genericType = GenericType.listOf(Long.class);
-                break;
-            case "SET<TEXT>":
-                genericType = GenericType.setOf(String.class);
-                break;
-            case "SET<DATE>":
-                genericType = GenericType.setOf(java.time.LocalDate.class);
-                break;
-            case "SET<INT>":
-                genericType = GenericType.setOf(Integer.class);
-                break;
-            case "SET<DOUBLE>":
-                genericType = GenericType.setOf(Double.class);
-                break;
-            case "SET<DECIMAL>":
-                genericType = GenericType.setOf(BigDecimal.class);
-                break;
-            case "SET<BIGINT>":
-                genericType = GenericType.setOf(Long.class);
-                break;
-            default:
+            case "BIGINT" -> genericType = GenericType.LONG;
+            case "SMALLINT" -> genericType = GenericType.SHORT;
+            case "TINYINT" -> genericType = GenericType.BYTE;
+            case "INT", "COUNTER" -> genericType = GenericType.INTEGER;
+            case "ASCII", "TEXT", "VARCHAR" -> genericType = GenericType.STRING;
+            case "UUID", "TIMEUUID" -> genericType = GenericType.UUID;
+            case "DOUBLE" -> genericType = GenericType.DOUBLE;
+            case "FLOAT" -> genericType = GenericType.FLOAT;
+            case "DATE" -> genericType = GenericType.LOCAL_DATE;
+            case "DATETIME" -> genericType = GenericType.LOCAL_DATE_TIME;
+            case "DECIMAL" -> genericType = GenericType.BIG_DECIMAL;
+            case "VARINT" -> genericType = GenericType.BIG_INTEGER;
+            case "INET" -> genericType = GenericType.INET_ADDRESS;
+            case "BOOLEAN" -> genericType = GenericType.BOOLEAN;
+            case "BLOB" -> genericType = GenericType.BYTE_BUFFER;
+            case "LIST<TEXT>" -> genericType = GenericType.listOf(String.class);
+            case "LIST<FLOAT>" -> genericType = GenericType.listOf(Float.class);
+            case "LIST<INT>" -> genericType = GenericType.listOf(Integer.class);
+            case "LIST<DATE>" -> genericType = GenericType.listOf(java.time.LocalDate.class);
+            case "LIST<DOUBLE>" -> genericType = GenericType.listOf(Double.class);
+            case "LIST<DECIMAL>" -> genericType = GenericType.listOf(BigDecimal.class);
+            case "LIST<BIGINT>" -> genericType = GenericType.listOf(Long.class);
+            case "SET<TEXT>" -> genericType = GenericType.setOf(String.class);
+            case "SET<DATE>" -> genericType = GenericType.setOf(java.time.LocalDate.class);
+            case "SET<INT>" -> genericType = GenericType.setOf(Integer.class);
+            case "SET<DOUBLE>" -> genericType = GenericType.setOf(Double.class);
+            case "SET<DECIMAL>" -> genericType = GenericType.setOf(BigDecimal.class);
+            case "SET<BIGINT>" -> genericType = GenericType.setOf(Long.class);
+            default -> {
                 LOGGER.warn("Unrecognized data type:{}", cqlType);
                 genericType = GenericType.STRING;
-                break;
+            }
         }
         return genericType;
     }
@@ -431,6 +312,7 @@ public class Utils {
     public enum CassandraTaskTypes {
         SYNC_PARTITION_KEYS,
         SYNC_CASSANDRA_ROWS,
+        SYNC_DELETED_ROWS,
         SYNC_DELETED_PARTITION_KEYS
     }
 }

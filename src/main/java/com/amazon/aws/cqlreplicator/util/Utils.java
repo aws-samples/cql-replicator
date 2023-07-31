@@ -31,7 +31,6 @@ import java.util.stream.Stream;
 public class Utils {
 
     private static final Pattern REGEX_COM = Pattern.compile(",");
-
     private static final Pattern REGEX_REG_SPACE = Pattern.compile(" ");
     private static final Logger LOGGER = LoggerFactory.getLogger(Utils.class);
     private static final Pattern REGEX_DQ = Pattern.compile("\"[^\"]*\"");

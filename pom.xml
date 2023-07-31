@@ -20,21 +20,21 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <datastax.version>4.14.1</datastax.version>
-        <keyspaces.version>4.0.5</keyspaces.version>
+        <datastax.version>4.15.0</datastax.version>
+        <keyspaces.version>4.0.9</keyspaces.version>
         <kotlin.version>1.7.0</kotlin.version>
-        <resilience4j.version>1.7.1</resilience4j.version>
-        <jackson.version>[2.13.2.1,)</jackson.version>
+        <resilience4j.version>2.0.2</resilience4j.version>
+        <jackson.version>2.14.2</jackson.version>
         <commons.lang3.version>3.12</commons.lang3.version>
         <partiql.version>0.7.0</partiql.version>
         <commons.codec.version>1.15</commons.codec.version>
         <commons.lang3.version>3.12.0</commons.lang3.version>
-        <logback.version>1.2.11</logback.version>
-        <picocli.version>4.6.3</picocli.version>
+        <logback.version>1.4.7</logback.version>
+        <picocli.version>4.7.3</picocli.version>
         <memcached.version>2.12.3</memcached.version>
-        <cbor.version>2.12.3</cbor.version>
-        <snappy.version>1.1.8.4</snappy.version>
-        <lz4.version>1.4.1</lz4.version>
+        <cbor.version>2.14.2</cbor.version>
+        <snappy.version>1.1.9.1</snappy.version>
+        <lz4.version>1.8.0</lz4.version>
         <leveldb.version>0.12</leveldb.version>
         <commons-io.version>2.11.0</commons-io.version>
         <micrometer.version>1.11.2</micrometer.version>

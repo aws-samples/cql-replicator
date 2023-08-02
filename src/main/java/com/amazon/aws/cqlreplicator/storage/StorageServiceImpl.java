@@ -126,7 +126,6 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
 
     @Override
     public void deletePartition(String key) {
-
         levelDBStorePartitions.delete(SerializationUtils.serialize(key));
     }
 

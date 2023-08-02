@@ -52,7 +52,8 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
     private static MeterRegistry meterRegistry;
     private static Counter cntInserts;
     private static Counter cntUpdates;
-    private static Counter cntFailedUpserts;
+    private static Counter cntFailedInserts;
+    private static Counter cntFailedUpdates;
 
     public RowDiscoveryTaskV2(final Properties cfg,
                               ThreadPoolExecutor executor,
@@ -67,8 +68,11 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
         cntUpdates = Counter.builder("replicated.update")
                 .description("Replicated updates counter")
                 .register(meterRegistry);
-        cntFailedUpserts = Counter.builder("failed.upsert")
-                .description("Failed inserts/updates counter")
+        cntFailedInserts = Counter.builder("failed.insert")
+                .description("Failed inserts counter")
+                .register(meterRegistry);
+        cntFailedUpdates = Counter.builder("failed.update")
+                .description("Failed updates counter")
                 .register(meterRegistry);
         config = cfg;
         sourceStorageOnCassandra = new SourceStorageOnCassandra(config);
@@ -88,6 +92,22 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
             return res.substring(1, res.length() - 1);
         }
         return input;
+    }
+
+    private static void reportTelemetry(String ops, boolean isSuccessful) {
+        if (!isSuccessful) {
+            if (ops.equals("INSERT"))  {
+                cntFailedInserts.increment();
+            } else if (ops.equals("UPDATE")) {
+                cntFailedUpdates.increment();
+            }
+            } else {
+            if (ops.equals("INSERT"))  {
+                cntInserts.increment();
+            } else if (ops.equals("UPDATE")) {
+                cntUpdates.increment();
+            }
+        }
     }
 
     private static String preparePayload(final Payload jsonPayload) {
@@ -217,20 +237,17 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                 final SimpleStatement simpleStatement,
                 final long lastWriteTimestamp,
                 final boolean setStartReplicationPoint,
-                final long ts) {
+                final long ts,
+                final String ops) {
 
             if (!setStartReplicationPoint) {
                 var result = targetStorageOnKeyspaces.write(simpleStatement);
-                if (!result) {
-                    cntFailedUpserts.increment();
-                }
+                reportTelemetry(ops, result);
 
             } else {
                 if (lastWriteTimestamp > ts) {
                     var result = targetStorageOnKeyspaces.write(simpleStatement);
-                    if (!result) {
-                        cntFailedUpserts.increment();
-                    }
+                    reportTelemetry(ops, result);
                 }
             }
         }
@@ -238,7 +255,8 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
         private static void upsertRow(
                 final long v,
                 final String k,
-                final ConcurrentMap<String, String> jsonColumnHashMapPerPartition) {
+                final ConcurrentMap<String, String> jsonColumnHashMapPerPartition,
+                final String ops) {
             var simpleStatement =
                     SimpleStatement.newInstance(jsonColumnHashMapPerPartition.get(k))
                             .setIdempotent(true)
@@ -248,7 +266,9 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                     simpleStatement,
                     v,
                     Boolean.parseBoolean(config.getProperty("ENABLE_REPLICATION_POINT")),
-                    Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")));
+                    Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")),
+                    ops
+                    );
         }
 
         @Override
@@ -296,15 +316,13 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                                 if (!storageService.containsInRows(primaryKey)) {
                                     storageService.writeRow(primaryKey, longToBytes(ts));
                                     jsonColumnHashMapPerPartition.put(cl, preparePayload(jsonPayload));
-                                    upsertRow(ts, cl, jsonColumnHashMapPerPartition);
-                                    cntInserts.increment();
+                                    upsertRow(ts, cl, jsonColumnHashMapPerPartition, "INSERT");
                                 } else {
                                     // if hk is in the global pk cache, compare timestamps
                                     if (ts > bytesToLong(storageService.readRow(primaryKey))) {
                                         storageService.writeRow(primaryKey, longToBytes(ts));
                                         jsonColumnHashMapPerPartition.put(cl, preparePayload(jsonPayload));
-                                        upsertRow(ts, cl, jsonColumnHashMapPerPartition);
-                                        cntUpdates.increment();
+                                        upsertRow(ts, cl, jsonColumnHashMapPerPartition, "UPDATE");
                                     }
                                 }
                             });

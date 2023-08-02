@@ -49,7 +49,7 @@ variables:
 
 cpu: 4096       # Number of CPU units for the task.
 memory: 8192    # Amount of memory in MiB used by the task.
-count: 8       # Number of tasks that should be running in your service.
+count: 8       # Number of tasks that should be running in your service. (same as # TILES)
 exec: true     # Enable running commands in your container.
 platform: linux/arm64
 

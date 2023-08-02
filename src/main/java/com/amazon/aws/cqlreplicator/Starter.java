@@ -162,8 +162,8 @@ public class Starter implements Callable<Integer> {
                 blockingQueue,
                 new ThreadPoolExecutor.AbortPolicy());
 
-        Starter.pdExecutor = Executors.newSingleThreadExecutor();
-        Starter.dpdExecutor = Executors.newSingleThreadExecutor();
+        Starter.pdExecutor = Executors.newFixedThreadPool(numCores - 1);
+        Starter.dpdExecutor = Executors.newFixedThreadPool(numCores - 1);
 
         config.setProperty("TILE", String.valueOf(args[1]));
         storageService = new StorageServiceImpl(config);
@@ -178,7 +178,11 @@ public class Starter implements Callable<Integer> {
         }
 
         // TODO: Set two options 2 - without deletes and 3 - with deletes
-        countDownLatch = new CountDownLatch(3);
+        if (config.getProperty("REPLICATE_DELETES").equals("true")) {
+            countDownLatch = new CountDownLatch(3);
+        } else {
+            countDownLatch = new CountDownLatch(2);
+        }
 
         Runtime.getRuntime().addShutdownHook(new Thread(new Stopper()));
         httpHealthCheck();
@@ -253,9 +257,8 @@ public class Starter implements Callable<Integer> {
 
         countDownLatch.await();
         var elapsedTime = System.nanoTime() - startTime;
-        LOGGER.debug(
-                "{} replication processes completed within {} ms",
-                Math.abs(countDownLatch.getCount() - 3),
+        LOGGER.info(
+                "The replication process has completed within {} ms",
                 Duration.ofNanos(elapsedTime).toMillis());
         var inserts = meterRegistry.get("replicated.insert").counter().count();
         var updates = meterRegistry.get("replicated.update").counter().count();

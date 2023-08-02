@@ -34,8 +34,6 @@ public class TargetStorageOnKeyspaces
     private static final Logger LOGGER = LoggerFactory.getLogger(TargetStorageOnKeyspaces.class);
     private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
     private static CqlSession cqlSession;
-    private static PreparedStatement psWriteStats;
-    private static PreparedStatement psReadStats;
     private static Retry retry;
     private static Retry.EventPublisher publisher;
     private final Properties config;
@@ -43,13 +41,6 @@ public class TargetStorageOnKeyspaces
     public TargetStorageOnKeyspaces(Properties properties) {
         var connectionFactory = new ConnectionFactory(properties);
         cqlSession = connectionFactory.buildCqlSession("KeyspacesConnector.conf");
-        psWriteStats =
-                cqlSession.prepare(
-                        "update replicator.stats set rows=rows+:value where tile=:tile and keyspacename=:keyspacename and tablename=:tablename and ops=:ops");
-        psReadStats =
-                cqlSession.prepare(
-                        "select tile, keyspacename, tablename, ops, rows from replicator.stats where ops=:ops and keyspacename=:keyspacename and tablename=:tablename allow filtering");
-
         var retryConfig =
                 RetryConfig.custom()
                         .maxAttempts(

@@ -23,7 +23,6 @@ import java.io.IOException;
  * Provides intermediate JSON transformation via PartiQL
  */
 public class IonEngine {
-
     private final IonSystem ion;
     private final CompilerPipeline pipeline;
 

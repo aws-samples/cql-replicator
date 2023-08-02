@@ -5,7 +5,7 @@ keyspace_definition: |
 table: test_cql_replicator
 table_definition: |
   CREATE TABLE test_cql_replicator (
-    key           uuid,
+    key            uuid,
     col0           tinyint,
     col1           text,
     col2           date,

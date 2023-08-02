@@ -15,13 +15,12 @@ import java.io.IOException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.amazon.aws.cqlreplicator.util.Utils.bytesToInt;
 import static com.amazon.aws.cqlreplicator.util.Utils.intToBytes;
 import static org.iq80.leveldb.impl.Iq80DBFactory.factory;
-
 
 public class StorageServiceImpl implements StorageService<String, byte[], PrimaryKey>, AutoCloseable {
 
@@ -127,7 +126,6 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
 
     @Override
     public void deletePartition(String key) {
-
         levelDBStorePartitions.delete(SerializationUtils.serialize(key));
     }
 
@@ -247,7 +245,7 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
                     }
 
                     private List<PrimaryKey> getData(Object startKey, int PAGE_SIZE) {
-                        List<PrimaryKey> result = new CopyOnWriteArrayList<>();
+                        Set<PrimaryKey> result = ConcurrentHashMap.newKeySet();
                         iterators.values().parallelStream().forEach(
                                 iterator -> {
                                     if (startKey != null) {
@@ -271,7 +269,7 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
                                         } else break;
                                     }
                                 });
-                        return result;
+                        return result.stream().toList();
                     }
                 };
 

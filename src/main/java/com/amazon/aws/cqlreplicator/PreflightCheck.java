@@ -16,13 +16,9 @@ import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatch.model.CloudWatchException;
 
 import java.io.File;
-import java.io.IOException;
-import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-
-import static com.amazon.aws.cqlreplicator.util.Utils.putMetricData;
 
 public class PreflightCheck implements AutoCloseable {
 
@@ -37,7 +33,6 @@ public class PreflightCheck implements AutoCloseable {
     private final String targetTable;
     private final boolean isCloudWatch;
     private final String cloudWatchRegion;
-    private final Map<String, String> memcachedEndpoint = new HashMap<>();
     private CqlSession keyspacesConnector;
     private CqlSession cassandraConnector;
     private String rsSample;
@@ -50,8 +45,6 @@ public class PreflightCheck implements AutoCloseable {
         this.source = String.format("%s.%s", config.getProperty("SOURCE_KEYSPACE"), config.getProperty("SOURCE_TABLE"));
         this.isCloudWatch = config.getProperty("ENABLE_CLOUD_WATCH").equals("true");
         this.cloudWatchRegion = isCloudWatch ? config.getProperty("CLOUD_WATCH_REGION") : "";
-        this.memcachedEndpoint.put("STORAGE_ENDPOINT", config.getProperty("EXTERNAL_MEMCACHED_STORAGE_ENDPOINT"));
-        this.memcachedEndpoint.put("STORAGE_PORT", config.getProperty("EXTERNAL_MEMCACHED_STORAGE_PORT"));
     }
 
     @Override
@@ -91,10 +84,6 @@ public class PreflightCheck implements AutoCloseable {
             var ccwa = checkCloudWatchAvailability();
             resultSet.put(ccwa.name(), 1);
             LOGGER.info(prepareOutput("Checking the CloudWatch availability", ccwa));
-        } else {
-            var cssa = checkStatsAvailability();
-            resultSet.put(cssa.name(), 1);
-            LOGGER.info(prepareOutput("Checking the Replicator.stats availability", cssa));
         }
 
         if (resultSet.get("FAILED") != null) {
@@ -130,17 +119,11 @@ public class PreflightCheck implements AutoCloseable {
                     CloudWatchClient.builder()
                             .region(Region.of(cloudWatchRegion))
                             .build();
-            putMetricData(cloudWatchClient, 1.0, "Pre-flight-check");
             cloudWatchClient.close();
         } catch (CloudWatchException | SdkClientException e) {
             return PreflightCheckStatus.FAILED;
         }
         return PreflightCheckStatus.PASSED;
-    }
-
-    private PreflightCheckStatus checkStatsAvailability() {
-        return (this.keyspacesConnector.getMetadata().getKeyspace("replicator").flatMap(replicator -> replicator.getTable("stats")).isPresent()) ?
-                PreflightCheckStatus.PASSED : PreflightCheckStatus.FAILED;
     }
 
     private PreflightCheckStatus checkWritePermissionToTarget() {

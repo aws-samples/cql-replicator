@@ -13,7 +13,7 @@ CQLReplicator instances.
 
 ### Prerequisites
 
-List any prerequisites or requirements needed to run CQLReplicator, such as:
+List any prerequisites needed to run CQLReplicator, such as:
 
 - AWS account
 - Docker
@@ -21,7 +21,9 @@ List any prerequisites or requirements needed to run CQLReplicator, such as:
 
 ### Getting Started
 
-Explain how to set up and deploy CQLReplicator using [AWS ECS Copilot](https://aws.github.io/copilot-cli/docs/getting-started/install/). Include the following steps:
+ Set up and deploy CQLReplicator using [AWS ECS Copilot](https://aws.github.io/copilot-cli/docs/getting-started/install/). Include the following steps:
+
+### Configuration
 
 1. Clone the repository:
 
@@ -35,51 +37,91 @@ Explain how to set up and deploy CQLReplicator using [AWS ECS Copilot](https://a
    cd cql-replicator
    ```
 
-3. Build CQLReplicator
+- Set TILES to the number of tiles that should be equal to the number of ECS tasks
+- Create a S3 bucket `cqlreplicator` and set it to BUCKETNAME. The bucket stores the artifacts: 
+  `config.properties`, `KeyspacesConnector.conf`, and `CassandraConnector.conf` e.g, s3:/bucketname/keyspace_name/table_name
+- Set KEYSPACENAME to the keyspace name (s3 prefix)
+- Set TABLENAME to the table name (s3 prefix)
+
+3. Build CQLReplicator:
 
    ```bash
    gradle build
    gradle task deploy
    ```
 
-4. Initialize the ECS Copilot environment
+4. Initialize the ECS Copilot environment:
 
 Configure the required resources, such as VPC, S3 buckets etc., using the prompts provided by the `copilot init` command.
 
    ```bash
-   copilot init
+   copilot app init cql-replicator
    ```
 
-5. Configure CQLReplicator in `config.properties`
+5. Configure CQLReplicator:
 
-   1. Configure the source and target tables
-   2. Configure migrated columns
-   3. Configure writetime regular columns to detect updates in the source table
-   4. Configure the total number of tiles
-   5. Create a S3 bucket to store configuration files
-   6. Configure connectivity to the source Cassandra cluster `CassandraConnector.conf`
-   7. Configure connectivity to the target Keyspaces table `KeyspacesConnector.conf`
-   8. Copy all artifacts to s3://your-bucket-name/keyspacename/tablename
+   * Configure the source and target tables in `config.properties`
+   * Configure migrated columns in `config.properties`
+   * Configure write time of regular columns to detect updates in the source table in `config.properties`
+   * Configure the total number of tiles in `config.properties`
+   * Create a S3 bucket to store configuration files in `config.properties`
+   * Configure connectivity to the source Cassandra cluster `CassandraConnector.conf`
+   * Configure connectivity to the target Keyspaces table `KeyspacesConnector.conf`
+   * Copy all artifacts to s3://your-bucket-name/keyspacename/tablename
 
-6. Deploy the CQLReplicator cluster
+6. Deploy the CQLReplicator cluster:
 
-Choose the backend service and name it `cql-replicator-service`
+Initiate and deploy the service, and the test environment,
 
    ```bash
    copilot svc init --name cql-replicator-service
+   copilot env init --name test
+   copilot env deploy --name test
    copilot svc deploy --name cql-replicator-service --env test
    ```
 
-### Configuration
-
-- TILES: This is required, the number of tiles that should be equal to the number of ECS tasks
-- BUCKETNAME: The bucket name with the artifacts, `config.properties`, `KeyspacesConnector.conf`, and `CassandraConnector.conf`
-- KEYSPACENAME: the keyspace name (s3 prefix)
-- TABLENAME: the table name (s3 prefix)
-
 ### Usage
 
-CQLReplicator will immediately start to replicate the Cassandra workload when all tasks are deployed.
+CQLReplicator will immediately start replicating the Cassandra workload when all ECS tasks are running.
+Before restarting or updating the ECS tasks delete `tiles` with the locking files from `s3://bucket/keyspace_name/table_name`.
+
+#### Define the number of tiles
+
+One CQLReplicator can handle up to 1M primary keys, if you want to handle over 1M please scale up ECS tasks.
+
+You can avoid high ECS costs by replicating the historical workload with AWS Glue and after
+enable `ENABLE_REPLICATION_POINT` to handle only new workload after specific timestamp.
+
+#### Restarting the ECS cluster
+
+After restarting the ECS cluster, the CQLReplicator instances will start replicating
+from a scratch. To void losing previously replicated workload you might use two workarounds:
+* Use Amazon EFS instead of ephemeral storage in `manifest.yml` e.g, 
+   ```yaml
+   storage:
+     volumes:
+       myManagedEFSVolume:
+        efs: true
+        path: /var/efs
+        read_only: false
+   ```
+  and set `LOCAL_STORAGE_PATH` to `/var/efs` in `config.properties`
+* Set `ENABLE_REPLICATION_POINT` to `true` and `STARTING_REPLICATION_TIMESTAMP` to the most recent timestamp
+  in `config.properties`.
+
+#### Avoid the high CPU utilization of the Cassandra cluster
+
+CQLReplicator might add a CPU overhead due to pooling data periodically.If the CPU utilization is over 
+70% you can increase `POOLING_PERIOD` from 1 second to a higher value and scale down 
+the CQLReplicator instances by reducing `REPLICATE_WITH_CORE_POOL_SIZE` and
+`REPLICATE_WITH_MAX_CORE_POOL_SIZE` and decrease the number of CPUs per ECS task. 
+Finally, you might deploy another Cassandra DC to shift your migration workload to it.
+
+### Limitations
+
+CQLReplicator doesn't support:
+ * counters
+ * Cassandra tables with no regular columns
 
 ### Cleanup
 

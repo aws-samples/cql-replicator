@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
@@ -19,16 +20,20 @@ public abstract class AbstractTaskV2 {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AbstractTaskV2.class);
 
-    public final void performTask(StorageServiceImpl storageService, Utils.CassandraTaskTypes taskName)
+    public final void performTask(StorageServiceImpl storageService,
+                                  Utils.CassandraTaskTypes taskName,
+                                  CountDownLatch countDownLatch)
             throws IOException, InterruptedException, ExecutionException, TimeoutException {
         var startTime = System.nanoTime();
-        doPerformTask(storageService, taskName);
+        doPerformTask(storageService, taskName, countDownLatch);
         var elapsedTime = System.nanoTime() - startTime;
         LOGGER.debug(
                 "Elapsed time is {} ms for task {}", Duration.ofNanos(elapsedTime).toMillis(), taskName);
     }
 
 
-    protected abstract void doPerformTask(StorageServiceImpl storageService, Utils.CassandraTaskTypes taskName)
+    protected abstract void doPerformTask(StorageServiceImpl storageService,
+                                          Utils.CassandraTaskTypes taskName,
+                                          CountDownLatch countDownLatch)
             throws IOException, InterruptedException, ExecutionException, TimeoutException;
 }

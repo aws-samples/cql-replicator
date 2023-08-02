@@ -22,7 +22,7 @@
         <appender-ref ref="ASYNC"/>
     </logger>
 
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.CassandraReplicationTaskV2" level="ERROR"
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.RowDiscoveryTaskV2" level="ERROR"
             additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
@@ -36,6 +36,10 @@
     </logger>
 
     <logger name="com.amazon.aws.cqlreplicator.storage.StorageServiceImpl" level="ERROR" additivity="false">
+        <appender-ref ref="ASYNC"/>
+    </logger>
+
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.DeletedRowDiscoveryTask" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
 

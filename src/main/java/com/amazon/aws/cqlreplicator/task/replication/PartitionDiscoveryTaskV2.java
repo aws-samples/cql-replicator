@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
@@ -235,14 +236,12 @@ public class PartitionDiscoveryTaskV2 extends AbstractTaskV2 {
                         }
                     }
             );
-            //for (int chunk = 0; chunk < chunks; chunk++) {
-            //  deletePartitions(pks, storageService, chunk);
-            //}
         }
     }
 
     @Override
-    protected void doPerformTask(StorageServiceImpl storageService, Utils.CassandraTaskTypes taskName)
+    protected void doPerformTask(StorageServiceImpl storageService, Utils.CassandraTaskTypes taskName,
+                                 CountDownLatch countDownLatch)
             throws IOException, InterruptedException, ExecutionException, TimeoutException {
 
         var pks = metaData.get("partition_key").keySet().toArray(new String[0]);
@@ -266,7 +265,6 @@ public class PartitionDiscoveryTaskV2 extends AbstractTaskV2 {
         if (config.getProperty("REPLICATE_DELETES").equals("true")) {
             scanAndRemove(storageService, taskName, pks);
         }
-
-        LOGGER.debug("Caching and comparing stage is completed");
+        countDownLatch.countDown();
     }
 }

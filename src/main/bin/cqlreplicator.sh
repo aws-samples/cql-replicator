@@ -53,7 +53,7 @@ done
 echo "The lock is removed"
 
 # Get the list of locks
-str=$(aws s3api list-objects --bucket cqlreplicator --prefix "$KEYSPACENAME"/"$TABLENAME"/tiles --query 'Contents[].Key'| tr -d '"[]')
+str=$(aws s3api list-objects --bucket $BUCKETNAME --prefix "$KEYSPACENAME"/"$TABLENAME"/tiles --query 'Contents[].Key'| tr -d '"[]')
 new_str=$(echo $str | tr -d ' ')
 IFS=',' read -ra tmp_locks <<< "$new_str"
 locks=("${tmp_locks[@]:1}")

@@ -11,6 +11,8 @@ of CQLReplicator is a java process responsible for handling specific token range
 customers can simply restart the migration process from the point where it was interrupted by restarting the failed 
 CQLReplicator instances.
 
+![](CQLReplicator.png)
+
 ### Prerequisites
 
 List any prerequisites needed to run CQLReplicator, such as:

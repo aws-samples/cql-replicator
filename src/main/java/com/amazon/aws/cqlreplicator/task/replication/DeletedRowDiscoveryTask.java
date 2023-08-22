@@ -3,6 +3,7 @@ package com.amazon.aws.cqlreplicator.task.replication;
 import com.amazon.aws.cqlreplicator.models.PrimaryKey;
 import com.amazon.aws.cqlreplicator.storage.SourceStorageOnCassandra;
 import com.amazon.aws.cqlreplicator.storage.StorageServiceImpl;
+import com.amazon.aws.cqlreplicator.storage.TargetStorageLargeObjectsOnS3;
 import com.amazon.aws.cqlreplicator.storage.TargetStorageOnKeyspaces;
 import com.amazon.aws.cqlreplicator.task.AbstractTaskV2;
 import com.amazon.aws.cqlreplicator.util.Utils;
@@ -11,12 +12,14 @@ import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 
 public class DeletedRowDiscoveryTask extends AbstractTaskV2 {
+    private static TargetStorageLargeObjectsOnS3 targetStorageLargeObjectsOnS3;
     private static Map<String, LinkedHashMap<String, String>> cassandraSchemaMetadata;
     private static SourceStorageOnCassandra sourceStorageOnCassandra;
     private static TargetStorageOnKeyspaces targetStorageOnKeyspaces;
@@ -34,6 +37,9 @@ public class DeletedRowDiscoveryTask extends AbstractTaskV2 {
         cntDeletes = Counter.builder("replicated.delete")
                 .description("Replicated deletes counter")
                 .register(meterRegistry);
+        if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
+            DeletedRowDiscoveryTask.targetStorageLargeObjectsOnS3 = new TargetStorageLargeObjectsOnS3(config);
+        }
     }
 
     private void delete(
@@ -45,9 +51,17 @@ public class DeletedRowDiscoveryTask extends AbstractTaskV2 {
         if (!sourceStorageOnCassandra.findPrimaryKey(primaryKey, pks, cls)) {
             var rowIsDeleted =
                     targetStorageOnKeyspaces.delete(primaryKey, pks, cls, cassandraSchemaMetadata);
+
             if (rowIsDeleted) {
                 storageService.deleteRow(primaryKey);
                 cntDeletes.increment();
+                if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
+                    try {
+                        targetStorageLargeObjectsOnS3.delete("", primaryKey);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
             }
         }
     }

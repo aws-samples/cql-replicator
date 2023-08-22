@@ -4,10 +4,7 @@ package com.amazon.aws.cqlreplicator.task.replication;
 
 import com.amazon.aws.cqlreplicator.models.Payload;
 import com.amazon.aws.cqlreplicator.models.PrimaryKey;
-import com.amazon.aws.cqlreplicator.storage.IonEngine;
-import com.amazon.aws.cqlreplicator.storage.SourceStorageOnCassandra;
-import com.amazon.aws.cqlreplicator.storage.StorageServiceImpl;
-import com.amazon.aws.cqlreplicator.storage.TargetStorageOnKeyspaces;
+import com.amazon.aws.cqlreplicator.storage.*;
 import com.amazon.aws.cqlreplicator.task.AbstractTaskV2;
 import com.amazon.aws.cqlreplicator.util.CustomResultSetSerializer;
 import com.amazon.aws.cqlreplicator.util.Utils;
@@ -54,6 +51,7 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
     private static Counter cntUpdates;
     private static Counter cntFailedInserts;
     private static Counter cntFailedUpdates;
+    private static TargetStorageLargeObjectsOnS3 targetStorageLargeObjectsOnS3;
 
     public RowDiscoveryTaskV2(final Properties cfg,
                               ThreadPoolExecutor executor,
@@ -82,6 +80,9 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
         if (useCustomJsonSerializer) {
             module.addSerializer(Row.class, new CustomResultSetSerializer());
             mapper.registerModule(module);
+        }
+        if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
+            RowDiscoveryTaskV2.targetStorageLargeObjectsOnS3 = new TargetStorageLargeObjectsOnS3(config);
         }
     }
 
@@ -289,8 +290,9 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                                             getSerializedCassandraRow(compareRow),
                                             config.getProperty("WRITETIME_COLUMNS"),
                                             cls,
-                                            pks);
-                                } catch (JsonProcessingException e) {
+                                            pks,
+                                            config);
+                                } catch (IOException e) {
                                     throw new RuntimeException(e);
                                 }
                                 var ts = jsonPayload.getTimestamp();
@@ -317,12 +319,27 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                                     storageService.writeRow(primaryKey, longToBytes(ts));
                                     jsonColumnHashMapPerPartition.put(cl, preparePayload(jsonPayload));
                                     upsertRow(ts, cl, jsonColumnHashMapPerPartition, "INSERT");
+                                    if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
+                                        try {
+                                            targetStorageLargeObjectsOnS3.write(jsonPayload.getS3Payload() , primaryKey);
+                                        } catch (IOException e) {
+                                            throw new RuntimeException(e);
+                                        }
+                                    }
+
                                 } else {
                                     // if hk is in the global pk cache, compare timestamps
                                     if (ts > bytesToLong(storageService.readRow(primaryKey))) {
                                         storageService.writeRow(primaryKey, longToBytes(ts));
                                         jsonColumnHashMapPerPartition.put(cl, preparePayload(jsonPayload));
                                         upsertRow(ts, cl, jsonColumnHashMapPerPartition, "UPDATE");
+                                        if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
+                                            try {
+                                                targetStorageLargeObjectsOnS3.write(jsonPayload.getS3Payload(), primaryKey);
+                                            } catch (IOException e) {
+                                                throw new RuntimeException(e);
+                                            }
+                                        }
                                     }
                                 }
                             });

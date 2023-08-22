@@ -21,6 +21,7 @@ import io.github.resilience4j.retry.RetryRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.util.*;
 import java.util.function.Supplier;
@@ -29,7 +30,7 @@ import java.util.regex.Pattern;
 import static com.amazon.aws.cqlreplicator.util.Utils.doubleQuoteResolver;
 
 public class TargetStorageOnKeyspaces
-        extends TargetStorage<Object, List<Row>, BatchStatementBuilder, SimpleStatement> {
+        extends TargetStorage<Object, SimpleStatement> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TargetStorageOnKeyspaces.class);
     private static final Pattern REGEX_PIPE = Pattern.compile("\\|");
@@ -72,14 +73,8 @@ public class TargetStorageOnKeyspaces
         cqlSession.close();
     }
 
-    @Override
     public List<Row> execute(BatchStatementBuilder batchableStatement) {
         Supplier<List<Row>> supplier = () -> cqlSession.execute(batchableStatement.build()).all();
-        return Retry.decorateSupplier(retry, supplier).get();
-    }
-
-    public List<Row> extract(BoundStatementBuilder boundStatementBuilder) {
-        Supplier<List<Row>> supplier = () -> cqlSession.execute(boundStatementBuilder.build()).all();
         return Retry.decorateSupplier(retry, supplier).get();
     }
 
@@ -192,5 +187,15 @@ public class TargetStorageOnKeyspaces
                         .build());
 
         execute(batchableStatements);
+    }
+
+    @Override
+    public boolean write(SimpleStatement simpleStatement, Object o) throws IOException {
+        return false;
+    }
+
+    @Override
+    public void delete(SimpleStatement simpleStatement, Object o) throws IOException {
+
     }
 }

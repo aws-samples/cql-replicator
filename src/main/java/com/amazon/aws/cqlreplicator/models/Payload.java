@@ -15,6 +15,7 @@ public class Payload {
     private long ts;
     private String payload;
     private Map<String, String> cls;
+    private String s3Payload;
 
     public Payload() {
     }
@@ -54,5 +55,13 @@ public class Payload {
     @Override
     public String toString() {
         return ReflectionToStringBuilder.toString(this);
+    }
+
+    public String getS3Payload() {
+        return s3Payload;
+    }
+
+    public void setS3Payload(String s3Payload) {
+        this.s3Payload = s3Payload;
     }
 }

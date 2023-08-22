@@ -3,6 +3,7 @@
 package com.amazon.aws.cqlreplicator.util;
 
 import com.amazon.aws.cqlreplicator.models.Payload;
+import com.amazon.aws.cqlreplicator.models.PrimaryKey;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
 import com.datastax.oss.driver.api.core.type.reflect.GenericType;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -21,6 +22,8 @@ import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -163,7 +166,8 @@ public class Utils {
             int rangesToRemove = partitionedTokenRanges.size() - tiles;
 
             List<ImmutablePair<String, String>> merged =
-                    sliceOfListStream.flatMap(Collection::parallelStream).collect(Collectors.toList());
+                    sliceOfListStream.flatMap(Collection::parallelStream)
+                            .collect(Collectors.toList());
 
             for (int i = 0; i <= rangesToRemove; i++) {
                 partitionedTokenRanges.removeLast();
@@ -176,8 +180,8 @@ public class Utils {
     }
 
     public static Payload convertToJson(
-            //TODO: Add support without writime columns
-            String rawData, String writeTimeColumns, String[] cls, String[] pks) {
+            //TODO: Add support with no writetime columns
+            String rawData, String writeTimeColumns, String[] cls, String[] pks, Properties s3offload) throws IOException {
         var objectMapper = new ObjectMapper();
 
         var payload = new Payload();
@@ -198,29 +202,107 @@ public class Utils {
         }
         for (String writeColumn : writeTimeColumnsArray) {
             JsonNode idNode =
-                    Objects.requireNonNull(rootNode).path(String.format("writetime(%s)", writeColumn));
+                    Objects.requireNonNull(rootNode)
+                            .path(String.format("writetime(%s)", writeColumn));
             writeTimeArray.add(idNode.asLong());
         }
         for (String cln : cls) {
-            clusteringColumnMapping.put(cln, Objects.requireNonNull(rootNode).path(cln).asText());
+            clusteringColumnMapping.put(cln, Objects.requireNonNull(rootNode)
+                    .path(cln)
+                    .asText());
         }
 
         for (String pk : pks) {
-            partitionColumnsMapping.put(pk, Objects.requireNonNull(rootNode).path(pk).asText());
+            partitionColumnsMapping.put(pk, Objects.requireNonNull(rootNode)
+                    .path(pk)
+                    .asText());
         }
 
         payload.setPk(String.join("|", partitionColumnsMapping.values()));
         payload.setClusteringColumn(String.join("|", clusteringColumnMapping.values()));
-        payload.setTimestamp(writeTimeArray.stream().max(Long::compare).get());
+        payload.setTimestamp(writeTimeArray.stream().max(Long::compare)
+                .get());
         payload.setClusteringColumns(clusteringColumnMapping);
 
         for (String writeColumn : writeTimeColumnsArray) {
             ((ObjectNode) rootNode).remove(String.format("writetime(%s)", writeColumn));
         }
-        // Single quote invalidates INSERT JSON statements
-        payload.setPayload(String.valueOf(rootNode).replace("'", "\\\\u0027"));
 
+        var s3OffloadColumns = s3offload.getProperty("S3_OFFLOAD_COLUMNS");
+
+        if (!s3OffloadColumns.equals("NONE")) {
+            var primaryKey = new PrimaryKey(
+                    String.join("|", partitionColumnsMapping.values()),
+                    String.join("|", clusteringColumnMapping.values())
+            );
+
+            var S3payloadMap = new HashMap<String,String>();
+            var columnsToOffload = s3OffloadColumns.split(",");
+            for (String offloadColumn : columnsToOffload) {
+                if (!rootNode.get(offloadColumn).asText().isEmpty()) {
+                var s3offloadColumnValue = rootNode.get(offloadColumn)
+                                .asText()
+                                .replace("'", "\\\\u0027");
+
+                if (!s3offload.getProperty("S3_USE_PRE_SIGNED_URL")
+                        .equals("NONE")) {
+
+                    if (s3offload.getProperty("S3_USE_PRE_SIGNED_URL").equals(offloadColumn)) {
+
+                        if (s3offload.getProperty("S3_SHARDING_BY")
+                                .equals("PRIMARY_KEY")) {
+                            var preSignedUrl = applyUrlType(
+                                    s3offload.getProperty("S3_PRE_SIGNED_URL_TYPE"),
+                                    String.format("%s/%s/%s/%s/%s/%s/%s",
+                                    "s3://",
+                                    s3offload.getProperty("S3_BUCKET_NAME"),
+                                    s3offload.getProperty("TARGET_KEYSPACE"),
+                                    s3offload.getProperty("TARGET_TABLE"),
+                                    primaryKey.getHashedPartitionKeys(),
+                                    primaryKey.getHashedClusteringKeys(),
+                                    "payload.json"
+                            ));
+                            ((ObjectNode) rootNode).put(offloadColumn, preSignedUrl);
+
+                        } else if (s3offload.getProperty("S3_SHARDING_BY")
+                                .equals("NONE")) {
+                            var preSignedUrl = applyUrlType(
+                                    s3offload.getProperty("S3_PRE_SIGNED_URL_TYPE"),
+                                    String.format("%s/%s/%s/%s/%s", "s3://",
+                                    s3offload.getProperty("S3_BUCKET_NAME"),
+                                    s3offload.getProperty("TARGET_KEYSPACE"),
+                                    s3offload.getProperty("TARGET_TABLE"),
+                                    primaryKey.getHashedPrimaryKey()
+                            ));
+                            ((ObjectNode) rootNode).put(offloadColumn, preSignedUrl);
+                        }
+
+                    } else {
+                        ((ObjectNode) rootNode).remove(offloadColumn);
+                    }
+                    S3payloadMap.put(offloadColumn, s3offloadColumnValue);
+                }
+            } else {
+                    S3payloadMap.put(offloadColumn, "");
+                }
+            }
+            payload.setS3Payload(objectMapper.writeValueAsString(S3payloadMap));
+        }
+
+        // Single quote invalidates INSERT JSON statements
+        payload.setPayload(String.valueOf(rootNode)
+                .replace("'", "\\\\u0027"));
         return payload;
+    }
+
+    private static String applyUrlType(String type, String url) {
+        if (type.equals("binary")) {
+            var hex = HexFormat.of();
+            return String.format("0x%s",hex.formatHex(url.getBytes()));
+        }
+        else {
+            return url;
+        }
     }
 
     public static BoundStatementBuilder aggregateBuilder(
@@ -301,11 +383,6 @@ public class Utils {
             }
         }
         return genericType;
-    }
-
-    public enum HashingFunctions {
-        MURMUR_HASH3_128_X64,
-        SHA_256
     }
 
     public enum CassandraTaskTypes {

@@ -35,6 +35,8 @@ dependencies {
     implementation ("org.iq80.leveldb:leveldb-api:${project.leveldbVersion}")
     implementation ("org.iq80.leveldb:leveldb:${project.leveldbVersion}")
     implementation ("commons-io:commons-io:${project.commonsIoVersion}")
+    implementation ("org.apache.httpcomponents:httpclient:${project.httpVersion}")
+    implementation ("software.amazon.awssdk:s3:${project.awssdkS3Version}")
     compileOnly("org.jetbrains:annotations:${project.annotationsVersion}")
     implementation("io.vertx:vertx-web:${project.vertxVersion}") {
         exclude group: 'junit', module: 'junit'

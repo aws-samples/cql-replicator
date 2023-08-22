@@ -38,6 +38,7 @@
         <micrometer.version>1.11.2</micrometer.version>
         <vertx.version>4.4.4</vertx.version>
         <netty.version>4.1.96.Final</netty.version>
+        <httpclient.version>4.5.11</httpclient.version>
     </properties>
     <build>
         <plugins>
@@ -268,7 +269,7 @@
         <dependency>
             <groupId>org.apache.httpcomponents</groupId>
             <artifactId>httpclient</artifactId>
-            <version>4.5.11</version>
+            <version>${httpclient.version}</version>
         </dependency>
     </dependencies>
     <licenses>

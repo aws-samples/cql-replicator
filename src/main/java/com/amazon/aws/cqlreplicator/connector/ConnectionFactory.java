@@ -16,6 +16,7 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.File;
+import java.net.URI;
 import java.time.Duration;
 import java.util.Properties;
 
@@ -47,6 +48,9 @@ public class ConnectionFactory {
         return S3Client.builder()
                 .overrideConfiguration(clientOverrideConfiguration)
                 .region(Region.of(config.getProperty("S3_REGION")))
+                .endpointOverride(URI.create(
+                        String.format("https://s3.%s.amazonaws.com",config.getProperty("S3_REGION"))))
+                .forcePathStyle(true)
                 .build();
     }
 }

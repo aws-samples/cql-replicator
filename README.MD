@@ -20,6 +20,7 @@ List any prerequisites needed to run CQLReplicator, such as:
 - AWS account
 - Docker
 - ECS Copilot CLI
+- Gradle 7.4.2
 
 ### Getting Started
 

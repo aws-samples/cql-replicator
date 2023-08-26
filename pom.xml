@@ -11,7 +11,7 @@
             <dependency>
                 <groupId>software.amazon.awssdk</groupId>
                 <artifactId>bom</artifactId>
-                <version>2.20.76</version>
+                <version>2.20.130</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -20,18 +20,17 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <datastax.version>4.15.0</datastax.version>
+        <datastax.version>4.17.0</datastax.version>
         <keyspaces.version>4.0.9</keyspaces.version>
         <kotlin.version>1.7.0</kotlin.version>
         <resilience4j.version>1.7.1</resilience4j.version>
-        <jackson.version>2.14.2</jackson.version>
         <commons.lang3.version>3.12</commons.lang3.version>
         <partiql.version>0.8.0</partiql.version>
         <commons.codec.version>1.15</commons.codec.version>
         <commons.lang3.version>3.12.0</commons.lang3.version>
         <logback.version>1.4.7</logback.version>
         <picocli.version>4.7.3</picocli.version>
-        <cbor.version>2.14.2</cbor.version>
+        <cbor.version>2.13.5</cbor.version>
         <snappy.version>1.1.10.1</snappy.version>
         <lz4.version>1.8.0</lz4.version>
         <leveldb.version>0.12</leveldb.version>
@@ -39,6 +38,7 @@
         <micrometer.version>1.11.2</micrometer.version>
         <vertx.version>4.4.4</vertx.version>
         <netty.version>4.1.96.Final</netty.version>
+        <httpclient.version>4.5.11</httpclient.version>
     </properties>
     <build>
         <plugins>
@@ -126,11 +126,6 @@
             <version>${resilience4j.version}</version>
         </dependency>
         <dependency>
-            <groupId>com.fasterxml.jackson.dataformat</groupId>
-            <artifactId>jackson-dataformat-yaml</artifactId>
-            <version>${jackson.version}</version>
-        </dependency>
-        <dependency>
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-lang3</artifactId>
             <version>${commons.lang3.version}</version>
@@ -164,6 +159,17 @@
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
             <version>${logback.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-core</artifactId>
+            <version>${logback.version}</version>
+        </dependency>
+        <!-- https://mvnrepository.com/artifact/org.slf4j/slf4j-api -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.7</version>
         </dependency>
         <dependency>
             <groupId>info.picocli</groupId>
@@ -254,6 +260,16 @@
             <groupId>io.netty</groupId>
             <artifactId>netty-handler</artifactId>
             <version>${netty.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
+        <!-- https://mvnrepository.com/artifact/org.apache.httpcomponents/httpclient -->
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpclient</artifactId>
+            <version>${httpclient.version}</version>
         </dependency>
     </dependencies>
     <licenses>

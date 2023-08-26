@@ -26,18 +26,32 @@ public class PrimaryKey implements Serializable, Comparable<PrimaryKey> {
         this.hash = getXXHash(String.format("%s%s", partitionKeys, clusteringColumns));
     }
 
+    public long getHashedPartitionKeys() throws IOException {
+        return getXXHash(partitionKeys);
+    }
+
+    public long getHashedPrimaryKey() throws IOException {
+        return getXXHash(String.format("%s|%s", partitionKeys, clusteringColumns));
+
+    }
+
+    public long getHashedClusteringKeys() throws IOException {
+        return getXXHash(clusteringColumns);
+    }
+
     private static long getXXHash(@NotNull String data) throws IOException {
-        StreamingXXHash64 hash64 = hashFactory.newStreamingHash64(hashSeed);
-        byte[] buffer = new byte[8192];
-        ByteArrayInputStream in = new ByteArrayInputStream(data.getBytes());
-        for (; ; ) {
-            int read = in.read(buffer);
-            if (read == -1) {
-                break;
+        try (StreamingXXHash64 hash64 = hashFactory.newStreamingHash64(hashSeed)) {
+            byte[] buffer = new byte[8192];
+            ByteArrayInputStream in = new ByteArrayInputStream(data.getBytes());
+            for (; ; ) {
+                int read = in.read(buffer);
+                if (read == -1) {
+                    break;
+                }
+                hash64.update(buffer, 0, read);
             }
-            hash64.update(buffer, 0, read);
+            return hash64.getValue();
         }
-        return hash64.getValue();
     }
 
     public long getHash() {

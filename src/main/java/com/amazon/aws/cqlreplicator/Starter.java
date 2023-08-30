@@ -42,7 +42,7 @@ import static com.amazon.aws.cqlreplicator.util.Utils.CassandraTaskTypes.*;
 public class Starter implements Callable<Integer> {
 
     final static int HTTP_PORT = 8080;
-    final static int BLOCKING_QUEUE_SIZE = 15000;
+    final static int BLOCKING_QUEUE_SIZE = 30000;
     private static void httpHealthCheck() {
 
         Vertx vertx = Vertx.vertx();
@@ -101,6 +101,8 @@ public class Starter implements Callable<Integer> {
     private static StorageServiceImpl storageService;
     protected static CountDownLatch countDownLatch;
     protected static BlockingQueue<Runnable> blockingQueue;
+    protected static BlockingQueue<Runnable> blockingQueue1;
+    protected static BlockingQueue<Runnable> blockingQueue2;
     protected static ThreadPoolExecutor rowExecutor;
     protected static ExecutorService pdExecutor;
     protected static ExecutorService dpdExecutor;
@@ -154,6 +156,9 @@ public class Starter implements Callable<Integer> {
         }
 
         Starter.blockingQueue = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
+        Starter.blockingQueue1 = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
+        Starter.blockingQueue2 = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
+
         Starter.rowExecutor = new ThreadPoolExecutor(
                 Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_SIZE")),
                 Integer.parseInt(config.getProperty("REPLICATE_WITH_MAX_CORE_POOL_SIZE")),
@@ -162,8 +167,21 @@ public class Starter implements Callable<Integer> {
                 blockingQueue,
                 new ThreadPoolExecutor.AbortPolicy());
 
-        Starter.pdExecutor = Executors.newFixedThreadPool(numCores - 1);
-        Starter.dpdExecutor = Executors.newFixedThreadPool(numCores - 1);
+        Starter.pdExecutor = new ThreadPoolExecutor(
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_SIZE")),
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_MAX_CORE_POOL_SIZE")),
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_TIMEOUT")),
+                TimeUnit.SECONDS,
+                blockingQueue2,
+                new ThreadPoolExecutor.AbortPolicy());
+
+        Starter.dpdExecutor = new ThreadPoolExecutor(
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_SIZE")),
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_MAX_CORE_POOL_SIZE")),
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_TIMEOUT")),
+                TimeUnit.SECONDS,
+                blockingQueue1,
+                new ThreadPoolExecutor.AbortPolicy());
 
         config.setProperty("TILE", String.valueOf(args[1]));
         storageService = new StorageServiceImpl(config);
@@ -177,7 +195,6 @@ public class Starter implements Callable<Integer> {
             meterRegistry = new SimpleMeterRegistry();
         }
 
-        // TODO: Set two options 2 - without deletes and 3 - with deletes
         if (config.getProperty("REPLICATE_DELETES").equals("true")) {
             countDownLatch = new CountDownLatch(3);
         } else {
@@ -205,6 +222,8 @@ public class Starter implements Callable<Integer> {
      */
     @Override
     public Integer call() throws Exception {
+
+        double deletes = 0;
 
         /*
          * Set the current tile and tiles in config
@@ -262,7 +281,10 @@ public class Starter implements Callable<Integer> {
                 Duration.ofNanos(elapsedTime).toMillis());
         var inserts = meterRegistry.get("replicated.insert").counter().count();
         var updates = meterRegistry.get("replicated.update").counter().count();
-        var deletes = meterRegistry.get("replicated.delete").counter().count();
+
+        if (config.getProperty("REPLICATE_DELETES").equals("true")) {
+            deletes = meterRegistry.get("replicated.delete").counter().count();
+        }
 
         if (inserts > 0) {
             LOGGER.info("Replicated inserts {}", inserts);

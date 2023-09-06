@@ -1,12 +1,12 @@
 package com.amazon.aws.cqlreplicator.storage;
 
 import com.amazon.aws.cqlreplicator.models.PrimaryKey;
+import com.amazon.aws.cqlreplicator.util.LevelDBPageIterator;
 import com.amazon.aws.cqlreplicator.util.Utils;
-import com.datastax.oss.driver.shaded.guava.common.collect.AbstractIterator;
 import org.apache.commons.lang3.SerializationUtils;
 import org.iq80.leveldb.DB;
-import org.iq80.leveldb.DBIterator;
 import org.iq80.leveldb.Options;
+import org.iq80.leveldb.WriteOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,8 +14,9 @@ import java.io.File;
 import java.io.IOException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.amazon.aws.cqlreplicator.util.Utils.bytesToInt;
@@ -27,13 +28,10 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
     private static final Logger LOGGER = LoggerFactory.getLogger(StorageServiceImpl.class);
     private static final org.iq80.leveldb.Logger logger = LOGGER::info;
     private final int PAGE_SIZE;
-    private final DB levelDBStorePartitions;
-    private final Map<Integer, DB> levelDBStoreRows;
-    private final int LEVELDB_SHARDS;
+    private final DB levelDBStorePartitions, levelDBStoreRows;
 
     public StorageServiceImpl(final Properties properties) throws IOException {
         this.PAGE_SIZE = Integer.parseInt(properties.getProperty("LOCAL_STORAGE_KEYS_PER_PAGE"));
-        this.LEVELDB_SHARDS = Integer.parseInt(properties.getProperty("LOCAL_STORAGE_SHARDS"));
         this.levelDBStorePartitions = initPartitionLevelStorage(properties);
         this.levelDBStoreRows = initRowLevelStorage(properties);
     }
@@ -77,50 +75,46 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
                 );
     }
 
-    private Map<Integer, DB> initRowLevelStorage(final Properties properties) throws IOException {
+    private DB initRowLevelStorage(final Properties properties) throws IOException {
         Options options = new Options();
-        var dbs = new HashMap<Integer, DB>();
+        var LEVELDB_CACHE_SIZE = Integer
+                .parseInt(properties.getProperty("LOCAL_STORAGE_CACHE_SIZE"));
+        var LEVELDB_BLOCK_SIZE = Integer
+                .parseInt(properties.getProperty("LOCAL_STORAGE_BLOCK_SIZE"));
+        var LEVELDB_OPEN_MAX_FILES = Integer
+                .parseInt(properties.getProperty("LOCAL_STORAGE_MAX_OPEN_FILES"));
+        var LEVELDB_WRITE_BUFFER_SIZE = Integer
+                .parseInt(properties.getProperty("LOCAL_STORAGE_WRITE_BUFFER_SIZE"));
+        var LEVELDB_BLOCK_RESTART_INTERVAL = Integer
+                .parseInt(properties.getProperty("LOCAL_STORAGE_BLOCK_RESTART_INTERVAL"));
 
-        var LEVELDB_CACHE_SIZE = Integer.parseInt(properties.getProperty("LOCAL_STORAGE_CACHE_SIZE"));
-        var LEVELDB_BLOCK_SIZE = Integer.parseInt(properties.getProperty("LOCAL_STORAGE_BLOCK_SIZE"));
-        var LEVELDB_OPEN_MAX_FILES = Integer.parseInt(properties.getProperty("LOCAL_STORAGE_MAX_OPEN_FILES"));
-        var LEVELDB_WRITE_BUFFER_SIZE = Integer.parseInt(properties.getProperty("LOCAL_STORAGE_WRITE_BUFFER_SIZE"));
-        var LEVELDB_BLOCK_RESTART_INTERVAL = Integer.parseInt(properties.getProperty("LOCAL_STORAGE_BLOCK_RESTART_INTERVAL"));
-
-        for (var shard = 0; shard < LEVELDB_SHARDS; shard++) {
-            dbs.put(shard, factory.open(
-                    new File(
-                            String.format(
-                                    "%s/ledger_v4_%s_rows_%s.ldb",
-                                    properties.getProperty("LOCAL_STORAGE_PATH"),
-                                    properties.getProperty("TILE"),
-                                    shard)),
-                    options.cacheSize(LEVELDB_CACHE_SIZE).
-                            cacheSize(LEVELDB_CACHE_SIZE).
-                            blockSize(LEVELDB_BLOCK_SIZE).
-                            writeBufferSize(LEVELDB_WRITE_BUFFER_SIZE).
-                            blockRestartInterval(LEVELDB_BLOCK_RESTART_INTERVAL).
-                            maxOpenFiles(LEVELDB_OPEN_MAX_FILES).
-                            logger(logger).
-                            verifyChecksums(true).
-                            createIfMissing(true)
-            ));
-        }
-        return dbs;
+        return
+                factory.open(
+                        new File(
+                                String.format(
+                                        "%s/ledger_v4_%s_rows.ldb",
+                                        properties.getProperty("LOCAL_STORAGE_PATH"),
+                                        properties.getProperty("TILE"))),
+                        options.cacheSize(LEVELDB_CACHE_SIZE).
+                                blockSize(LEVELDB_BLOCK_SIZE).
+                                maxOpenFiles(LEVELDB_OPEN_MAX_FILES).
+                                writeBufferSize(LEVELDB_WRITE_BUFFER_SIZE).
+                                blockRestartInterval(LEVELDB_BLOCK_RESTART_INTERVAL).
+                                logger(logger).
+                                verifyChecksums(true).
+                                createIfMissing(true)
+                );
     }
 
     @Override
     public void writePartition(String key) {
         var valueOnClient = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now());
-
         var value = SerializationUtils.serialize(valueOnClient);
-
         levelDBStorePartitions.put(SerializationUtils.serialize(key), value);
     }
 
     @Override
     public byte[] readPartition(String key) {
-
         return levelDBStorePartitions.get(SerializationUtils.serialize(key));
     }
 
@@ -131,41 +125,35 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
 
     @Override
     public void writeRow(PrimaryKey key, byte[] bytes) {
-        var shard = (int) Math.abs(key.getHash() % LEVELDB_SHARDS);
-        levelDBStoreRows.get(shard).
+        levelDBStoreRows.
                 put(SerializationUtils.serialize(key), bytes);
     }
 
     @Override
     public byte[] readRow(PrimaryKey key) {
-        var shard = (int) Math.abs(key.getHash() % LEVELDB_SHARDS);
-        return levelDBStoreRows.get(shard).
+        return levelDBStoreRows.
                 get(SerializationUtils.serialize(key));
     }
 
     @Override
     public void deleteRow(PrimaryKey key) {
-        var shard = (int) Math.abs(key.getHash() % LEVELDB_SHARDS);
-        levelDBStoreRows.get(shard).
+        levelDBStoreRows.
                 delete(SerializationUtils.serialize(key));
     }
 
     @Override
     public byte[] readPartitionsPerTile(String key) {
-
         return levelDBStorePartitions.get(SerializationUtils.serialize(key));
     }
 
     @Override
     public byte[] readTileMetadata(String key) {
-
         return levelDBStorePartitions.get(SerializationUtils.serialize(key));
     }
 
     @Override
     public void writeTileMetadata(String key, byte[] bytes) {
         levelDBStorePartitions.put(SerializationUtils.serialize(key), bytes);
-
     }
 
     // Changed here
@@ -181,8 +169,8 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
 
     @Override
     public boolean containsInRows(PrimaryKey key) {
-        var shard = (int) Math.abs(key.getHash() % LEVELDB_SHARDS);
-        return levelDBStoreRows.get(shard).get(SerializationUtils.serialize(key)) != null;
+        return levelDBStoreRows
+                .get(SerializationUtils.serialize(key)) != null;
     }
 
     // Changed here
@@ -215,72 +203,18 @@ public class StorageServiceImpl implements StorageService<String, byte[], Primar
     }
 
     public Iterator<List<PrimaryKey>> readPaginatedPrimaryKeys() {
-        var iterators = new HashMap<Integer, DBIterator>();
+        return new LevelDBPageIterator(levelDBStoreRows, PAGE_SIZE);
+    }
 
-        for (var db : levelDBStoreRows.entrySet()) {
-            iterators.put(db.getKey(), db.getValue().iterator());
-        }
-
-        Iterator<List<PrimaryKey>> pagingIterator =
-                new AbstractIterator<>() {
-                    private Object resumeKey;
-                    private boolean endOfData;
-
-                    @Override
-                    protected List<PrimaryKey> computeNext() {
-                        if (endOfData) {
-                            return endOfData();
-                        }
-                        List<PrimaryKey> rows;
-                        rows = getData(resumeKey, PAGE_SIZE);
-
-                        if (rows.isEmpty()) {
-                            return endOfData();
-                        } else if (rows.size() < PAGE_SIZE) {
-                            endOfData = true;
-                        } else {
-                            resumeKey = rows.get(rows.size() - 1);
-                        }
-                        return rows;
-                    }
-
-                    private List<PrimaryKey> getData(Object startKey, int PAGE_SIZE) {
-                        Set<PrimaryKey> result = ConcurrentHashMap.newKeySet();
-                        iterators.values().parallelStream().forEach(
-                                iterator -> {
-                                    if (startKey != null) {
-                                        iterator.seek(SerializationUtils.serialize((PrimaryKey) startKey));
-                                    } else {
-                                        iterator.seekToFirst();
-                                        if (iterator.hasNext()) {
-                                            var nextMap = iterator.peekNext();
-                                            var key = (PrimaryKey) SerializationUtils.deserialize(nextMap.getKey());
-                                            result.add(key);
-                                            iterator.next();
-                                        }
-                                    }
-
-                                    for (int i = 0; i < PAGE_SIZE / 2; i++) {
-                                        if (iterator.hasNext()) {
-                                            var nextMap = iterator.peekNext();
-                                            var key = (PrimaryKey) SerializationUtils.deserialize(nextMap.getKey());
-                                            result.add(key);
-                                            iterator.next();
-                                        } else break;
-                                    }
-                                });
-                        return result.stream().toList();
-                    }
-                };
-
-        return pagingIterator;
+    public void closeIterator() throws IOException {
+        levelDBStoreRows
+                .iterator()
+                .close();
     }
 
     @Override
     public void close() throws IOException {
         levelDBStorePartitions.close();
-        for (var db : levelDBStoreRows.values()) {
-            db.close();
-        }
+        levelDBStoreRows.close();
     }
 }

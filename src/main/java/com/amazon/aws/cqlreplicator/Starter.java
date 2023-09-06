@@ -42,7 +42,34 @@ import static com.amazon.aws.cqlreplicator.util.Utils.CassandraTaskTypes.*;
 public class Starter implements Callable<Integer> {
 
     final static int HTTP_PORT = 8080;
-    final static int BLOCKING_QUEUE_SIZE = 15000;
+    private static final Logger LOGGER = LoggerFactory.getLogger(Starter.class);
+    private static final int numCores = Runtime.getRuntime().availableProcessors();
+    private static final long allocatedMemory = Runtime.getRuntime().totalMemory();
+    protected static Timer timer = new Timer("Timer");
+    protected static TimerTask task;
+    protected static Properties config;
+    protected static CountDownLatch countDownLatch;
+    protected static ExecutorService pdExecutor, dpdExecutor;
+    @CommandLine.Option(
+            names = {"--pathToConfig"},
+            description = "Path to config.properties file")
+    private static String pathToConfig = "";
+    private static long replicationDelay;
+    private static long statsDelay;
+    @CommandLine.Option(
+            names = {"--tile"},
+            description = "Tile that should be processed by this instance")
+    private static int tile;
+    @CommandLine.Option(
+            names = {"--tiles"},
+            description = "The number of tiles")
+    private static int tiles;
+    private static AbstractTaskV2 abstractTaskClusteringKeys;
+    private static AbstractTaskV2 abstractTaskPartitionKeys;
+    private static AbstractTaskV2 abstractTaskDeletedRows;
+    private static StorageServiceImpl storageService;
+    private static MeterRegistry meterRegistry;
+
     private static void httpHealthCheck() {
 
         Vertx vertx = Vertx.vertx();
@@ -70,41 +97,6 @@ public class Starter implements Callable<Integer> {
                     }
                 });
     }
-
-    private static final Logger LOGGER = LoggerFactory.getLogger(Starter.class);
-    private static final int numCores = Runtime.getRuntime().availableProcessors();
-    private static final long allocatedMemory = Runtime.getRuntime().totalMemory();
-    protected static Timer timer = new Timer("Timer");
-    protected static TimerTask task;
-    protected static Properties config;
-    @CommandLine.Option(
-            names = {"--pathToConfig"},
-            description = "Path to config.properties file")
-    private static String pathToConfig = "";
-
-    private static long replicationDelay;
-    private static long statsDelay;
-
-    @CommandLine.Option(
-            names = {"--tile"},
-            description = "Tile that should be processed by this instance")
-    private static int tile;
-
-    @CommandLine.Option(
-            names = {"--tiles"},
-            description = "The number of tiles")
-    private static int tiles;
-
-    private static AbstractTaskV2 abstractTaskClusteringKeys;
-    private static AbstractTaskV2 abstractTaskPartitionKeys;
-    private static AbstractTaskV2 abstractTaskDeletedRows;
-    private static StorageServiceImpl storageService;
-    protected static CountDownLatch countDownLatch;
-    protected static BlockingQueue<Runnable> blockingQueue;
-    protected static ThreadPoolExecutor rowExecutor;
-    protected static ExecutorService pdExecutor;
-    protected static ExecutorService dpdExecutor;
-    private static MeterRegistry meterRegistry;
 
     /**
      * Responsible for running each task in a timer loop
@@ -153,17 +145,8 @@ public class Starter implements Callable<Integer> {
             }
         }
 
-        Starter.blockingQueue = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
-        Starter.rowExecutor = new ThreadPoolExecutor(
-                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_SIZE")),
-                Integer.parseInt(config.getProperty("REPLICATE_WITH_MAX_CORE_POOL_SIZE")),
-                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_TIMEOUT")),
-                TimeUnit.SECONDS,
-                blockingQueue,
-                new ThreadPoolExecutor.AbortPolicy());
-
-        Starter.pdExecutor = Executors.newFixedThreadPool(numCores - 1);
-        Starter.dpdExecutor = Executors.newFixedThreadPool(numCores - 1);
+        Starter.pdExecutor = Executors.newSingleThreadExecutor();
+        Starter.dpdExecutor = Executors.newSingleThreadExecutor();
 
         config.setProperty("TILE", String.valueOf(args[1]));
         storageService = new StorageServiceImpl(config);
@@ -172,19 +155,20 @@ public class Starter implements Callable<Integer> {
             CloudWatchCustomMetrics customMetrics = new CloudWatchCustomMetrics(
                     CloudWatchAsyncClient.builder().region(Region.of(config.getProperty("CLOUD_WATCH_REGION"))).build());
             meterRegistry = customMetrics.getMeterRegistry();
-        } else
-        {
+        } else {
             meterRegistry = new SimpleMeterRegistry();
         }
 
-        // TODO: Set two options 2 - without deletes and 3 - with deletes
         if (config.getProperty("REPLICATE_DELETES").equals("true")) {
             countDownLatch = new CountDownLatch(3);
         } else {
             countDownLatch = new CountDownLatch(2);
         }
 
-        Runtime.getRuntime().addShutdownHook(new Thread(new Stopper()));
+        Runtime
+                .getRuntime()
+                .addShutdownHook(new Thread(new Stopper()));
+
         httpHealthCheck();
 
         task =
@@ -201,10 +185,11 @@ public class Starter implements Callable<Integer> {
      * Creates CQLReplicator's tasks
      *
      * @return 0
-     * @throws Exception
      */
     @Override
     public Integer call() throws Exception {
+
+        double deletes = 0;
 
         /*
          * Set the current tile and tiles in config
@@ -227,12 +212,13 @@ public class Starter implements Callable<Integer> {
 
         if (config.getProperty("REPLICATE_DELETES").equals("true")) {
             dpdExecutor.execute(() -> {
-                try {
-                    abstractTaskDeletedRows.performTask(storageService, SYNC_DELETED_ROWS, countDownLatch);
-                } catch (IOException | InterruptedException | ExecutionException | TimeoutException e) {
-                    throw new RuntimeException(e);
-                }
-            });
+                        try {
+                            abstractTaskDeletedRows.performTask(storageService, SYNC_DELETED_ROWS, countDownLatch);
+                        } catch (IOException | TimeoutException | ExecutionException | InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+            );
         }
 
         pdExecutor.execute(() -> {
@@ -246,8 +232,6 @@ public class Starter implements Callable<Integer> {
         if (abstractTaskClusteringKeys == null) {
             config.setProperty("PROCESS_NAME", "rd");
             abstractTaskClusteringKeys = new RowDiscoveryTaskV2(config,
-                    rowExecutor,
-                    blockingQueue,
                     meterRegistry);
         }
 
@@ -262,7 +246,10 @@ public class Starter implements Callable<Integer> {
                 Duration.ofNanos(elapsedTime).toMillis());
         var inserts = meterRegistry.get("replicated.insert").counter().count();
         var updates = meterRegistry.get("replicated.update").counter().count();
-        var deletes = meterRegistry.get("replicated.delete").counter().count();
+
+        if (config.getProperty("REPLICATE_DELETES").equals("true")) {
+            deletes = meterRegistry.get("replicated.delete").counter().count();
+        }
 
         if (inserts > 0) {
             LOGGER.info("Replicated inserts {}", inserts);

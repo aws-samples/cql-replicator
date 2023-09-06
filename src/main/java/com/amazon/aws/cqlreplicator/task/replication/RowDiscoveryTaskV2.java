@@ -36,6 +36,7 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
     public static final String CLUSTERING_COLUMN_ABSENT = "clusteringColumnAbsent";
     public static final String REPLICATION_NOT_APPLICABLE = "replicationNotApplicable";
     public static final Pattern REGEX_PIPE = Pattern.compile("\\|");
+    final static int BLOCKING_QUEUE_SIZE = 1_000_000;
     private static final Logger LOGGER = LoggerFactory.getLogger(RowDiscoveryTaskV2.class);
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final SimpleModule module = new SimpleModule();
@@ -44,21 +45,17 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
     private static Map<String, LinkedHashMap<String, String>> cassandraSchemaMetadata;
     private static Properties config = new Properties();
     private static boolean useCustomJsonSerializer = false;
-    private final ThreadPoolExecutor executor;
-    private final BlockingQueue<Runnable> blockingQueue;
+    private static BlockingQueue<Runnable> blockingQueue;
     private static MeterRegistry meterRegistry;
     private static Counter cntInserts;
     private static Counter cntUpdates;
     private static Counter cntFailedInserts;
     private static Counter cntFailedUpdates;
     private static TargetStorageLargeObjectsOnS3 targetStorageLargeObjectsOnS3;
+    public static ThreadPoolExecutor threadPoolExecutor;
 
     public RowDiscoveryTaskV2(final Properties cfg,
-                              ThreadPoolExecutor executor,
-                              BlockingQueue<Runnable> blockingQueue,
                               MeterRegistry meterRegistry) {
-        this.executor = executor;
-        this.blockingQueue = blockingQueue;
         RowDiscoveryTaskV2.meterRegistry = meterRegistry;
         cntInserts = Counter.builder("replicated.insert")
                 .description("Replicated inserts counter")
@@ -84,6 +81,7 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
         if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
             RowDiscoveryTaskV2.targetStorageLargeObjectsOnS3 = new TargetStorageLargeObjectsOnS3(config);
         }
+        initThreadPoolExecutor();
     }
 
     protected static String transformer(final String input, final Properties config) {
@@ -97,13 +95,13 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
 
     private static void reportTelemetry(String ops, boolean isSuccessful) {
         if (!isSuccessful) {
-            if (ops.equals("INSERT"))  {
+            if (ops.equals("INSERT")) {
                 cntFailedInserts.increment();
             } else if (ops.equals("UPDATE")) {
                 cntFailedUpdates.increment();
             }
-            } else {
-            if (ops.equals("INSERT"))  {
+        } else {
+            if (ops.equals("INSERT")) {
                 cntInserts.increment();
             } else if (ops.equals("UPDATE")) {
                 cntUpdates.increment();
@@ -145,6 +143,18 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
         return payload;
     }
 
+    private void initThreadPoolExecutor() {
+        blockingQueue = new LinkedBlockingQueue<>(BLOCKING_QUEUE_SIZE);
+        threadPoolExecutor = new ThreadPoolExecutor(
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_SIZE")),
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_MAX_CORE_POOL_SIZE")),
+                Integer.parseInt(config.getProperty("REPLICATE_WITH_CORE_POOL_TIMEOUT")),
+                TimeUnit.SECONDS,
+                blockingQueue,
+                new ThreadPoolExecutor.AbortPolicy());
+        threadPoolExecutor.prestartAllCoreThreads();
+    }
+
     @Override
     protected void doPerformTask(StorageServiceImpl storageService,
                                  CassandraTaskTypes taskName, CountDownLatch countDownLatch) {
@@ -175,30 +185,23 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                                 }
                                 assert listOfPartitionKeys != null;
 
-                                executor.prestartAllCoreThreads();
                                 listOfPartitionKeys.forEach(
                                         row ->
-                                        blockingQueue.offer(
+                                                blockingQueue.offer(
                                                         new RowReplicationTask(
                                                                 partitionKeyNames,
                                                                 clusteringColumnNames,
                                                                 row.toString(),
                                                                 storageService))
-                                        );
+                                );
                             });
 
         }
 
-        LOGGER.debug("Get the pool size: {}", executor.getPoolSize());
-        LOGGER.debug("Get active threads count  {}",  executor.getActiveCount());
-        LOGGER.debug("Get task count {}", executor.getTaskCount());
-        LOGGER.debug("Get completed task count {}", executor.getCompletedTaskCount());
-        LOGGER.debug("Get Remaining queue capacity {}", blockingQueue.remainingCapacity());
-
         countDownLatch.countDown();
     }
 
-    public static class RowReplicationTask implements Runnable {
+    protected static class RowReplicationTask implements Runnable {
         private static StorageServiceImpl storageService;
         private final String[] pks;
         private final String[] cls;
@@ -269,7 +272,7 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                     Boolean.parseBoolean(config.getProperty("ENABLE_REPLICATION_POINT")),
                     Long.parseLong(config.getProperty("STARTING_REPLICATION_TIMESTAMP")),
                     ops
-                    );
+            );
         }
 
         @Override
@@ -314,22 +317,20 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                                     throw new RuntimeException(e);
                                 }
 
-                                // if hk is not in the global pk cache, add it
                                 if (!storageService.containsInRows(primaryKey)) {
                                     storageService.writeRow(primaryKey, longToBytes(ts));
                                     jsonColumnHashMapPerPartition.put(cl, preparePayload(jsonPayload));
                                     upsertRow(ts, cl, jsonColumnHashMapPerPartition, "INSERT");
                                     if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
                                         try {
-                                            targetStorageLargeObjectsOnS3.write(jsonPayload.getS3Payload() , primaryKey);
+                                            targetStorageLargeObjectsOnS3.write(jsonPayload.getS3Payload(), primaryKey);
                                         } catch (IOException e) {
+                                            LOGGER.error(e.getMessage());
                                             throw new RuntimeException(e);
                                         }
                                     }
 
-                                } else {
-                                    // if hk is in the global pk cache, compare timestamps
-                                    if (ts > bytesToLong(storageService.readRow(primaryKey))) {
+                                } else if (ts > bytesToLong(storageService.readRow(primaryKey)) && ts != 0L) {
                                         storageService.writeRow(primaryKey, longToBytes(ts));
                                         jsonColumnHashMapPerPartition.put(cl, preparePayload(jsonPayload));
                                         upsertRow(ts, cl, jsonColumnHashMapPerPartition, "UPDATE");
@@ -337,11 +338,11 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                                             try {
                                                 targetStorageLargeObjectsOnS3.write(jsonPayload.getS3Payload(), primaryKey);
                                             } catch (IOException e) {
+                                                LOGGER.error(e.getMessage());
                                                 throw new RuntimeException(e);
                                             }
                                         }
                                     }
-                                }
                             });
         }
     }

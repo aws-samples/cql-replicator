@@ -19,11 +19,11 @@ import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 
 public class DeletedRowDiscoveryTask extends AbstractTaskV2 {
+    private static final Logger LOGGER = LoggerFactory.getLogger(DeletedRowDiscoveryTask.class);
     private static TargetStorageLargeObjectsOnS3 targetStorageLargeObjectsOnS3;
     private static Map<String, LinkedHashMap<String, String>> cassandraSchemaMetadata;
     private static SourceStorageOnCassandra sourceStorageOnCassandra;
     private static TargetStorageOnKeyspaces targetStorageOnKeyspaces;
-    private static final Logger LOGGER = LoggerFactory.getLogger(DeletedRowDiscoveryTask.class);
     private static Properties config;
     private static MeterRegistry meterRegistry;
     private static Counter cntDeletes;
@@ -36,13 +36,13 @@ public class DeletedRowDiscoveryTask extends AbstractTaskV2 {
         DeletedRowDiscoveryTask.meterRegistry = meterRegistry;
         cntDeletes = Counter.builder("replicated.delete")
                 .description("Replicated deletes counter")
-                .register(meterRegistry);
+                .register(DeletedRowDiscoveryTask.meterRegistry);
         if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
             DeletedRowDiscoveryTask.targetStorageLargeObjectsOnS3 = new TargetStorageLargeObjectsOnS3(config);
         }
     }
 
-    private void delete(
+    private static void delete(
             final PrimaryKey primaryKey,
             final String[] pks,
             final String[] cls,
@@ -51,7 +51,6 @@ public class DeletedRowDiscoveryTask extends AbstractTaskV2 {
         if (!sourceStorageOnCassandra.findPrimaryKey(primaryKey, pks, cls)) {
             var rowIsDeleted =
                     targetStorageOnKeyspaces.delete(primaryKey, pks, cls, cassandraSchemaMetadata);
-
             if (rowIsDeleted) {
                 storageService.deleteRow(primaryKey);
                 cntDeletes.increment();
@@ -59,6 +58,7 @@ public class DeletedRowDiscoveryTask extends AbstractTaskV2 {
                     try {
                         targetStorageLargeObjectsOnS3.delete("", primaryKey);
                     } catch (IOException e) {
+                        LOGGER.info(e.getMessage());
                         throw new RuntimeException(e);
                     }
                 }
@@ -66,30 +66,32 @@ public class DeletedRowDiscoveryTask extends AbstractTaskV2 {
         }
     }
 
+
     private void replicateDeletedCassandraRow(
-            final String[] pks, final String[] cls, StorageServiceImpl storageService) {
+            final String[] pks, final String[] cls, StorageServiceImpl storageService) throws IOException {
 
         var ledger = storageService.readPaginatedPrimaryKeys();
-        ledger.forEachRemaining(
-                primaryKeys ->
-                        primaryKeys.parallelStream()
-                                .forEach(
-                                        pk ->
-                                                delete(pk, pks, cls, storageService)
-                                ));
+
+        while (ledger.hasNext()) {
+            var primaryKeys = ledger.next();
+            primaryKeys
+                    .parallelStream()
+                    .forEach(
+                            pk ->
+                                    delete(pk, pks, cls, storageService)
+                    );
+        }
+        storageService.closeIterator();
     }
 
     @Override
     protected void doPerformTask(StorageServiceImpl storageService, Utils.CassandraTaskTypes taskName,
-                                 CountDownLatch countDownLatch)  {
+                                 CountDownLatch countDownLatch) throws IOException {
         var partitionKeyNames =
                 cassandraSchemaMetadata.get("partition_key").keySet().toArray(new String[0]);
-
         var clusteringColumnNames =
                 cassandraSchemaMetadata.get("clustering").keySet().toArray(new String[0]);
-
         replicateDeletedCassandraRow(partitionKeyNames, clusteringColumnNames, storageService);
-
         countDownLatch.countDown();
     }
 }

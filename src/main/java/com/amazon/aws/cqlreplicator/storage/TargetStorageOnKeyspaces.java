@@ -46,7 +46,7 @@ public class TargetStorageOnKeyspaces
                 RetryConfig.custom()
                         .maxAttempts(
                                 Integer.parseInt(properties.getProperty("REPLICATE_RETRY_MAXATTEMPTS", "1024")))
-                        .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(25), 1.1))
+                        .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(30), 1.5))
                         .retryOnException(
                                 keyspacesExceptions -> keyspacesExceptions instanceof QueryConsistencyException)
                         .retryExceptions(

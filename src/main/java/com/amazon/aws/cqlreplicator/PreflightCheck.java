@@ -33,10 +33,11 @@ public class PreflightCheck implements AutoCloseable {
     private final String targetTable;
     private final boolean isCloudWatch;
     private final String cloudWatchRegion;
+    private final String source;
     private CqlSession keyspacesConnector;
     private CqlSession cassandraConnector;
     private String rsSample;
-    private final String source;
+
     public PreflightCheck(Properties config) {
         this.connectionFactory = new ConnectionFactory(config);
         this.file = new File(config.getProperty("LOCAL_STORAGE_PATH"));

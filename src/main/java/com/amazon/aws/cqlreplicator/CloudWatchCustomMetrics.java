@@ -18,20 +18,21 @@ public class CloudWatchCustomMetrics {
         public String namespace() {
             return "cqlreplicator";
         }
+
         @Override
         public String get(@NotNull String key) {
             return null;
         }
     };
-     private final MeterRegistry meterRegistry;
+    private final MeterRegistry meterRegistry;
 
-    public CloudWatchCustomMetrics(CloudWatchAsyncClient  cloudWatchAsyncClient) {
+    public CloudWatchCustomMetrics(CloudWatchAsyncClient cloudWatchAsyncClient) {
 
         this.meterRegistry = new CloudWatchMeterRegistry(cloudWatchConfig, Clock.SYSTEM, cloudWatchAsyncClient);
         this.meterRegistry.config().commonTags("application", "cqlreplicator");
-        new JvmGcMetrics().bindTo(meterRegistry);
-        new JvmMemoryMetrics().bindTo(meterRegistry);
-        new ProcessorMetrics().bindTo(meterRegistry);
+        //new JvmGcMetrics().bindTo(meterRegistry);
+        //new JvmMemoryMetrics().bindTo(meterRegistry);
+        //new ProcessorMetrics().bindTo(meterRegistry);
 
     }
 

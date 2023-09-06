@@ -20,23 +20,11 @@ public class PrimaryKey implements Serializable, Comparable<PrimaryKey> {
     private final String partitionKeys;
     private final long hash;
     private final String clusteringColumns;
+
     public PrimaryKey(String partitionKeys, String clusteringColumns) throws IOException {
         this.partitionKeys = partitionKeys;
         this.clusteringColumns = clusteringColumns;
         this.hash = getXXHash(String.format("%s%s", partitionKeys, clusteringColumns));
-    }
-
-    public long getHashedPartitionKeys() throws IOException {
-        return getXXHash(partitionKeys);
-    }
-
-    public long getHashedPrimaryKey() throws IOException {
-        return getXXHash(String.format("%s|%s", partitionKeys, clusteringColumns));
-
-    }
-
-    public long getHashedClusteringKeys() throws IOException {
-        return getXXHash(clusteringColumns);
     }
 
     private static long getXXHash(@NotNull String data) throws IOException {
@@ -52,6 +40,19 @@ public class PrimaryKey implements Serializable, Comparable<PrimaryKey> {
             }
             return hash64.getValue();
         }
+    }
+
+    public long getHashedPartitionKeys() throws IOException {
+        return getXXHash(partitionKeys);
+    }
+
+    public long getHashedPrimaryKey() throws IOException {
+        return getXXHash(String.format("%s|%s", partitionKeys, clusteringColumns));
+
+    }
+
+    public long getHashedClusteringKeys() throws IOException {
+        return getXXHash(clusteringColumns);
     }
 
     public long getHash() {

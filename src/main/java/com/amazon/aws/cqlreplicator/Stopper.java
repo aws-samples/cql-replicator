@@ -15,6 +15,7 @@ import static com.amazon.aws.cqlreplicator.Starter.*;
  */
 public class Stopper implements Runnable {
     private static final Logger LOGGER = LoggerFactory.getLogger(Stopper.class);
+
     @Override
     public void run() {
         LOGGER.info("Stopping process is activated");
@@ -22,7 +23,6 @@ public class Stopper implements Runnable {
         LOGGER.info("Replication task is stopped: {}", Starter.task.cancel());
         LOGGER.info(
                 "Shutting down executors");
-        rowExecutor.shutdown();
         pdExecutor.shutdown();
         dpdExecutor.shutdown();
     }

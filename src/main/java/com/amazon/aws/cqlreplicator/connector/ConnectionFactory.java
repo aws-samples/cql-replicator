@@ -49,7 +49,7 @@ public class ConnectionFactory {
                 .overrideConfiguration(clientOverrideConfiguration)
                 .region(Region.of(config.getProperty("S3_REGION")))
                 .endpointOverride(URI.create(
-                        String.format("https://s3.%s.amazonaws.com",config.getProperty("S3_REGION"))))
+                        String.format("https://s3.%s.amazonaws.com", config.getProperty("S3_REGION"))))
                 .forcePathStyle(true)
                 .build();
     }

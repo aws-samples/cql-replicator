@@ -164,7 +164,7 @@ public class PartitionDiscoveryTaskV2 extends AbstractTaskV2 {
         var collection = Utils.cborDecoder(cborPayloadFirst);
         //TODO: Implement PartitionKeyV2
         var finalClonedCollection = new CopyOnWriteArrayList<>(collection);
-        collection.parallelStream().forEach(
+        collection.forEach(
                 key -> {
                     BoundStatementBuilder boundStatementCassandraBuilder =
                             sourceStorageOnCassandra.getCassandraPreparedStatement().boundStatementBuilder();
@@ -227,7 +227,7 @@ public class PartitionDiscoveryTaskV2 extends AbstractTaskV2 {
             var totalChunks = String.format("%s", "totalChunks");
             var chunks = bytesToInt(storageService.readTileMetadata(totalChunks));
             // remove each chunk of partition keys
-            IntStream.range(0, chunks).parallel().forEach(
+            IntStream.range(0, chunks).forEach(
                     chunk -> {
                         try {
                             deletePartitions(pks, storageService, chunk);

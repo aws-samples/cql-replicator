@@ -4,7 +4,9 @@ import com.amazon.aws.cqlreplicator.connector.ConnectionFactory;
 import com.amazon.aws.cqlreplicator.models.PrimaryKey;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.*;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.io.IOException;
 import java.util.Properties;
@@ -43,18 +45,18 @@ public class TargetStorageLargeObjectsOnS3 extends TargetStorage<PrimaryKey, Str
         if (config.getProperty("S3_SHARDING_BY").equals("PRIMARY_KEY")) {
 
             key = String.format("%s/%s/%s/%s/payload.json",
-                            config.getProperty("TARGET_KEYSPACE"),
-                            config.getProperty("TARGET_TABLE"),
-                            primaryKey.getHashedPartitionKeys(),
-                            primaryKey.getHashedClusteringKeys());
+                    config.getProperty("TARGET_KEYSPACE"),
+                    config.getProperty("TARGET_TABLE"),
+                    primaryKey.getHashedPartitionKeys(),
+                    primaryKey.getHashedClusteringKeys());
 
 
         } else if (config.getProperty("S3_SHARDING_BY").equals("NONE")) {
 
             key = String.format("%s/%s/%s/payload.json",
-                            config.getProperty("TARGET_KEYSPACE"),
-                            config.getProperty("TARGET_TABLE"),
-                            primaryKey.getHashedPrimaryKey());
+                    config.getProperty("TARGET_KEYSPACE"),
+                    config.getProperty("TARGET_TABLE"),
+                    primaryKey.getHashedPrimaryKey());
         }
 
         try {
@@ -65,10 +67,10 @@ public class TargetStorageLargeObjectsOnS3 extends TargetStorage<PrimaryKey, Str
                     .build();
 
             s3Client.deleteObject(deleteObjectRequest);
-           } catch (S3Exception e) {
+        } catch (S3Exception e) {
             throw new RuntimeException(e);
         }
-}
+    }
 
     @Override
     public boolean write(String s, PrimaryKey primaryKey) throws IOException {

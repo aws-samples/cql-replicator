@@ -47,6 +47,14 @@ count: 8 # Number of tasks that should be running in your service.
 exec: true     # Enable running commands in your container.
 platform: linux/arm64
 
+#storage:
+#  volumes:
+#    myManagedEFSVolume:
+#      efs:
+#        id: fs-07fd0ea725f6897c5
+#      path: /opt
+#      read_only: false
+
 # Configure observability for your environment resources.
 observability:
   container_insights: true

@@ -55,7 +55,6 @@ public class Starter implements Callable<Integer> {
             description = "Path to config.properties file")
     private static String pathToConfig = "";
     private static long replicationDelay;
-    private static long statsDelay;
     @CommandLine.Option(
             names = {"--tile"},
             description = "Tile that should be processed by this instance")
@@ -130,9 +129,6 @@ public class Starter implements Callable<Integer> {
         replicationDelay =
                 TimeUnit.SECONDS.toMillis(
                         Long.parseLong(config.getProperty("POOLING_PERIOD")));
-        statsDelay =
-                TimeUnit.SECONDS.toMillis(Long.parseLong(config.getProperty("POOLING_STATS_DATA")));
-
         delay = replicationDelay;
 
         if (config.getProperty("PRE_FLIGHT_CHECK").equals("true")) {

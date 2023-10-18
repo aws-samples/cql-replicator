@@ -1,0 +1,7 @@
+# Increase the number of open files
+ - op: add
+   path: /Resources/TaskDefinition/Properties/ContainerDefinitions/0/Ulimits
+   value:
+     - Name: nofile
+       SoftLimit: 10000
+       HardLimit: 10000

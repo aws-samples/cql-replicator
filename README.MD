@@ -123,9 +123,7 @@ Finally, you might deploy another Cassandra DC to shift your migration workload 
 
 ### Limitations
 
-CQLReplicator doesn't support:
- * counters
- * Cassandra tables with no regular columns
+CQLReplicator doesn't support replication of counters
 
 ### Cleanup
 

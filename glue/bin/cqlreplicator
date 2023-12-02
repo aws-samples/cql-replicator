@@ -1,0 +1,644 @@
+#!/usr/bin/env bash
+#
+# // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# // SPDX-License-Identifier: Apache-2.0
+#
+# Migration parameters
+MIGRATOR_VERSION=0.2
+JOB_NAME=CQLReplicator
+TILES=1
+PROCESS_TYPE_DISCOVERY=discovery
+PROCESS_TYPE_REPLICATION=replication
+SOURCE_KS=ks_test_cql_replicator
+SOURCE_TBL=test_cql_replicator
+TARGET_KS=ks_test_cql_replicator
+TARGET_TBL=test_cql_replicator
+WRITETIME_COLUMN="None"
+TTL_COLUMN="None"
+S3_LANDING_ZONE=""
+COOLING_PERIOD=5
+INCR_TRAFFIC=120
+JOBS=()
+DISCOVERED_TOTAL=0
+REPLICATED_TOTAL=0
+OFFLOAD_LARGE_OBJECTS_B64=$(echo "None" | base64)
+BASE_FOLDER=$(pwd -L)
+AWS_REGION="us-east-1"
+SUBNET=""
+SG=""
+AZ=""
+GLUE_IAM_ROLE=""
+AWS_ACCOUNT=""
+KEYS_PER_TILE=0
+ROWS_PER_WORKER=250000
+
+
+# Progress bar configuration
+PS=40
+#PCC="▓"
+PCC="|"
+PCU="-"
+PPS=2
+
+# Links to the artifacts
+MAVEN_REPO=https://repo1.maven.org/maven2
+ARTIFACTS=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar"
+"/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar"
+"/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar"
+"/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+
+set +x
+
+cat << "EOF"
+    ___ ___  _     ____            _ _           _
+  / ___/ _ \| |   |  _ \ ___ _ __ | (_) ___ __ _| |_ ___  _ __
+ | |  | | | | |   | |_) / _ \ '_ \| | |/ __/ _` | __/ _ \| '__|
+ | |__| |_| | |___|  _ <  __/ |_) | | | (_| (_| | || (_) | |
+  \____\__\_\_____|_| \_\___| .__/|_|_|\___\__,_|\__\___/|_|
+                            |_|
+·······································································
+:     __          _______   _____           _____                     :
+:    /\ \        / / ____| |  __ \         / ____|                    :
+:   /  \ \  /\  / / (___   | |__) | __ ___| (___   ___ _ ____   _____ :
+:  / /\ \ \/  \/ / \___ \  |  ___/ '__/ _ \\___ \ / _ \ '__\ \ / / _ \:
+: / ____ \  /\  /  ____) | | |   | | | (_) |___) |  __/ |   \ V /  __/:
+:/_/    \_\/  \/  |_____/  |_|   |_|  \___/_____/ \___|_|    \_/ \___|:
+·······································································
+EOF
+
+command -v aws -v >/dev/null 2>&1 || { echo >&2 "aws cli requires but it's not installed.  Aborting."; exit 1; }
+command -v curl -V >/dev/null 2>&1 || { echo >&2 "curl requires but it's not installed.  Aborting."; exit 1; }
+command -v bc -v >/dev/null 2>&1 || { echo >&2 "bc requires but it's not installed. Aborting. You could try to run: sudo yum install bc -y"; exit 1; }
+
+function check_input() {
+  local input=$1
+  local param_name=$2
+
+  if [[ -z $input ]]; then
+      log "Parameter $param_name empty or null"
+      exit 1
+  fi
+  return 0
+}
+
+
+function check_discovery_runs() {
+   local rs
+   rs=$(aws glue get-job-runs --job-name CQLReplicator --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`]' | jq '.[0]["--SOURCE_TBL"] == "'"$SOURCE_TBL"'" and .[0]["--SOURCE_KS"] == "'"$SOURCE_KS"'"')
+   if [[ $rs = "true" ]]; then
+     #log "ERROR: Discovery job is already running for" $SOURCE_KS.$SOURCE_TBL
+     return 1
+   fi
+   return 0
+}
+
+function check_replication_runs() {
+   local tile
+   local rs
+   tile=$1
+   rs=$(aws glue get-job-runs --job-name CQLReplicator --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`]' | jq '.[0]["--SOURCE_TBL"] == "'"$SOURCE_TBL"'" and .[0]["--SOURCE_KS"] == "'"$SOURCE_KS"'" and .[]["--TILE"] == "'"$tile"'"' | grep true)
+
+   if [[ $rs = "true" ]]; then
+     #log "ERROR: Replication job is already running per tile $tile for" $SOURCE_KS.$SOURCE_TBL
+     return 1
+   fi
+   return 0
+}
+
+function progress {
+  local current="$1"
+  local total="$2"
+  local title="$3"
+  percent=$(bc <<< "scale=$PPS; 100 * $current / $total")
+  completed=$(bc <<< "scale=0; $PS * $percent / 100")
+  uncompleted=$(bc <<< "scale=0; $PS - $completed")
+  completed_sub_bar=$(printf "%${completed}s" | tr " " "${PCC}")
+  uncompleted_sub_bar=$(printf "%${uncompleted}s" | tr " " "${PCU}")
+
+  # output the bar
+  echo -ne "\r$title" : [${completed_sub_bar}${uncompleted_sub_bar}] ${percent}%
+
+  if [ "$total" -eq "$current" ]; then
+      echo -e " - COMPLETED"
+  fi
+}
+
+function barrier() {
+  while true
+  do
+    cnt=0
+    for (( tile=0; tile<"$TILES"; tile++ ))
+    do
+      if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$tile"/ > /dev/null
+      then
+        ((cnt++))
+      fi
+    done
+    if [[ $cnt == "$TILES" ]]; then
+      break
+    fi
+  done
+}
+
+log() {
+  echo "[$(date -Iseconds)]" "$@"
+}
+
+function Usage_Exit {
+  log "$0 [--state init/run/request-stop|--tiles number of tiles|--landing-zone s3Uri|--writetime-column col3|\
+  --src-keyspace keyspace_name|--src-table table_name|--trg-keyspace keyspace_name|--trg-table table_name]"
+  log "Script version:" ${MIGRATOR_VERSION}
+  log "init - Deploy CQLReplicator Glue job, and download jars"
+  log "run - Start migration process"
+  log "stats - Upload progress. Only for historical workload"
+  log "request-stop - Stop migration process"
+  exit 1
+}
+
+function Clean_Up {
+  check_input "$S3_LANDING_ZONE" "ERROR:landing zone parameter is empty, must be provided"
+  aws s3 rm "$S3_LANDING_ZONE" --recursive
+  aws s3 rb "$S3_LANDING_ZONE"
+  local connection_name
+  connection_name=$(aws glue get-job --job-name CQLReplicator --query 'Job.Connections.Connections[0]' --output text)
+  aws glue delete-connection --connection-name "$connection_name"
+  aws glue delete-job --job-name CQLReplicator
+}
+
+function Init {
+  check_input "$AZ" "ERROR:availability zone is, must be provided"
+  check_input "$SUBNET" "ERROR:subnet is empty, must be provided"
+  check_input "$SG" "ERROR:sg is empty, must be provided"
+  check_input "$AWS_REGION" "ERROR:region is empty, must be provided"
+
+  AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+  log "Starting initialization process for AWS account:$AWS_ACCOUNT"
+  # Create S3 bucket
+  if [[ -z $S3_LANDING_ZONE ]]; then
+      log "S3 LANDING ZONE is empty"
+      bucket=$(echo "cql-replicator-$AWS_ACCOUNT-$AWS_REGION" | tr ' [:upper:]' ' [:lower:]')
+      S3_LANDING_ZONE="s3://""$bucket"
+      log "Creating a new S3 bucket: $S3_LANDING_ZONE"
+      if aws s3 mb "$S3_LANDING_ZONE" > /dev/null 2>&1
+      then
+        echo "$S3_LANDING_ZONE" > "working_bucket.dat"
+      else
+        log "ERROR: not able to create a S3 bucket: $S3_LANDING_ZONE"
+        exit 1
+      fi
+  fi
+
+  # Uploading Jars
+  cnt=1
+  total_artifacts=$(echo "${ARTIFACTS[@]}" | wc -w)
+  for link in "${ARTIFACTS[@]}"
+  do
+    file=$(basename "$link")
+    progress "$cnt" "$total_artifacts" "Uploading artifacts from the Maven repo"
+    curl -s -O "$MAVEN_REPO""$link"
+    aws s3 cp "$file" "$S3_LANDING_ZONE"/artifacts/"$file" > /dev/null
+    rm "$file"
+    ((cnt++))
+  done
+
+  # Uploading config files
+  local path_to_conf
+  local path_to_scala
+  path_to_conf=$(ls -d "$BASE_FOLDER" | sed 's/bin/conf/g')
+  path_to_scala=$(ls -d "$BASE_FOLDER" | sed 's/bin/sbin/g')
+  progress 0 5 "Uploading KeyspacesConnector.conf                    "
+
+  if ls "$path_to_conf/KeyspacesConnector.conf" > /dev/null
+  then
+    progress 1 5 "Uploading KeyspacesConnector.conf                  "
+    aws s3 cp "$path_to_conf"/KeyspacesConnector.conf "$S3_LANDING_ZONE"/artifacts/KeyspacesConnector.conf > /dev/null
+  else
+    log "ERROR: $path_to_conf/KeyspacesConnector.conf not found"
+    exit 1
+  fi
+
+  if ls "$path_to_conf/CassandraConnector.conf" > /dev/null
+  then
+    aws s3 cp "$path_to_conf"/CassandraConnector.conf "$S3_LANDING_ZONE"/artifacts/CassandraConnector.conf > /dev/null
+    progress 2 5 "Uploading CassandraConnector.conf                  "
+  else
+    log "ERROR: $path_to_conf/CassandraConnector.conf not found"
+    exit 1
+  fi
+
+  local glue_bucket_artifacts=s3://aws-glue-assets-"$AWS_ACCOUNT"-"$AWS_REGION"
+  if aws s3 ls "$glue_bucket_artifacts"/scripts/ > /dev/null
+  then
+    aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator.scala > /dev/null
+  else
+    aws s3 mb "$glue_bucket_artifacts" --region "$AWS_REGION" > /dev/null 2>&1
+    sleep 25
+    if ls "$path_to_scala"/CQLReplicator.scala
+    then
+      progress 3 5 "Uploading CQLReplicator.scala                      "
+      aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator.scala > /dev/null
+    else
+      log "ERROR: $path_to_scala/CQLReplicator.scala not found"
+      exit 1
+    fi
+  fi
+
+  progress 3 5 "Creating Glue connector and CQLReplicator job       "
+
+  # Create Glue Connector
+  local glue_conn_name
+  glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
+  aws glue create-connection --connection-input '{
+   "Name":"'$glue_conn_name'",
+   "Description":"CQLReplicator connection to the C* cluster",
+   "ConnectionType":"NETWORK",
+   "ConnectionProperties":{
+   "JDBC_ENFORCE_SSL": "false"
+  },
+   "PhysicalConnectionRequirements":{
+   "SubnetId":"'$SUBNET'",
+   "SecurityGroupIdList":['$SG'],
+   "AvailabilityZone":"'$AZ'"}
+   }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
+
+  #glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
+  #  aws glue create-connection --connection-input '{
+  #   "Name":"'$glue_conn_name'",
+  #   "Description":"CQLReplicator connection to the C* cluster",
+  #   "ConnectionType":"CUSTOM",
+  #   "ConnectionProperties":{
+  #   "CONNECTOR_TYPE": "Spark",
+  #   "CONNECTOR_URL": "'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.0.jar",
+  #   "CONNECTOR_CLASS_NAME": "org.apache.spark.sql.cassandra"
+  # },
+  #   "PhysicalConnectionRequirements":{
+  #   "SubnetId":"'$SUBNET'",
+  #   "SecurityGroupIdList":["'$SG'"],
+  #   "AvailabilityZone":"'$AZ'"}
+  # }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
+
+  # Create Glue Jobs
+  aws glue create-job \
+    --name "CQLReplicator" \
+    --role "$GLUE_IAM_ROLE" \
+    --description "Migration tool for Amazon Keyspaces" \
+    --glue-version "4.0" \
+    --number-of-workers 2 \
+    --worker-type "G.1X" \
+    --connections "Connections=$glue_conn_name" \
+    --command "Name=gluestreaming,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator.scala" \
+    --execution-property '{"MaxConcurrentRuns": 16}' \
+    --max-retries 1 \
+    --region "$AWS_REGION" \
+    --default-arguments '{
+        "--job-language":"scala",
+        "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
+        "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions",
+        "--class":"GlueApp"
+    }' > /dev/null
+
+  progress 4 5 "Creating CQLReplicator's internal keyspace and table"
+
+  # Create a keyspace - migration
+  aws keyspaces create-keyspace --keyspace-name migration --region "$AWS_REGION" > /dev/null
+
+  # Create a table - ledger
+  aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{
+  "allColumns": [
+    {
+      "name": "ks",
+      "type": "text"
+    },
+    {
+      "name": "tbl",
+      "type": "text"
+    },
+    {
+      "name": "tile",
+      "type": "int"
+    },
+    {
+      "name": "ver",
+      "type": "text"
+    },
+    {
+      "name": "dt_load",
+      "type": "timestamp"
+    },
+    {
+      "name": "dt_offload",
+      "type": "timestamp"
+    },
+    {
+      "name": "load_status",
+      "type": "text"
+    },
+    {
+      "name": "location",
+      "type": "text"
+    },
+    {
+      "name": "offload_status",
+      "type": "text"
+    }
+  ],
+  "partitionKeys": [
+    {
+      "name": "ks"
+    },
+    {
+      "name": "tbl"
+    }
+  ],
+  "clusteringKeys": [
+    {
+      "name": "tile",
+      "orderBy": "ASC"
+    },
+    {
+      "name": "ver",
+      "orderBy": "ASC"
+    }
+  ]
+}' --region "$AWS_REGION" > /dev/null
+progress 5 5 "Creating CQLReplicator's internal keyspace and table"
+log "Deploy is completed"
+}
+
+function Start_Discovery {
+  log "Starting discovery process..."
+  check_input "$TILES" "ERROR: tiles parameter is empty, must be provided"
+  check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
+  check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
+  check_input "$TARGET_KS" "ERROR: target keyspace name is empty, must be provided"
+  check_input "$TARGET_TBL" "ERROR: target table name is empty, must be provided"
+  check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
+
+  log "TILES:" "$TILES"
+  log "SOURCE:" "$SOURCE_KS"."$SOURCE_TBL"
+  log "TARGET:" "$TARGET_KS"."$TARGET_TBL"
+  log "LANDING ZONE:" "$S3_LANDING_ZONE"
+  log "Writetime column:" $WRITETIME_COLUMN
+  log "TTL column:" $TTL_COLUMN
+  local workers=$((1 + TILES / 2))
+  log "Checking if the discovery job is already running..."
+  check_discovery_runs
+  if [ $? = 0 ]; then
+    Delete_Stop_Event_D
+    log "Starting the discovery job..."
+    #KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/0/count.json - | head | jq '.primaryKeys')
+    #log "Average primary keys per tile is $KEYS_PER_TILE"
+    rs=$(aws glue start-job-run --job-name "$JOB_NAME" --worker-type G.1X --number-of-workers "$workers" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
+        "--TILE":"0",
+        "--TOTAL_TILES":"'$TILES'",
+        "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
+        "--SOURCE_KS":"'$SOURCE_KS'",
+        "--SOURCE_TBL":"'$SOURCE_TBL'",
+        "--TARGET_KS":"'$TARGET_KS'",
+        "--TARGET_TBL":"'$TARGET_TBL'",
+        "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
+        "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
+        "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
+     JOBS+=("$rs")
+  fi
+}
+
+function Start_Replication {
+  cnt=0
+  KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json - | head | jq '.primaryKeys')
+  log "Average primary keys per tile is $KEYS_PER_TILE"
+  local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
+  while [ $cnt -lt $TILES ]
+  do
+    check_replication_runs $cnt
+    if [ $? = 0 ]; then
+      Delete_Stop_Event_R $cnt
+      rs=$(aws glue start-job-run --job-name "$JOB_NAME" --worker-type G.025X --number-of-workers "$workers" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
+          "--TILE":"'$cnt'",
+          "--TOTAL_TILES":"'$TILES'",
+          "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
+          "--SOURCE_KS":"'$SOURCE_KS'",
+          "--SOURCE_TBL":"'$SOURCE_TBL'",
+          "--TARGET_KS":"'$TARGET_KS'",
+          "--TARGET_TBL":"'$TARGET_TBL'",
+          "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
+          "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
+          "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
+       JOBS+=("$rs")
+      sleep $COOLING_PERIOD
+    fi
+    ((cnt++))
+    progress "$cnt" "$TILES" "Starting Glue Jobs"
+  done
+}
+
+function validate_json() {
+  local json_str=$1
+
+  # Check if the JSON is valid
+  echo "$json_str" | jq empty #> /dev/null 2>&1
+  if [[ $? -ne 0 ]]; then
+      log "ERROR: Invalid JSON"
+      log '{"column": "column_name", "bucket": "bucket-name", "prefix": "keyspace_name/table_name/payload", "xref": "reference-column"}'
+      exit 1
+  fi
+
+  # Check for empty values
+  empty_values=$(echo "$json_str" | jq 'recurse | select(. == "" or . == null)')
+  if [[ -n $empty_values ]]; then
+      echo "ERROR: JSON contains empty values"
+      return 1
+  fi
+
+  # Check if proper keys exist
+  local column
+  local bucket
+  local prefix
+  local xref
+  column=$(echo "$json_str" | jq -r '.column')
+  bucket=$(echo "$json_str" | jq -r '.bucket')
+  prefix=$(echo "$json_str" | jq -r '.prefix')
+  xref=$(echo "$json_str" | jq -r '.xref')
+
+  if [[ "$column" == null || "$bucket" == null || "$prefix" == null || "$xref" == null ]]; then
+      log "ERROR: JSON doesn't contain required keys: column, bucket, xref, and prefix"
+      return 1
+  fi
+
+  return 0
+}
+
+function Delete_Stop_Event_D {
+  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/discovery/stopRequested
+  # Debug
+  # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested"
+}
+
+function Delete_Stop_Event_R {
+  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/replication/"$1"/stopRequested
+  # Debug
+  # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested"
+}
+
+function Request_Stop {
+  tile=0
+  log "Requested a stop for the discovery job"
+
+  if aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/discovery/stopRequested >/dev/null
+  then
+    while [ $tile -lt $TILES ]
+    do
+      log "Requested a stop for the replication:" $tile
+      aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested >/dev/null
+      ((tile++))
+    done
+  fi
+}
+
+(( $#<1 )) && Usage_Exit
+
+while (( "$#" )); do
+  case "$1" in
+    --state|-c)
+      STATE="$2"
+      shift 2
+      ;;
+    --tiles|-t)
+      TILES="$2"
+      shift 2
+      ;;
+    --landing-zone|-l)
+      S3_LANDING_ZONE="$2"
+      shift 2
+      ;;
+    --writetime-column|-w)
+      WRITETIME_COLUMN="$2"
+      shift 2
+      ;;
+    --ttl-column|-e)
+      TTL_COLUMN="$2"
+      shift 2
+      ;;
+    --src-keyspace|-k)
+      SOURCE_KS="$2"
+      shift 2
+      ;;
+    --src-table|-o)
+      SOURCE_TBL="$2"
+      shift 2
+      ;;
+    --trg-keyspace|-p)
+      TARGET_KS="$2"
+      shift 2
+      ;;
+    --trg-table|-v)
+      TARGET_TBL="$2"
+      shift 2
+      ;;
+    --inc-traffic|-i)
+      #You can increase this value to reduce traffic pressure
+      COOLING_PERIOD="$INCR_TRAFFIC"
+      log "Incremental traffic for the historical workload is enabled"
+      log "Cooling period:" $COOLING_PERIOD
+      shift 1
+      ;;
+    --offload-large-objects|-x)
+      OFFLOAD_LARGE_OBJECTS="$2"
+      check_input "$OFFLOAD_LARGE_OBJECTS" "offload large objects parameter must not be empty"
+      validate_json "$OFFLOAD_LARGE_OBJECTS"
+      log "Provided a configuration to offload large objects:" "$OFFLOAD_LARGE_OBJECTS"
+      OFFLOAD_LARGE_OBJECTS_B64=$(echo "$OFFLOAD_LARGE_OBJECTS" | base64 -w 0)
+      shift 2
+      ;;
+    --stats|-s)
+      STATE="stats"
+      log "Uploading progress..."
+      shift 1
+      ;;
+    --region|-a)
+      AWS_REGION="$2"
+      shift 2
+      ;;
+    --subnet|-n)
+      SUBNET="$2"
+      shift 2
+      ;;
+    --sg|-g)
+      SG="$2"
+      shift 2
+      ;;
+    --glue-iam-role|-m)
+      GLUE_IAM_ROLE="$2"
+      shift 2
+      ;;
+    --az|-z)
+      AZ="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*|--*=)
+      Usage_Exit
+      ;;
+    *)
+      PARAMS="$PARAMS $1"
+      shift
+      ;;
+  esac
+done
+
+eval set -- "$PARAMS"
+
+if [[ $STATE == run ]]; then
+  Start_Discovery
+  barrier
+  Start_Replication
+  log "Started jobs:" "${JOBS[@]}"
+fi
+
+if [[ $STATE == request-stop ]]; then
+  Request_Stop
+fi
+
+function Gather_Stats() {
+   tile=$1
+   process_type=$2
+   local total_per_tile=0
+   if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/ > /dev/null
+   then
+     if [[ $process_type == "discovery" ]]; then
+       total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.primaryKeys') && DISCOVERED_TOTAL=$(( DISCOVERED_TOTAL + total_per_tile ))
+     fi
+     if [[ $process_type == "replication" ]]; then
+       if  aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/ > /dev/null
+         then
+         total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.primaryKeys') && REPLICATED_TOTAL=$(( REPLICATED_TOTAL + total_per_tile ))
+      fi
+    fi
+  fi
+}
+
+if [[ $STATE == init ]]; then
+ Init
+fi
+
+if [[ $STATE == cleanup ]]; then
+  log "Deleting deployed artifacts: Glue connection, S3 bucket, and Glue job"
+  Clean_Up
+fi
+
+if [[ $STATE == stats ]]; then
+  barrier
+  tile=0
+  while [ $tile -lt "$TILES" ]
+    do
+      Gather_Stats $tile "discovery"
+      Gather_Stats $tile "replication"
+      ((tile++))
+    done
+
+  log "Discovered rows in" "$SOURCE_KS"."$SOURCE_TBL" is "$DISCOVERED_TOTAL"
+  log "Replicated rows in" "$TARGET_KS"."$TARGET_TBL" is "$REPLICATED_TOTAL"
+fi

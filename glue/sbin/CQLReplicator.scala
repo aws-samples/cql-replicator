@@ -103,7 +103,6 @@ object GlueApp {
     val sparkConf: SparkConf = sparkContext.getConf
     val logger = new GlueLogger
     import sparkSession.implicits._
-    //import java.util.Optional
 
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
@@ -134,8 +133,14 @@ object GlueApp {
     val source = s"sourceCluster.$srcKeyspaceName.$srcTableName"
     val ttlColumn = args("TTL_COLUMN")
     val olo = args("OFFLOAD_LARGE_OBJECTS")
-    val columnsWithTTL = cassandraConn.openSession.getMetadata.getKeyspace(srcKeyspaceName).get.getTable(srcTableName).get.getColumns.asScala.map(x => x._1.toString).toSeq :+ s"ttl($ttlColumn)"
-    val selectStmtWithTTL = columnsWithTTL.mkString(",")
+    val selectStmtWithTTL = ttlColumn match {
+      case "None" => ""
+      case _ => {
+        val tmpMeta = cassandraConn.openSession.getMetadata.getKeyspace(srcKeyspaceName).get.getTable(srcTableName).get
+        val lstColumns = tmpMeta.getColumns.asScala.map(x => x._1.toString).toSeq :+ s"ttl($ttlColumn)"
+        lstColumns.mkString(",")
+      }
+    }
 
     val pkFinal = columnTs match {
       case "None" => inferKeys(cassandraConn, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq

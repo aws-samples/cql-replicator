@@ -42,7 +42,7 @@ PPS=2
 
 # Links to the artifacts
 MAVEN_REPO=https://repo1.maven.org/maven2
-ARTIFACTS=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.0/spark-cassandra-connector-assembly_2.12-3.4.0.jar"
+ARTIFACTS=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar"
 "/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar"
 "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar"
 "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
@@ -176,7 +176,7 @@ function Init {
   # Create S3 bucket
   if [[ -z $S3_LANDING_ZONE ]]; then
       log "S3 LANDING ZONE is empty"
-      bucket=$(echo "cql-replicator-$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
+      bucket=$(echo "cql-replicator-$AWS_ACCOUNT-$AWS_REGION" | tr ' [:upper:]' ' [:lower:]')
       S3_LANDING_ZONE="s3://""$bucket"
       log "Creating a new S3 bucket: $S3_LANDING_ZONE"
       if aws s3 mb "$S3_LANDING_ZONE" > /dev/null 2>&1
@@ -220,7 +220,7 @@ function Init {
   if ls "$path_to_conf/CassandraConnector.conf" > /dev/null
   then
     aws s3 cp "$path_to_conf"/CassandraConnector.conf "$S3_LANDING_ZONE"/artifacts/CassandraConnector.conf > /dev/null
-    progress 2 5 "Uploading CassandraConnector.conf     "
+    progress 2 5 "Uploading CassandraConnector.conf                  "
   else
     log "ERROR: $path_to_conf/CassandraConnector.conf not found"
     exit 1
@@ -257,7 +257,7 @@ function Init {
   },
    "PhysicalConnectionRequirements":{
    "SubnetId":"'$SUBNET'",
-   "SecurityGroupIdList":["'$SG'"],
+   "SecurityGroupIdList":['$SG'],
    "AvailabilityZone":"'$AZ'"}
    }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
 
@@ -282,7 +282,7 @@ function Init {
     --name "CQLReplicator" \
     --role "$GLUE_IAM_ROLE" \
     --description "Migration tool for Amazon Keyspaces" \
-    --glue-version "3.0" \
+    --glue-version "4.0" \
     --number-of-workers 2 \
     --worker-type "G.1X" \
     --connections "Connections=$glue_conn_name" \
@@ -292,7 +292,7 @@ function Init {
     --region "$AWS_REGION" \
     --default-arguments '{
         "--job-language":"scala",
-        "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.0.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
+        "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
         "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions",
         "--class":"GlueApp"
     }' > /dev/null
@@ -625,7 +625,7 @@ if [[ $STATE == init ]]; then
 fi
 
 if [[ $STATE == cleanup ]]; then
-  log "Removing the artifact bucket, connection, and CQLReplicator job"
+  log "Deleting deployed artifacts: Glue connection, S3 bucket, and Glue job"
   Clean_Up
 fi
 

@@ -1,10 +1,10 @@
 # CQLReplicator with AWS Glue
-The aim of this project is to assist customers is seamlessly migrating from self-managed large Cassandra clusters to Amazon Keyspaces,
-ensuring zero downtime and code compilation, predictable incremental traffic, and low migration costs.
+The objective of this project is to support customers in seamlessly migrating from self-managed Cassandra clusters to Amazon Keyspaces.
+This migration approach ensures zero downtime, no code compilation, predictable incremental traffic, and reduced migration costs.
 
 ## Architecture
-Customers have the flexibility to scale the migration workload up and out by deploying multiple Glue jobs of CQLReplicator. 
-Each Glue job is responsible for handling a subset of primary keys. 
+This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue jobs of CQLReplicator. 
+Each glue job is tasked with handling a specific subset of primary keys to distribute migration workload evenly across Glue data processing units. 
 
 ![](../architecture-glue.png "CQLReplicator on Glue")
 
@@ -20,8 +20,8 @@ List of prerequisites needed to run CQLReplicator with AWS Glue, such as:
 files for Amazon Keyspaces and Cassandra Cluster
 
 ## Init migration process
-The following command initializes the CQLReplicator environment: copies JAR artifacts, creates a Glue connector, 
-a S3 bucket (optional), a Glue job, migration keyspace, and ledger table. 
+The following command initializes the CQLReplicator environment, which involves the copying JAR artifacts, creation a Glue connector, 
+a S3 bucket, a Glue job, migration keyspace, and ledger table. 
 
 To enable AWS Glue components to communicate, you must set up access to your Cassandra cluster in Amazon VPC. 
 To enable AWS Glue to communicate between its components, specify a security group with a self-referencing inbound rule 
@@ -29,15 +29,15 @@ for all TCP ports. By creating a self-referencing rule, you can restrict the sou
 and it's not open to all networks. The default security group for your VPC might already have a self-referencing inbound rule 
 for ALL Traffic.
 
-`--sg` - a list of security group(s) provides access to Cassandra cluster form AWS Glue and contains the self-referencing 
-inbound rule for ALL Traffic.
-`--subnet` - the Cassandra cluster's subnet
-`--az` - the subnet's availability zone
-`--region` - AWS Region where the Cassandra cluster is deployed 
+`--sg` - these're security groups(s) which allow access to the Cassandra cluster from AWS Glue and includes the self-referencing
+inbound rule for all traffic.
+`--subnet` - this is the subnet to which the Cassandra cluster belongs.
+`--az` - this is the AZ of the subnet
+`--region` - AWS region where the Cassandra cluster is deployed 
 `glue-iam-role` - you need [the IAM role permissions](https://docs.aws.amazon.com/glue/latest/dg/create-an-iam-role.html)
 that AWS Glue can assume when calling other services on your behalf. Services: Amazon Keyspaces and S3
 `--landing zone` - this is an optional parameter because can reuse any existing S3 buckets. 
-If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate files
+If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate files.
 
 ```shell
     cqlreplicator --state init --sg '"sg-1","sg-2"' \ 
@@ -102,7 +102,7 @@ To stop migration process gracefully run the following command:
 
 ## Recover from failures
 Customers can simply restart the migration process from the point where it was interrupted by restarting failed jobs.
-In order, to restart CQLReplicator, you need to re-run `--state run` with the same parameters.
+In order, to restart failed CQLReplicator jobs, you need to re-run `--state run` with the same parameters.
 
 ## Get migration stats
 To get replicated row stats, run the following command:

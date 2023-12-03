@@ -4,7 +4,9 @@ This migration approach ensures zero downtime, no code compilation, predictable 
 
 ## Architecture
 This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue jobs of CQLReplicator. 
-Each glue job is tasked with handling a specific subset of primary keys to distribute migration workload evenly across Glue data processing units. 
+Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per tile) to distribute migration workload evenly across Glue data processing units. 
+A single replication glue job (DPU - 0.25X) can push up to 2800 WCUs per second against the target table in Amazon Keyspaces.
+This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
 ![](../architecture-glue.png "CQLReplicator on Glue")
 
@@ -50,8 +52,9 @@ After running this command, you should find in the AWS account:
 3. Keyspace `migration` and `ledger` table in Amazon Keyspaces
 
 ## Start migration process
-In order, to run CQLReplicator on AWS Glue, you need to use `--state run` with a different variety of parameters.
-The variety of parameters will depend on your migration use-case, e.g. replicate ttl, update, or objects over 1MB.
+To operate CQLReplicator on AWS Glue, you need to use `--state run` command, followed by a series of parameters. The precies
+configuration of these is primarily determined by your unique migration requirements. For instance, these settings may vary 
+if you choose to replicate TTLs, updates, or offloading objects exceeding 1MB to Amazon S3.
 
 ### Getting Started
 Let's run the following command to replicate the workload from the Cassandra cluster to Amazon Keyspaces.
@@ -59,7 +62,10 @@ Your source keyspace and table `ks_test_cql_replicator.test_cql_replicator` in t
 Your target keyspace and table `ks_test_cql_replicator.test_cql_replicator` in Amazon Keyspaces.
 Parameter `--inc-traffic` - enables incremental traffic to not overload the Cassandra Cluster and Amazon Keyspaces
 with high number of requests. CQLReplicator is going to increase traffic every 2 minutes. In the following
-example with 8 tiles, the traffic is going to be increased the traffic by 12.5% every 2 minutes,
+example with 8 tiles, one avg. Cassandra row is under 1KB, the traffic is going to be increased by 12.5% 
+every 2 minutes. At peak traffic, it can reach up to 22,400 WCUs per second.
+
+![](../img.png "Incremental traffic")
 
 ```shell
    cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 \

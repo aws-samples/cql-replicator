@@ -41,6 +41,8 @@ that AWS Glue can assume when calling other services on your behalf. Services: A
 `--landing zone` - this is an optional parameter because can reuse any existing S3 buckets. 
 If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate files.
 
+Reference configuration files `CassandraConnector.conf` and `KeyspacesConnector.conf` should be copied to ../conf.
+
 ```shell
     cqlreplicator --state init --sg '"sg-1","sg-2"' \ 
                   --subnet "subnet-XXXXXXXXXXXX" --az us-west-2a --region us-west-2 \ 

@@ -163,6 +163,7 @@ function Clean_Up {
   connection_name=$(aws glue get-job --job-name CQLReplicator --query 'Job.Connections.Connections[0]' --output text)
   aws glue delete-connection --connection-name "$connection_name"
   aws glue delete-job --job-name CQLReplicator
+  aws keyspaces delete-keyspace --keyspace-name migration
 }
 
 function Init {

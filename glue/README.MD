@@ -4,8 +4,8 @@ ensuring zero downtime and code compilation, predictable incremental traffic, an
 
 ## Architecture
 Customers have the flexibility to scale the migration workload up and out by deploying multiple Glue jobs of CQLReplicator. 
-Each Glue job is responsible for handling a subset of primary keys. In the event of a glue failure,
-customers can simply restart the migration process from the point where it was interrupted by restarting the failed jobs.
+Each Glue job is responsible for handling a subset of primary keys. 
+
 ![](../architecture-glue.png "CQLReplicator on Glue")
 
 ## Prerequisites
@@ -101,7 +101,8 @@ To stop migration process gracefully run the following command:
 ```
 
 ## Recover from failures
-In order, to restart CQLReplicator on AWS Glue, you need to rerun `--state run` with the parameters.
+Customers can simply restart the migration process from the point where it was interrupted by restarting failed jobs.
+In order, to restart CQLReplicator, you need to re-run `--state run` with the same parameters.
 
 ## Get migration stats
 To get replicated row stats, run the following command:

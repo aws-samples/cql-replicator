@@ -192,7 +192,7 @@ object GlueApp {
         s3ClientOnPartition.putObject(bucket, s"$prefix/$key", largeObject)
       } match {
         case Failure(_) => throw new LargeObjectException("Not able to persist the large object to S3")
-        case Success(_) => jsonStatement
+        case Success(_) => updatedJsonStatement
       }
     }
 
@@ -368,7 +368,7 @@ object GlueApp {
       keyspacesConn.withSessionDo {
         session => {
           val ledger = session.execute(s"SELECT location,tile,ver FROM migration.ledger WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$currentTile and load_status='' and offload_status='SUCCESS' ALLOW FILTERING").all().asScala
-          val ledgerList = Option(ledger)//Optional.ofNullable(ledger)
+          val ledgerList = Option(ledger)
 
           if (!ledgerList.isEmpty) {
             val locations = ledgerList.get.map(c => (c.getString(0), c.getInt(1), c.getString(2))).toList.par
@@ -448,10 +448,9 @@ object GlueApp {
             val rsTail = session.execute(s"SELECT * FROM migration.ledger WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$tile and ver='tail'").one()
             val rsHead = session.execute(s"SELECT * FROM migration.ledger WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$tile and ver='head'").one()
 
-            val tail = Option(rsTail)//Optional.ofNullable(rsTail)
-            val head = Option(rsHead)//Optional.ofNullable(rsHead)
+            val tail = Option(rsTail)
+            val head = Option(rsHead)
 
-            // TODO: Pattern matching and replace Optional.empty for Scala Option and Null
             if (!tail.isEmpty) {
               tailLoadStatus = rsTail.getString("load_status")
             }
@@ -461,7 +460,7 @@ object GlueApp {
 
             logger.info(s"Processing $tile, head is $head, tail is $tail, head status is $headLoadStatus, tail status is $tailLoadStatus")
 
-            // Move the tail to the head, and overwrite tail
+            // Swap tail and head
             if ((!tail.isEmpty && tailLoadStatus == "SUCCESS") && (!head.isEmpty && headLoadStatus == "SUCCESS")) {
               logger.info("Swapping the tail and the head")
 
@@ -479,7 +478,7 @@ object GlueApp {
               }
             }
 
-            // Load tail and keep the head (second time)
+            // The second round (tail and head)
             if (tail.isEmpty && (!head.isEmpty && headLoadStatus == "SUCCESS")) {
               logger.info("Loading a tail but keeping the head")
               val staged = groupedPkDF.where(col("group") === tile).repartition(pks.map(c => col(c)): _*)
@@ -489,7 +488,7 @@ object GlueApp {
               }
             }
 
-            // Load head (first time)
+            // Historical upload, the first round (head)
             if (tail.isEmpty && head.isEmpty) {
               logger.info("Loading a head")
               val staged = groupedPkDF.where(col("group") === tile).repartition(pks.map(c => col(c)): _*)

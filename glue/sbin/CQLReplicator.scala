@@ -176,11 +176,18 @@ object GlueApp {
       val columnName = (offloadLargeObjects \ "column").values.toString
       val bucket = (offloadLargeObjects \ "bucket").values.toString
       val prefix = (offloadLargeObjects \ "prefix").values.toString
+      val xrefColumnName = (offloadLargeObjects \ "xref").values.toString
       val key = java.util.UUID.randomUUID.toString
       val largeObject = (jPayload \ columnName).values.toString
       val jsonStatement = jPayload transformField {
-        case JField(`columnName`, _) => JField(columnName, org.json4s.JsonAST.JString(s"s3://$bucket/$prefix/$key"))
+        case JField(`xrefColumnName`, _) => JField(xrefColumnName, org.json4s.JsonAST.JString(s"s3://$bucket/$prefix/$key"))
       }
+      // Remove orginal payload from the target statement
+      val updatedJsonStatement = jsonStatement removeField {
+        case JField(`columnName`, _) => true
+        case _ => false
+      }
+
       Try {
         s3ClientOnPartition.putObject(bucket, s"$prefix/$key", largeObject)
       } match {

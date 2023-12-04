@@ -52,6 +52,8 @@ import java.nio.charset.StandardCharsets
 
 class LargeObjectException(s: String) extends Exception(s) {}
 
+class ProcessTypeException(s: String) extends Exception(s) {}
+
 object GlueApp {
   def main(sysArgs: Array[String]) {
     def shuffleDf(df: DataFrame): DataFrame = {
@@ -84,19 +86,19 @@ object GlueApp {
     }
 
     def parseJSONConfig(i: String): org.json4s.JValue = i match {
-      case "None" => JObject(List(("None",JString("None"))))
+      case "None" => JObject(List(("None", JString("None"))))
       case str =>
         try {
           parse(str)
         } catch {
-          case _: Throwable => JObject(List(("None",JString("None"))))
+          case _: Throwable => JObject(List(("None", JString("None"))))
         }
     }
 
     val WAIT_TIME = 10000
     val MAX_RETRY_ATTEMPTS = 256
     // Unit ms
-    val EXP_BACKOFF= 25
+    val EXP_BACKOFF = 25
     val sparkContext: SparkContext = new SparkContext()
     val glueContext: GlueContext = new GlueContext(sparkContext)
     val sparkSession: SparkSession = glueContext.getSparkSession
@@ -161,7 +163,12 @@ object GlueApp {
     //AmazonS3Client to check if a stop requested issued
     val s3client = new AmazonS3Client()
 
-    def stopRequested(bucket: String, key: String): Boolean = {
+    def stopRequested(bucket: String): Boolean = {
+      val key = processType match {
+        case "discovery" => s"$srcKeyspaceName/$srcTableName/$processType/stopRequested"
+        case "replication" => s"$srcKeyspaceName/$srcTableName/$processType/$currentTile/stopRequested"
+        case _ => throw new ProcessTypeException("Unrecognizable process type")
+      }
       Try {
         val s3Object: S3Object = s3client.getObject(bucket, key)
         s3client.deleteObject(bucket, key)
@@ -219,15 +226,16 @@ object GlueApp {
         partition => {
           val retryConfig = RetryConfig.custom.maxAttempts(MAX_RETRY_ATTEMPTS).
             intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1)).
-            retryExceptions(classOf[WriteFailureException],classOf[WriteTimeoutException],classOf[ServerError],classOf[UnavailableException],classOf[NoNodeAvailableException], classOf[AllNodesFailedException]).build()
+            retryExceptions(classOf[WriteFailureException], classOf[WriteTimeoutException], classOf[ServerError], classOf[UnavailableException], classOf[NoNodeAvailableException], classOf[AllNodesFailedException]).build()
           val retry = Retry.of("keyspaces", retryConfig)
           val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = offloadLargeObjects match {
-            case JObject(List(("None",JString("None")))) => null
+            case JObject(List(("None", JString("None")))) => null
             case _ => AmazonS3ClientBuilder.defaultClient()
           }
           /* This section only for debugging
           val publisher = retry.getEventPublisher
           publisher.onRetry(event => logger.info(s"Operation was retried on event $event"))
+          // onError you can offload failed rows to Amazon S3/SQS for the further processing
           publisher.onError(event => logger.info(s"Operation was failed on event $event"))
           */
 
@@ -244,7 +252,7 @@ object GlueApp {
                       keyspacesConn.withSessionDo {
                         session => {
                           offloadLargeObjects match {
-                            case JObject(List(("None",JString("None")))) => Retry.decorateSupplier(retry,
+                            case JObject(List(("None", JString("None")))) => Retry.decorateSupplier(retry,
                               () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'")).get()
                             case _ => {
                               val json4sRow = parse(jsonRow)
@@ -266,7 +274,7 @@ object GlueApp {
                       keyspacesConn.withSessionDo {
                         session => {
                           offloadLargeObjects match {
-                            case JObject(List(("None",JString("None")))) => {
+                            case JObject(List(("None", JString("None")))) => {
                               val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
                               val ttlVal = getTTLvalue(json4sRow)
                               Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
@@ -506,25 +514,25 @@ object GlueApp {
       groupedPkDF.unpersist()
     }
 
-    while (true) {
-      if (processType == "discovery") {
-        if (!stopRequested(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/$processType/stopRequested")) {
-          keysDiscoveryProcess
-        } else {
-          logger.info("Stop was requested for the discovery process...")
-          sys.exit()
+    val bcktName = landingZone.replaceAll("s3://", "")
+    Iterator.continually(stopRequested(bcktName)).takeWhile(_ == false).foreach {
+      _ => {
+        processType match {
+          case "discovery" => {
+            keysDiscoveryProcess
+          }
+          case "replication" => {
+            dataReplicationProcess
+          }
+          case _ => {
+            logger.info(s"Unrecognizable process type - $processType")
+            sys.exit()
+          }
         }
+        Thread.sleep(WAIT_TIME)
       }
-      if (processType == "replication") {
-        if (!stopRequested(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/$processType/$currentTile/stopRequested")) {
-          dataReplicationProcess
-        } else {
-          logger.info("Stop was requested for the replication process...")
-          sys.exit()
-        }
-      }
-      Thread.sleep(WAIT_TIME)
     }
+    logger.info(s"Stop was requested for the $processType process...")
     Job.commit()
   }
 }

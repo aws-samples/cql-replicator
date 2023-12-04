@@ -489,7 +489,7 @@ function Request_Stop {
   then
     while [ $tile -lt $TILES ]
     do
-      log "Requested a stop for the replication:" $tile
+      log "Requested a stop for the replication tile:" $tile
       aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested >/dev/null
       ((tile++))
     done

@@ -302,6 +302,7 @@ function Init {
 
   # Create a keyspace - migration
   aws keyspaces create-keyspace --keyspace-name migration --region "$AWS_REGION" > /dev/null
+  sleep 20
 
   # Create a table - ledger
   aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{

@@ -50,9 +50,11 @@ import org.json4s.jackson.JsonMethods._
 import java.util.Base64
 import java.nio.charset.StandardCharsets
 
-class LargeObjectException(s: String) extends Exception(s) {}
+class LargeObjectException(s: String) extends RuntimeException {}
 
-class ProcessTypeException(s: String) extends Exception(s) {}
+class ProcessTypeException(s: String) extends RuntimeException {}
+
+class CassandraTypeException(s: String) extends RuntimeException {}
 
 object GlueApp {
   def main(sysArgs: Array[String]) {
@@ -302,75 +304,30 @@ object GlueApp {
 
     def rowToStatement(row: Row, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)]): String = {
       val whereStmt = new StringBuilder
-      columnsPos.foreach(
-        el => {
-          val colName = el._1
-          val position = row.fieldIndex(el._1)
-          val colType: String = columns.getOrElse(el._1, "can't detect data type")
-          colType match {
-            case "string" => {
-              val v = row.getString(position);
-              whereStmt.append(s"$colName='$v'")
-            }
-            case "text" => {
-              val v = row.getString(position);
-              whereStmt.append(s"$colName='$v'")
-            }
-            case "int" => {
-              val v = row.getInt(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case "long" => {
-              val v = row.getLong(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case "bigint" => {
-              val v = row.getLong(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case "float" => {
-              val v = row.getFloat(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case "date" => {
-              val v = row.getDate(position);
-              whereStmt.append(s"$colName='$v'")
-            }
-            case "double" => {
-              val v = row.getDouble(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case "timestamp" => {
-              val v = row.getTimestamp(position);
-              whereStmt.append(s"$colName='$v'")
-            }
-            case "short" => {
-              val v = row.getShort(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case "decimal" => {
-              val v = row.getDecimal(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case "tinyint" => {
-              val v = row.getByte(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case "uuid" => {
-              val v = row.getString(position);
-              whereStmt.append(s"$colName=$v")
-            }
-            case _ => {
-              val v = row.getString(position);
-              whereStmt.append(s"$colName='$v'")
-            }
-          }
-          if (el._2 < columns.size - 1) {
-            whereStmt.append(" and ")
-          }
-        })
-      whereStmt.toString
-    }
+      columnsPos.foreach { el =>
+        val colName = el._1
+        val position = row.fieldIndex(el._1)
+        val colType: String = columns.getOrElse(el._1, "none")
+        val v = colType match {
+          case "string" | "text" | "date" | "timestamp" => s"'${row.getString(position)}'"
+          case "int" => row.getInt(position)
+          case "long" | "bigint" => row.getLong(position)
+          case "float" => row.getFloat(position)
+          case "double" => row.getDouble(position)
+          case "short" => row.getShort(position)
+          case "decimal" => row.getDecimal(position)
+          case "tinyint" => row.getByte(position)
+          case "uuid" => row.getString(position)
+          case _ => throw new CassandraTypeException("Unrecognized data type")
+        }
+        whereStmt.append(s"$colName=$v")
+        el._2 match {
+          case i if i < columns.size - 1 => whereStmt.append (" and ")
+          case _ =>
+        }
+      }
+        whereStmt.toString
+      }
 
     def dataReplicationProcess() {
       keyspacesConn.withSessionDo {

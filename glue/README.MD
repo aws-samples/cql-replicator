@@ -21,17 +21,31 @@ List of prerequisites needed to run CQLReplicator with AWS Glue, such as:
 - [Reference](https://docs.datastax.com/en/developer/java-driver/4.3/manual/core/configuration/reference/) configuration 
 files for Amazon Keyspaces and Cassandra Cluster
 
+## Getting Started
+To enable AWS Glue components to communicate, you must set up access to your Cassandra cluster in Amazon VPC.
+To enable AWS Glue to communicate between its components, specify a security group with a self-referencing inbound rule
+for all TCP ports. By creating a self-referencing rule, you can restrict the source to the same security group in the VPC,
+and it's not open to all networks. The default security group for your VPC might already have a self-referencing inbound rule
+for ALL Traffic.
+
+1. Download the project to your home folder by executing the following command:
+    ```shell
+    git clone https://github.com/aws-samples/cql-replicator.git
+    ```
+2. Modify reference configuration files `../glue/conf/CassandraConnector.conf` and `../glue/conf/KeyspacesConnector.conf` in ../conf accordingly to the environment
+3. ```cd cql-replicator/glue/bin```
+
 ## Init migration process
 The following command initializes the CQLReplicator environment, which involves the copying JAR artifacts, creation a Glue connector, 
 a S3 bucket, a Glue job, migration keyspace, and ledger table. 
 
-To enable AWS Glue components to communicate, you must set up access to your Cassandra cluster in Amazon VPC. 
-To enable AWS Glue to communicate between its components, specify a security group with a self-referencing inbound rule 
-for all TCP ports. By creating a self-referencing rule, you can restrict the source to the same security group in the VPC, 
-and it's not open to all networks. The default security group for your VPC might already have a self-referencing inbound rule 
-for ALL Traffic.
+```shell
+    cqlreplicator --state init --sg '"sg-1","sg-2"' \ 
+                  --subnet "subnet-XXXXXXXXXXXX" --az us-west-2a --region us-west-2 \ 
+                  --glue-iam-role glue-cassandra-migration --landing-zone s3://cql-replicator-1234567890-us-west-2
+```
 
-`--sg` - these're security groups(s) which allow access to the Cassandra cluster from AWS Glue and includes the self-referencing
+`--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the self-referencing
 inbound rule for all traffic.
 `--subnet` - this is the subnet to which the Cassandra cluster belongs.
 `--az` - this is the AZ of the subnet
@@ -41,13 +55,6 @@ that AWS Glue can assume when calling other services on your behalf. Services: A
 `--landing zone` - this is an optional parameter because can reuse any existing S3 buckets. 
 If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate files.
 
-Reference configuration files `CassandraConnector.conf` and `KeyspacesConnector.conf` should be copied to ../conf.
-
-```shell
-    cqlreplicator --state init --sg '"sg-1","sg-2"' \ 
-                  --subnet "subnet-XXXXXXXXXXXX" --az us-west-2a --region us-west-2 \ 
-                  --glue-iam-role glue-cassandra-migration --landing-zone s3://cql-replicator-1234567890-us-west-2
-```
 After running this command, you should find in the AWS account:
 1. CQLReplicator Glue job and Glue connector in AWS Glue
 2. Amazon S3 bucket that stores the artifacts
@@ -58,8 +65,14 @@ To operate CQLReplicator on AWS Glue, you need to use `--state run` command, fol
 configuration of these is primarily determined by your unique migration requirements. For instance, these settings may vary 
 if you choose to replicate TTLs, updates, or offloading objects exceeding 1MB to Amazon S3.
 
-### Getting Started
 Let's run the following command to replicate the workload from the Cassandra cluster to Amazon Keyspaces.
+
+```shell
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
+```
+
 Your source keyspace and table `ks_test_cql_replicator.test_cql_replicator` in the Cassandra cluster.
 Your target keyspace and table `ks_test_cql_replicator.test_cql_replicator` in Amazon Keyspaces.
 Parameter `--inc-traffic` - enables incremental traffic to not overload the Cassandra Cluster and Amazon Keyspaces
@@ -68,12 +81,6 @@ example with 8 tiles, one avg. Cassandra row is under 1KB, the traffic is going 
 every 2 minutes. At peak traffic, it can reach up to 22,400 WCUs per second.
 
 ![](../img.png "Incremental traffic")
-
-```shell
-   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 \
-                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
-                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
-```
 
 ### Replicate near-real time updates and inserts
 ```shell
@@ -121,7 +128,6 @@ To get replicated row stats, run the following command:
 
 ## Clean up
 The following command will delete the Glue job, connector, the S3 bucket, and Keyspaces'table ledger:
-
 ```shell
    cqlreplicator --state cleanup --landing-zone s3://cql-replicator-1234567890-us-west-2
 ```

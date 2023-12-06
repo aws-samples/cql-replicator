@@ -32,7 +32,8 @@ for ALL Traffic.
     ```shell
     git clone https://github.com/aws-samples/cql-replicator.git
     ```
-2. Modify reference configuration files `CassandraConnector.conf` and `KeyspacesConnector.conf` in ../conf accordingly to the environment
+2. Modify reference configuration files `../glue/conf/CassandraConnector.conf` and `../glue/conf/KeyspacesConnector.conf` in ../conf accordingly to the environment
+3. ```cd cql-replicator/glue/bin```
 
 ## Init migration process
 The following command initializes the CQLReplicator environment, which involves the copying JAR artifacts, creation a Glue connector, 

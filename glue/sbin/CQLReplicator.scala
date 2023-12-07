@@ -318,6 +318,7 @@ object GlueApp {
           case "decimal" => row.getDecimal(position)
           case "tinyint" => row.getByte(position)
           case "uuid" => row.getString(position)
+          case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'","")}"
           case _ => throw new CassandraTypeException("Unrecognized data type")
         }
         whereStmt.append(s"$colName=$v")
@@ -408,19 +409,18 @@ object GlueApp {
       tiles.foreach(tile => {
         keyspacesConn.withSessionDo {
           session => {
-            var tailLoadStatus = ""
-            var headLoadStatus = ""
             val rsTail = session.execute(s"SELECT * FROM migration.ledger WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$tile and ver='tail'").one()
             val rsHead = session.execute(s"SELECT * FROM migration.ledger WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$tile and ver='head'").one()
 
             val tail = Option(rsTail)
             val head = Option(rsHead)
-
-            if (!tail.isEmpty) {
-              tailLoadStatus = rsTail.getString("load_status")
+            val tailLoadStatus = tail match {
+              case t if !t.isEmpty => rsTail.getString("load_status")
+              case _=> ""
             }
-            if (!head.isEmpty) {
-              headLoadStatus = rsHead.getString("load_status")
+            val headLoadStatus = head match {
+              case h if !h.isEmpty => rsHead.getString("load_status")
+              case _=> ""
             }
 
             logger.info(s"Processing $tile, head is $head, tail is $tail, head status is $headLoadStatus, tail status is $tailLoadStatus")

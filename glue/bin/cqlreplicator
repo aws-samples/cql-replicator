@@ -6,7 +6,7 @@
 # Migration parameters
 MIGRATOR_VERSION=0.2
 JOB_NAME=CQLReplicator
-TILES=1
+TILES=2
 PROCESS_TYPE_DISCOVERY=discovery
 PROCESS_TYPE_REPLICATION=replication
 SOURCE_KS=ks_test_cql_replicator
@@ -23,7 +23,7 @@ DISCOVERED_TOTAL=0
 REPLICATED_TOTAL=0
 OFFLOAD_LARGE_OBJECTS_B64=$(echo "None" | base64)
 BASE_FOLDER=$(pwd -L)
-AWS_REGION="us-east-1"
+AWS_REGION=""
 SUBNET=""
 SG=""
 AZ=""
@@ -81,13 +81,17 @@ function check_input() {
   return 0
 }
 
-
 function check_discovery_runs() {
    local rs
-   rs=$(aws glue get-job-runs --job-name CQLReplicator --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`]' | jq '.[0]["--SOURCE_TBL"] == "'"$SOURCE_TBL"'" and .[0]["--SOURCE_KS"] == "'"$SOURCE_KS"'"')
-   if [[ $rs = "true" ]]; then
-     #log "ERROR: Discovery job is already running for" $SOURCE_KS.$SOURCE_TBL
-     return 1
+   local mode
+   # mode = true, if discovery job is not running return 0
+   # mode = false, if discovery job is not running return 1
+   mode=$1
+   rs=$(aws glue get-job-runs --job-name CQLReplicator --region "$AWS_REGION" --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`]' | jq '.[0]["--SOURCE_TBL"] == "'"$SOURCE_TBL"'" and .[0]["--SOURCE_KS"] == "'"$SOURCE_KS"'"')
+
+   if [[ $rs == "$mode" ]]; then
+       log "ERROR: The discovery job has failed, check AWS Glue logs"
+       exit 1
    fi
    return 0
 }
@@ -96,13 +100,21 @@ function check_replication_runs() {
    local tile
    local rs
    tile=$1
-   rs=$(aws glue get-job-runs --job-name CQLReplicator --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`]' | jq '.[0]["--SOURCE_TBL"] == "'"$SOURCE_TBL"'" and .[0]["--SOURCE_KS"] == "'"$SOURCE_KS"'" and .[]["--TILE"] == "'"$tile"'"' | grep true)
+   rs=$(aws glue get-job-runs --job-name CQLReplicator --region "$AWS_REGION" --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`]' | jq '.[0]["--SOURCE_TBL"] == "'"$SOURCE_TBL"'" and .[0]["--SOURCE_KS"] == "'"$SOURCE_KS"'" and .[]["--TILE"] == "'"$tile"'"' | grep true)
 
-   if [[ $rs = "true" ]]; then
+   if [[ $rs == "true" ]]; then
      #log "ERROR: Replication job is already running per tile $tile for" $SOURCE_KS.$SOURCE_TBL
      return 1
    fi
    return 0
+}
+
+function check_num_tiles() {
+  if [[ $TILES -lt 2 ]]; then
+        log "Total number of tiles should be => 2"
+        exit 1
+    fi
+    return 0
 }
 
 function progress {
@@ -124,6 +136,7 @@ function progress {
 }
 
 function barrier() {
+  flag_check_discovery_run="$1"
   while true
   do
     cnt=0
@@ -136,6 +149,11 @@ function barrier() {
     done
     if [[ $cnt == "$TILES" ]]; then
       break
+    fi
+    if [[ $flag_check_discovery_run == "true" ]]; then
+      # if the discovery job is not running then fail (return 1)
+      sleep 2
+      check_discovery_runs "false"
     fi
   done
 }
@@ -152,6 +170,7 @@ function Usage_Exit {
   log "run - Start migration process"
   log "stats - Upload progress. Only for historical workload"
   log "request-stop - Stop migration process"
+  log "cleanup - Delete all CQLReplicator artifacts"
   exit 1
 }
 
@@ -161,9 +180,9 @@ function Clean_Up {
   aws s3 rb "$S3_LANDING_ZONE"
   local connection_name
   connection_name=$(aws glue get-job --job-name CQLReplicator --query 'Job.Connections.Connections[0]' --output text)
-  aws glue delete-connection --connection-name "$connection_name"
-  aws glue delete-job --job-name CQLReplicator
-  aws keyspaces delete-keyspace --keyspace-name migration
+  aws glue delete-connection --connection-name "$connection_name" --region "$AWS_REGION"
+  aws glue delete-job --job-name CQLReplicator --region "$AWS_REGION"
+  aws keyspaces delete-keyspace --keyspace-name migration --region "$AWS_REGION"
 }
 
 function Init {
@@ -262,22 +281,6 @@ function Init {
    "AvailabilityZone":"'$AZ'"}
    }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
 
-  #glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
-  #  aws glue create-connection --connection-input '{
-  #   "Name":"'$glue_conn_name'",
-  #   "Description":"CQLReplicator connection to the C* cluster",
-  #   "ConnectionType":"CUSTOM",
-  #   "ConnectionProperties":{
-  #   "CONNECTOR_TYPE": "Spark",
-  #   "CONNECTOR_URL": "'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.0.jar",
-  #   "CONNECTOR_CLASS_NAME": "org.apache.spark.sql.cassandra"
-  # },
-  #   "PhysicalConnectionRequirements":{
-  #   "SubnetId":"'$SUBNET'",
-  #   "SecurityGroupIdList":["'$SG'"],
-  #   "AvailabilityZone":"'$AZ'"}
-  # }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
-
   # Create Glue Jobs
   aws glue create-job \
     --name "CQLReplicator" \
@@ -375,22 +378,21 @@ function Start_Discovery {
   check_input "$TARGET_KS" "ERROR: target keyspace name is empty, must be provided"
   check_input "$TARGET_TBL" "ERROR: target table name is empty, must be provided"
   check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
+  check_num_tiles
 
   log "TILES:" "$TILES"
   log "SOURCE:" "$SOURCE_KS"."$SOURCE_TBL"
   log "TARGET:" "$TARGET_KS"."$TARGET_TBL"
   log "LANDING ZONE:" "$S3_LANDING_ZONE"
-  log "Writetime column:" $WRITETIME_COLUMN
-  log "TTL column:" $TTL_COLUMN
+  log "WRITE TIME COLUMN:" $WRITETIME_COLUMN
+  log "TTL COLUMN:" $TTL_COLUMN
   local workers=$((1 + TILES / 2))
   log "Checking if the discovery job is already running..."
-  check_discovery_runs
+  check_discovery_runs "true"
   if [ $? = 0 ]; then
     Delete_Stop_Event_D
     log "Starting the discovery job..."
-    #KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/0/count.json - | head | jq '.primaryKeys')
-    #log "Average primary keys per tile is $KEYS_PER_TILE"
-    rs=$(aws glue start-job-run --job-name "$JOB_NAME" --worker-type G.1X --number-of-workers "$workers" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
+    rs=$(aws glue start-job-run --job-name "$JOB_NAME" --worker-type G.1X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
         "--TILE":"0",
         "--TOTAL_TILES":"'$TILES'",
         "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
@@ -415,7 +417,7 @@ function Start_Replication {
     check_replication_runs $cnt
     if [ $? = 0 ]; then
       Delete_Stop_Event_R $cnt
-      rs=$(aws glue start-job-run --job-name "$JOB_NAME" --worker-type G.025X --number-of-workers "$workers" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
+      rs=$(aws glue start-job-run --job-name "$JOB_NAME" --worker-type G.025X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
           "--TILE":"'$cnt'",
           "--TOTAL_TILES":"'$TILES'",
           "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
@@ -438,7 +440,7 @@ function validate_json() {
   local json_str=$1
 
   # Check if the JSON is valid
-  echo "$json_str" | jq empty #> /dev/null 2>&1
+  echo "$json_str" | jq empty
   if [[ $? -ne 0 ]]; then
       log "ERROR: Invalid JSON"
       log '{"column": "column_name", "bucket": "bucket-name", "prefix": "keyspace_name/table_name/payload", "xref": "reference-column"}'
@@ -595,7 +597,7 @@ eval set -- "$PARAMS"
 
 if [[ $STATE == run ]]; then
   Start_Discovery
-  barrier
+  barrier "true"
   Start_Replication
   log "Started jobs:" "${JOBS[@]}"
 fi
@@ -632,7 +634,8 @@ if [[ $STATE == cleanup ]]; then
 fi
 
 if [[ $STATE == stats ]]; then
-  barrier
+  # the barrier without checking if the discovery job is running
+  barrier "false"
   tile=0
   while [ $tile -lt "$TILES" ]
     do

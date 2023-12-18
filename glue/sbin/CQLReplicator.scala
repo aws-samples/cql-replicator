@@ -21,7 +21,9 @@ import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.DataFrame
+
 import java.time.Duration
+import java.util.Optional
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
@@ -58,9 +60,14 @@ class CassandraTypeException(s: String) extends RuntimeException {}
 
 object GlueApp {
   def main(sysArgs: Array[String]) {
+
     def shuffleDf(df: DataFrame): DataFrame = {
       val encoder = RowEncoder(df.schema)
       df.mapPartitions(new scala.util.Random().shuffle(_))(encoder)
+    }
+
+    def shuffleDfV2(df: DataFrame): DataFrame = {
+      df.orderBy(rand())
     }
 
     def customConnectionFactory(sc: SparkContext): (CassandraConnector, CassandraConnector) = {
@@ -95,6 +102,50 @@ object GlueApp {
         } catch {
           case _: Throwable => JObject(List(("None", JString("None"))))
         }
+    }
+
+    def preFlightCheck(connection: CassandraConnector, keyspace: String, table: String, dir: String): Unit = {
+      val logger = new GlueLogger
+      Try {
+        val c1 = Option(connection.openSession)
+        c1.isEmpty match {
+          case false => {
+            c1.get.getMetadata.getKeyspace(keyspace).isPresent match {
+              case true => {
+                c1.get.getMetadata.getKeyspace(keyspace).get.getTable(table).isPresent match {
+                  case true => {
+                    logger.info(s"the $dir table $table exists")
+                  }
+                  case false => {
+                    val err = s"ERROR: the $dir table $table does not exist"
+                    logger.error(err)
+                    sys.exit(-1)
+                  }
+                }
+              }
+              case false => {
+                val err = s"ERROR: the $dir keyspace $keyspace does not exist"
+                logger.error(err)
+                sys.exit(-1)
+              }
+            }
+          }
+          case _ => {
+            val err = s"ERROR: The job was not able to connecto to the $dir"
+            logger.error(err)
+            sys.exit(-1)
+          }
+        }
+      } match {
+        case Failure(_) => {
+          val err = s"ERROR: Detected connectivity issue. Check the reference conf file/Glue connection for the $dir, the job is aborted"
+          logger.error(err)
+          sys.exit(-1)
+        }
+        case Success(_) => {
+          logger.info(s"Connected to the $dir")
+        }
+      }
     }
 
     val WAIT_TIME = 10000
@@ -133,10 +184,21 @@ object GlueApp {
     val cassandraConn = customConnections._2
     val keyspacesConn = customConnections._1
     val landingZone = args("S3_LANDING_ZONE")
+    val bcktName = landingZone.replaceAll("s3://", "")
     val columnTs = args("WRITETIME_COLUMN")
     val source = s"sourceCluster.$srcKeyspaceName.$srcTableName"
     val ttlColumn = args("TTL_COLUMN")
     val olo = args("OFFLOAD_LARGE_OBJECTS")
+
+    //AmazonS3Client to check if a stop requested issued
+    val s3client = new AmazonS3Client()
+
+    // Let's do preflight checks
+    logger.info("Preflight check started")
+    preFlightCheck(cassandraConn, srcKeyspaceName, srcTableName, "source")
+    preFlightCheck(keyspacesConn, trgKeyspaceName, trgTableName, "target")
+    logger.info("Preflight check completed")
+
     val selectStmtWithTTL = ttlColumn match {
       case "None" => ""
       case _ => {
@@ -161,9 +223,6 @@ object GlueApp {
     logger.info(s"Offload large objects to S3 bucket: $offloadLageObjTmp")
 
     val offloadLargeObjects = parseJSONConfig(offloadLageObjTmp)
-
-    //AmazonS3Client to check if a stop requested issued
-    val s3client = new AmazonS3Client()
 
     def stopRequested(bucket: String): Boolean = {
       val key = processType match {
@@ -352,7 +411,7 @@ object GlueApp {
                 val tile = location._2
                 val ver = location._3
 
-                persistToTarget(shuffleDf(sourceDfV2), columns, columnsPos, tile, ver)
+                persistToTarget(shuffleDfV2(sourceDfV2), columns, columnsPos, tile, ver)
                 keyspacesConn.withSessionDo {
                   session => session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'$ver','SUCCESS', toTimestamp(now()), '')")
                 }
@@ -401,6 +460,7 @@ object GlueApp {
       }
     }
 
+    // partitonBy instead of repartition
     def keysDiscoveryProcess() {
       val primaryKeysDf = sparkSession.read.option("inferSchema", "true").table(source)
       val primaryKeysDfwithTS = primaryKeysDf.selectExpr(pkFinal.map(c => c): _*)
@@ -471,7 +531,6 @@ object GlueApp {
       groupedPkDF.unpersist()
     }
 
-    val bcktName = landingZone.replaceAll("s3://", "")
     Iterator.continually(stopRequested(bcktName)).takeWhile(_ == false).foreach {
       _ => {
         processType match {

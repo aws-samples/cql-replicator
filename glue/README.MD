@@ -68,7 +68,7 @@ if you choose to replicate TTLs, updates, or offloading objects exceeding 1MB to
 Let's run the following command to replicate the workload from the Cassandra cluster to Amazon Keyspaces.
 
 ```shell
-   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 \
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
 ```
@@ -84,8 +84,8 @@ every 2 minutes. At peak traffic, it can reach up to 22,400 WCUs per second.
 
 ### Replicate near-real time updates and inserts
 ```shell
-   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --writetime-column col3  \
-                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
 ```
 
@@ -93,8 +93,8 @@ every 2 minutes. At peak traffic, it can reach up to 22,400 WCUs per second.
 the TTL feature should be [enabled](https://docs.aws.amazon.com/keyspaces/latest/devguide/TTL-how-it-works.html#ttl-howitworks_enabling) 
 on the target table before running the following command
 ```shell
-   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --writetime-column col3  \
-                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --ttl-column col3 \ 
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --ttl-column col3 \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
 ```
 
@@ -102,16 +102,16 @@ on the target table before running the following command
 Before running the migration process configure [lifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html)
 for the S3 bucket to delete objects after expiration.
 ```shell
-./cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --src-keyspace ks_test_cql_replicator 
-                --src-table test_cql_replicator --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \ 
-                --ttl-column col3 --offload-large-objects '{"column":"col1","bucket":"my-application-resource",
+./cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --src-keyspace ks_test_cql_replicator \
+                --src-table test_cql_replicator --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                --region us-west-2 --ttl-column col3 --offload-large-objects '{"column":"col1","bucket":"my-application-resource",
                                           "prefix":"ks_test_cql_replicator/test_cql_replicator/col1","xref":"link"}'
 ```
 
 ## Stop migration process
 To stop migration process gracefully run the following command:
 ```shell
-   cqlreplicator --state request-stop --landing-zone s3://cql-replicator-1234567890-us-west-2 \ 
+   cqlreplicator --state request-stop --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
 ```
 
@@ -120,7 +120,7 @@ Customers can simply restart the migration process from the point where it was i
 In order, to restart failed CQLReplicator jobs, you need to re-run `--state run` with the same parameters.
 
 ## Get migration stats
-To get replicated row stats, run the following command:
+To obtain the number of rows replicated during the back filling phase, run the following command:
 ```shell
    cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-west-2 \ 
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator

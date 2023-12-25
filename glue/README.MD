@@ -61,7 +61,7 @@ After running this command, you should find in the AWS account:
 3. Keyspace `migration` and `ledger` table in Amazon Keyspaces
 
 ## Start migration process
-To operate CQLReplicator on AWS Glue, you need to use `--state run` command, followed by a series of parameters. The precies
+To operate CQLReplicator on AWS Glue, you need to use `--state run` command, followed by a series of parameters. The precise
 configuration of these is primarily determined by your unique migration requirements. For instance, these settings may vary 
 if you choose to replicate TTLs, updates, or offloading objects exceeding 1MB to Amazon S3.
 

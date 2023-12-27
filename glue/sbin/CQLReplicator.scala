@@ -52,11 +52,17 @@ import org.json4s.jackson.JsonMethods._
 import java.util.Base64
 import java.nio.charset.StandardCharsets
 
-class LargeObjectException(s: String) extends RuntimeException {}
+class LargeObjectException(s: String) extends RuntimeException {
+  println(s)
+}
 
-class ProcessTypeException(s: String) extends RuntimeException {}
+class ProcessTypeException(s: String) extends RuntimeException {
+  println(s)
+}
 
-class CassandraTypeException(s: String) extends RuntimeException {}
+class CassandraTypeException(s: String) extends RuntimeException {
+  println(s)
+}
 
 object GlueApp {
   def main(sysArgs: Array[String]) {
@@ -174,6 +180,7 @@ object GlueApp {
     val ledgerKeyspaces = "migration"
     val processType = args("PROCESS_TYPE") // discovery or replication
     val interanlLedger = s"ledgerCatalog.$ledgerKeyspaces.$ledgerTable"
+    val patternForSingleQuotes = "(.*text.*)|(.*date.*)|(.*timestamp.*)|(.*inet.*)".r
 
     // Business configuration
     val srcTableName = args("SOURCE_TBL")
@@ -361,6 +368,13 @@ object GlueApp {
       )
     }
 
+    def listWithSingleQuotes(lst: java.util.List[String], colType: String): String = {
+      colType match {
+        case patternForSingleQuotes(_*) => lst.asScala.toList.map(c => s"'$c'").mkString("[", ",", "]")
+        case _ => lst.asScala.toList.map(c => s"$c").mkString("[", ",", "]")
+      }
+    }
+
     def rowToStatement(row: Row, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)]): String = {
       val whereStmt = new StringBuilder
       columnsPos.foreach { el =>
@@ -368,7 +382,10 @@ object GlueApp {
         val position = row.fieldIndex(el._1)
         val colType: String = columns.getOrElse(el._1, "none")
         val v = colType match {
-          case "string" | "text" | "date" | "timestamp" => s"'${row.getString(position)}'"
+          // inet is string
+          case "string" | "text" | "inet" => s"'${row.getString(position)}'"
+          case "date" => s"'${row.getDate(position)}'"
+          case "timestamp" => s"'${row.getTimestamp(position)}'"
           case "int" => row.getInt(position)
           case "long" | "bigint" => row.getLong(position)
           case "float" => row.getFloat(position)
@@ -378,7 +395,8 @@ object GlueApp {
           case "tinyint" => row.getByte(position)
           case "uuid" => row.getString(position)
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'","")}"
-          case _ => throw new CassandraTypeException("Unrecognized data type")
+          case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
+          case _ => throw new CassandraTypeException(s"Unrecognized data type $colType")
         }
         whereStmt.append(s"$colName=$v")
         el._2 match {

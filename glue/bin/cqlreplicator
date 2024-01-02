@@ -31,7 +31,8 @@ GLUE_IAM_ROLE=""
 AWS_ACCOUNT=""
 KEYS_PER_TILE=0
 ROWS_PER_WORKER=250000
-
+# Target type might be keyspace or parquet
+TARGET_TYPE=keyspaces
 
 # Progress bar configuration
 PS=40
@@ -225,7 +226,7 @@ function Init {
   local path_to_conf
   local path_to_scala
   path_to_conf=$(ls -d "$BASE_FOLDER" | sed 's/bin/conf/g')
-  path_to_scala=$(ls -d "$BASE_FOLDER" | sed 's/bin/sbin/g')
+  path_to_scala=$(ls -d "$BASE_FOLDER" | sed 's/bin/sbin/g')"/$TARGET_TYPE"
   progress 0 5 "Uploading KeyspacesConnector.conf                    "
 
   if ls "$path_to_conf/KeyspacesConnector.conf" > /dev/null
@@ -577,6 +578,10 @@ while (( "$#" )); do
       ;;
     --az|-z)
       AZ="$2"
+      shift 2
+      ;;
+    --target-type|-j)
+      TARGET_TYPE="$2"
       shift 2
       ;;
     --)

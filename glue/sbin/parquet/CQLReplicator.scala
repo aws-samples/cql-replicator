@@ -4,6 +4,7 @@
  */
 
 // Target Parquet
+
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.GlueArgParser
@@ -71,7 +72,7 @@ class CassandraTypeException(s: String) extends RuntimeException {
   println(s)
 }
 
-case class FlushingSet[T](maxSize: Int, flushingClient: com.amazonaws.services.s3.AmazonS3, bucketName: String, key:String) {
+case class FlushingSet[T](maxSize: Int, flushingClient: com.amazonaws.services.s3.AmazonS3, bucketName: String, key: String) {
   private var set: ParSet[T] = ParSet.empty
   private var size: Int = 0
 
@@ -303,6 +304,7 @@ object GlueApp {
           deleteObjects(s3client.listNextBatchOfObjects(objectListing))
         }
       }
+
       deleteObjects(s3client.listObjects(bucket, key))
     }
 
@@ -385,13 +387,13 @@ object GlueApp {
           case "decimal" => row.getDecimal(position)
           case "tinyint" => row.getByte(position)
           case "uuid" => row.getString(position)
-          case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'","")}"
+          case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
           case _ => throw new CassandraTypeException(s"Unrecognized data type $colType")
         }
         whereStmt.append(s"$colName=$v")
         el._2 match {
-          case i if i < columns.size - 1 => whereStmt.append (" and ")
+          case i if i < columns.size - 1 => whereStmt.append(" and ")
           case _ =>
         }
       }
@@ -447,30 +449,31 @@ object GlueApp {
             if ((heads > 0 && tails > 0) || (heads == 0 && tails > 0)) {
 
               logger.info("Processing delta...")
-                val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail")
-                val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head")
-                val newInsertsDF = dfTail.as("tail").join(dfHead.as("head"), cond, "leftanti")
-                val newDeletesDF = dfHead.as("head").join(dfTail.as("tail"), cond, "leftanti")
+              val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail")
+              val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head")
+              val newInsertsDF = dfTail.as("tail").join(dfHead.as("head"), cond, "leftanti")
+              val newDeletesDF = dfHead.as("head").join(dfTail.as("tail"), cond, "leftanti")
 
-                columnTs match {
-                  case "None" => {
-                    jsonToParquet(newInsertsDF, "insert", currentTile)
-                    jsonToParquet(newDeletesDF, "delete", currentTile)
-                  }
-                  case _  => {
-                    val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").filter($"tail.ts" > $"head.ts").selectExpr(pks.map(x => s"tail.$x"): _*)
-                    jsonToParquet(newInsertsDF, "insert", currentTile)
-                    jsonToParquet(newUpdatesDF, "update", currentTile)
-                    jsonToParquet(newDeletesDF, "delete", currentTile)
-                  }
+              columnTs match {
+                case "None" => {
+                  jsonToParquet(newInsertsDF, "insert", currentTile)
+                  jsonToParquet(newDeletesDF, "delete", currentTile)
                 }
+                case _ => {
+                  val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").filter($"tail.ts" > $"head.ts").selectExpr(pks.map(x => s"tail.$x"): _*)
+                  jsonToParquet(newInsertsDF, "insert", currentTile)
+                  jsonToParquet(newUpdatesDF, "update", currentTile)
+                  jsonToParquet(newDeletesDF, "delete", currentTile)
+                }
+              }
 
-               keyspacesConn.withSessionDo {
-                  session => session.execute(s"BEGIN UNLOGGED BATCH " +
+              keyspacesConn.withSessionDo {
+                session =>
+                  session.execute(s"BEGIN UNLOGGED BATCH " +
                     s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'tail','SUCCESS', toTimestamp(now()), '');" +
                     s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'head','SUCCESS', toTimestamp(now()), '');" +
                     s"APPLY BATCH;")
-                }
+              }
             }
           }
         }
@@ -492,11 +495,11 @@ object GlueApp {
             val head = Option(rsHead)
             val tailLoadStatus = tail match {
               case t if !t.isEmpty => rsTail.getString("load_status")
-              case _=> ""
+              case _ => ""
             }
             val headLoadStatus = head match {
               case h if !h.isEmpty => rsHead.getString("load_status")
-              case _=> ""
+              case _ => ""
             }
 
             logger.info(s"Processing $tile, head is $head, tail is $tail, head status is $headLoadStatus, tail status is $tailLoadStatus")
@@ -517,7 +520,7 @@ object GlueApp {
                     s"BEGIN UNLOGGED BATCH " +
                       s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','');" +
                       s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','');" +
-                    s"APPLY BATCH;"
+                      s"APPLY BATCH;"
                   )
                 }
               }

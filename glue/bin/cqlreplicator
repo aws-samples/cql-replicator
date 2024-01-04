@@ -4,7 +4,8 @@
 # // SPDX-License-Identifier: Apache-2.0
 #
 # Migration parameters
-MIGRATOR_VERSION=0.2
+MIGRATOR_VERSION=0.3
+DESCRIPTION="Toolbox for Amazon Keyspaces"
 JOB_NAME=CQLReplicator
 TILES=2
 PROCESS_TYPE_DISCOVERY=discovery
@@ -33,6 +34,8 @@ KEYS_PER_TILE=0
 ROWS_PER_WORKER=250000
 # Target type might be keyspace or parquet
 TARGET_TYPE=keyspaces
+SKIP_GLUE_CONNECTOR=false
+OS=$(uname -a | awk '{print $1}')
 
 # Progress bar configuration
 PS=40
@@ -67,9 +70,21 @@ cat << "EOF"
 ·······································································
 EOF
 
+# preflight checks
 command -v aws -v >/dev/null 2>&1 || { echo >&2 "aws cli requires but it's not installed.  Aborting."; exit 1; }
 command -v curl -V >/dev/null 2>&1 || { echo >&2 "curl requires but it's not installed.  Aborting."; exit 1; }
 command -v bc -v >/dev/null 2>&1 || { echo >&2 "bc requires but it's not installed. Aborting. You could try to run: sudo yum install bc -y"; exit 1; }
+
+log() {
+  echo "[$(date -Iseconds)]" "$@"
+}
+
+if [[ "$OS" == Linux || "$OS" == Darwin ]]; then
+  log "OS: $OS"
+else
+  log "ERROR: Please run this script in AWS CloudShell or Linux/Darwin"
+  exit 1
+fi
 
 function check_input() {
   local input=$1
@@ -159,10 +174,6 @@ function barrier() {
   done
 }
 
-log() {
-  echo "[$(date -Iseconds)]" "$@"
-}
-
 function Usage_Exit {
   log "$0 [--state init/run/request-stop|--tiles number of tiles|--landing-zone s3Uri|--writetime-column col3|\
   --src-keyspace keyspace_name|--src-table table_name|--trg-keyspace keyspace_name|--trg-table table_name]"
@@ -177,6 +188,7 @@ function Usage_Exit {
 
 function Clean_Up {
   check_input "$S3_LANDING_ZONE" "ERROR:landing zone parameter is empty, must be provided"
+  check_input "$AWS_REGION" "ERROR: AWS Region is empty, must be provided"
   aws s3 rm "$S3_LANDING_ZONE" --recursive
   aws s3 rb "$S3_LANDING_ZONE"
   local connection_name
@@ -187,10 +199,15 @@ function Clean_Up {
 }
 
 function Init {
-  check_input "$AZ" "ERROR:availability zone is, must be provided"
-  check_input "$SUBNET" "ERROR:subnet is empty, must be provided"
-  check_input "$SG" "ERROR:sg is empty, must be provided"
+  if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
+      check_input "$AZ" "ERROR:availability zone is, must be provided"
+      check_input "$SUBNET" "ERROR:subnet is empty, must be provided"
+      check_input "$SG" "ERROR:sg is empty, must be provided"
+  else
+      log "Skipping glue connector creation"
+  fi
   check_input "$AWS_REGION" "ERROR:region is empty, must be provided"
+  log "TARGET TYPE: $TARGET_TYPE"
 
   AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
   log "Starting initialization process for AWS account:$AWS_ACCOUNT"
@@ -264,43 +281,64 @@ function Init {
     fi
   fi
 
-  progress 3 5 "Creating Glue connector and CQLReplicator job       "
-
   # Create Glue Connector
   local glue_conn_name
-  glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
-  aws glue create-connection --connection-input '{
-   "Name":"'$glue_conn_name'",
-   "Description":"CQLReplicator connection to the C* cluster",
-   "ConnectionType":"NETWORK",
-   "ConnectionProperties":{
-   "JDBC_ENFORCE_SSL": "false"
-  },
-   "PhysicalConnectionRequirements":{
-   "SubnetId":"'$SUBNET'",
-   "SecurityGroupIdList":['$SG'],
-   "AvailabilityZone":"'$AZ'"}
-   }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
+  if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
+      progress 3 5 "Creating Glue connector and CQLReplicator job       "
+      glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
+      aws glue create-connection --connection-input '{
+       "Name":"'$glue_conn_name'",
+       "Description":"CQLReplicator connection to the C* cluster",
+       "ConnectionType":"NETWORK",
+       "ConnectionProperties":{
+       "JDBC_ENFORCE_SSL": "false"
+      },
+       "PhysicalConnectionRequirements":{
+       "SubnetId":"'$SUBNET'",
+       "SecurityGroupIdList":['$SG'],
+       "AvailabilityZone":"'$AZ'"}
+       }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
 
-  # Create Glue Jobs
-  aws glue create-job \
-    --name "CQLReplicator" \
-    --role "$GLUE_IAM_ROLE" \
-    --description "Migration tool for Amazon Keyspaces" \
-    --glue-version "4.0" \
-    --number-of-workers 2 \
-    --worker-type "G.1X" \
-    --connections "Connections=$glue_conn_name" \
-    --command "Name=gluestreaming,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator.scala" \
-    --execution-property '{"MaxConcurrentRuns": 16}' \
-    --max-retries 1 \
-    --region "$AWS_REGION" \
-    --default-arguments '{
-        "--job-language":"scala",
-        "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
-        "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions",
-        "--class":"GlueApp"
-    }' > /dev/null
+       aws glue create-job \
+           --name "CQLReplicator" \
+           --role "$GLUE_IAM_ROLE" \
+           --description "$DESCRIPTION" \
+           --glue-version "4.0" \
+           --number-of-workers 2 \
+           --worker-type "G.1X" \
+           --connections "Connections=$glue_conn_name" \
+           --command "Name=gluestreaming,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator.scala" \
+           --execution-property '{"MaxConcurrentRuns": 16}' \
+           --max-retries 1 \
+           --region "$AWS_REGION" \
+           --default-arguments '{
+               "--job-language":"scala",
+               "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
+               "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions",
+               "--class":"GlueApp"
+           }' > /dev/null
+   fi
+
+  if [[ $SKIP_GLUE_CONNECTOR == true ]]; then
+      progress 3 5 "Creating CQLReplicator job                          "
+      aws glue create-job \
+          --name "CQLReplicator" \
+          --role "$GLUE_IAM_ROLE" \
+          --description "$DESCRIPTION" \
+          --glue-version "4.0" \
+          --number-of-workers 2 \
+          --worker-type "G.1X" \
+          --command "Name=gluestreaming,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator.scala" \
+          --execution-property '{"MaxConcurrentRuns": 16}' \
+          --max-retries 1 \
+          --region "$AWS_REGION" \
+          --default-arguments '{
+              "--job-language":"scala",
+              "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
+              "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions",
+              "--class":"GlueApp"
+              }' > /dev/null
+  fi
 
   progress 4 5 "Creating CQLReplicator's internal keyspace and table"
 
@@ -552,7 +590,14 @@ while (( "$#" )); do
       check_input "$OFFLOAD_LARGE_OBJECTS" "offload large objects parameter must not be empty"
       validate_json "$OFFLOAD_LARGE_OBJECTS"
       log "Provided a configuration to offload large objects:" "$OFFLOAD_LARGE_OBJECTS"
-      OFFLOAD_LARGE_OBJECTS_B64=$(echo "$OFFLOAD_LARGE_OBJECTS" | base64 -w 0)
+      # Should work for AWS CloudShell, use 0 to disable line wrapping
+      if [[ $OS == Linux ]]; then
+          OFFLOAD_LARGE_OBJECTS_B64=$(echo "$OFFLOAD_LARGE_OBJECTS" | base64 -w 0)
+      fi
+      # Use base64 without params for MacOS instead
+      if [[ $OS == Darwin ]]; then
+          OFFLOAD_LARGE_OBJECTS_B64=$(echo "$OFFLOAD_LARGE_OBJECTS" | base64)
+      fi
       shift 2
       ;;
     --stats|-s)
@@ -583,6 +628,10 @@ while (( "$#" )); do
     --target-type|-j)
       TARGET_TYPE="$2"
       shift 2
+      ;;
+    --skip-glue-connector)
+      SKIP_GLUE_CONNECTOR=true
+      shift 1
       ;;
     --)
       shift
@@ -634,7 +683,7 @@ if [[ $STATE == init ]]; then
 fi
 
 if [[ $STATE == cleanup ]]; then
-  log "Deleting deployed artifacts: Glue connection, S3 bucket, and Glue job"
+  log "Deleting deployed artifacts: the glue connection (optional), the S3 bucket, and the glue job"
   Clean_Up
 fi
 

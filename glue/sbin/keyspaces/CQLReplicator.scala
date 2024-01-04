@@ -3,6 +3,7 @@
  * // SPDX-License-Identifier: Apache-2.0
  */
 // Target Amazon Keyspaces
+
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.GlueArgParser
@@ -288,7 +289,7 @@ object GlueApp {
       compact(render(jsonNew))
     }
 
-    def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, ver: String): Unit = {
+    def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int): Unit = {
       df.rdd.foreachPartition(
         partition => {
           val retryConfig = RetryConfig.custom.maxAttempts(MAX_RETRY_ATTEMPTS).
@@ -393,18 +394,18 @@ object GlueApp {
           case "decimal" => row.getDecimal(position)
           case "tinyint" => row.getByte(position)
           case "uuid" => row.getString(position)
-          case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'","")}"
+          case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
           case _ => throw new CassandraTypeException(s"Unrecognized data type $colType")
         }
         whereStmt.append(s"$colName=$v")
         el._2 match {
-          case i if i < columns.size - 1 => whereStmt.append (" and ")
+          case i if i < columns.size - 1 => whereStmt.append(" and ")
           case _ =>
         }
       }
-        whereStmt.toString
-      }
+      whereStmt.toString
+    }
 
     def dataReplicationProcess() {
       keyspacesConn.withSessionDo {
@@ -426,11 +427,11 @@ object GlueApp {
                 val sourceDf = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/$loc")
                 val sourceDfV2 = sourceDf.drop("group").drop("ts")
                 val tile = location._2
-                val ver = location._3
 
-                persistToTarget(shuffleDfV2(sourceDfV2), columns, columnsPos, tile, ver)
+                persistToTarget(shuffleDfV2(sourceDfV2), columns, columnsPos, tile)
+
                 keyspacesConn.withSessionDo {
-                  session => session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'$ver','SUCCESS', toTimestamp(now()), '')")
+                  session => session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
                 }
 
                 val cnt = sourceDfV2.count()
@@ -443,41 +444,39 @@ object GlueApp {
 
             if ((heads > 0 && tails > 0) || (heads == 0 && tails > 0)) {
 
-              logger.info("Processing delta")
-              locations.foreach(location => {
-                val loc = location._1
-                val ver = location._3
+              logger.info("Processing delta...")
 
-                val tile = location._2
-                val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail").drop("group")
-                val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head").drop("group")
-                val newInsertsDF = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti")
+              val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail").drop("group")
+              val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head").drop("group")
+              val newInsertsDF = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti")
 
-                if (!columnTs.equals("None")) {
+              columnTs match {
+                case "None" => {
+                  persistToTarget(newInsertsDF, columns, columnsPos, currentTile)
+                }
+                case _ => {
                   val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").filter($"tail.ts" > $"head.ts").selectExpr(pks.map(x => s"tail.$x"): _*)
                   if (newInsertsDF.count() > 0 || newUpdatesDF.count() > 0) {
                     //logger.info("Detected a change in C*")
-                    val sourceDfV3 = newInsertsDF.drop("ts", "group").union(newUpdatesDF)
-                    persistToTarget(sourceDfV3, columns, columnsPos, tile, ver)
-                  }
-                } else {
-                  if (newInsertsDF.count() > 0) {
-                    //logger.info("Detected a insert in C*")
-                    val sourceDfV3 = newInsertsDF.drop("ts", "group")
-                    persistToTarget(sourceDfV3, columns, columnsPos, tile, ver)
+                    val sourceDfV3 = newInsertsDF.union(newUpdatesDF)
+                    persistToTarget(sourceDfV3, columns, columnsPos, currentTile)
                   }
                 }
-                keyspacesConn.withSessionDo {
-                  session => session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'$ver','SUCCESS', toTimestamp(now()), '')")
-                }
-              })
+              }
+
+              keyspacesConn.withSessionDo {
+                session =>
+                  session.execute(s"BEGIN UNLOGGED BATCH " +
+                    s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'tail','SUCCESS', toTimestamp(now()), '');" +
+                    s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'head','SUCCESS', toTimestamp(now()), '');" +
+                    s"APPLY BATCH;")
+              }
             }
           }
         }
       }
     }
 
-    // partitonBy instead of repartition
     def keysDiscoveryProcess() {
       val primaryKeysDf = sparkSession.read.option("inferSchema", "true").table(source)
       val primaryKeysDfwithTS = primaryKeysDf.selectExpr(pkFinal.map(c => c): _*)
@@ -493,11 +492,11 @@ object GlueApp {
             val head = Option(rsHead)
             val tailLoadStatus = tail match {
               case t if !t.isEmpty => rsTail.getString("load_status")
-              case _=> ""
+              case _ => ""
             }
             val headLoadStatus = head match {
               case h if !h.isEmpty => rsHead.getString("load_status")
-              case _=> ""
+              case _ => ""
             }
 
             logger.info(s"Processing $tile, head is $head, tail is $tail, head status is $headLoadStatus, tail status is $tailLoadStatus")
@@ -514,8 +513,12 @@ object GlueApp {
 
               keyspacesConn.withSessionDo {
                 session => {
-                  session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','')")
-                  session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
+                  session.execute(
+                    s"BEGIN UNLOGGED BATCH " +
+                      s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','');" +
+                      s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','');" +
+                      s"APPLY BATCH;"
+                  )
                 }
               }
             }

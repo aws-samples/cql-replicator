@@ -45,24 +45,43 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
                   --glue-iam-role glue-cassandra-migration --landing-zone s3://cql-replicator-1234567890-us-west-2
 ```
 
-`--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the self-referencing
+`--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the
+self-referencing
 inbound rule for all traffic.
 `--subnet` - this is the subnet to which the Cassandra cluster belongs.
 `--az` - this is the AZ of the subnet
-`--region` - AWS region where the Cassandra cluster is deployed 
-`glue-iam-role` - you need [the IAM role permissions](https://docs.aws.amazon.com/glue/latest/dg/create-an-iam-role.html)
+`--region` - AWS region where the Cassandra cluster is deployed
+`glue-iam-role` - you
+need [the IAM role permissions](https://docs.aws.amazon.com/glue/latest/dg/create-an-iam-role.html)
 that AWS Glue can assume when calling other services on your behalf. Services: Amazon Keyspaces and S3
-`--landing zone` - this is an optional parameter because can reuse any existing S3 buckets. 
-If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate files.
+`--landing zone` - this is an optional parameter, you can reuse any existing S3 buckets in the AWS account.
+If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
+files.
+`--target-type` - this is an optional parameter, the default value is `keyspaces`, but you might want to offload data
+directly to S3
+in parquet format by setting to `parquet`.
+`--skip-glue-connector` - this is an optional parameter that allows you to skip the glue connector creation step.
+
+```shell
+    cqlreplicator --state init --region us-west-2 \ 
+                  --skip-glue-connector \
+                  --glue-iam-role glue-cassandra-migration \
+                  --landing-zone s3://cql-replicator-1234567890-us-west-2 \
+                  --target-type parquet
+```
 
 After running this command, you should find in the AWS account:
+
 1. CQLReplicator Glue job and Glue connector in AWS Glue
 2. Amazon S3 bucket that stores the artifacts
 3. Keyspace `migration` and `ledger` table in Amazon Keyspaces
 
 ## Start migration process
-To operate CQLReplicator on AWS Glue, you need to use `--state run` command, followed by a series of parameters. The precise
-configuration of these is primarily determined by your unique migration requirements. For instance, these settings may vary 
+
+To operate CQLReplicator on AWS Glue, you need to use `--state run` command, followed by a series of parameters. The
+precise
+configuration of these is primarily determined by your unique migration requirements. For instance, these settings may
+vary
 if you choose to replicate TTLs, updates, or offloading objects exceeding 1MB to Amazon S3.
 
 Let's run the following command to replicate the workload from the Cassandra cluster to Amazon Keyspaces.
@@ -99,8 +118,11 @@ on the target table before running the following command
 ```
 
 ### Offload large objects
-Before running the migration process configure [lifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html)
-for the S3 bucket to delete objects after expiration.
+
+Before running the migration process
+configure [lifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html)
+for the S3 bucket to delete objects after expiration. The xref column should be present in the source and the target
+tables before running the cqlreplicator.
 ```shell
 ./cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --src-keyspace ks_test_cql_replicator \
                 --src-table test_cql_replicator --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
@@ -129,5 +151,5 @@ To obtain the number of rows replicated during the back filling phase, run the f
 ## Clean up
 The following command will delete the Glue job, connector, the S3 bucket, and Keyspaces'table ledger:
 ```shell
-   cqlreplicator --state cleanup --landing-zone s3://cql-replicator-1234567890-us-west-2
+   cqlreplicator --state cleanup --landing-zone s3://cql-replicator-1234567890-us-west-2 --region "us-west-2"
 ```

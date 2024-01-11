@@ -35,6 +35,7 @@ ROWS_PER_WORKER=250000
 # Target type might be keyspace or parquet
 TARGET_TYPE=keyspaces
 SKIP_GLUE_CONNECTOR=false
+SKIP_KEYSPACES_LEDGER=false
 OS=$(uname -a | awk '{print $1}')
 
 # Progress bar configuration
@@ -195,7 +196,9 @@ function Clean_Up {
   connection_name=$(aws glue get-job --job-name CQLReplicator --query 'Job.Connections.Connections[0]' --output text)
   aws glue delete-connection --connection-name "$connection_name" --region "$AWS_REGION"
   aws glue delete-job --job-name CQLReplicator --region "$AWS_REGION"
-  aws keyspaces delete-keyspace --keyspace-name migration --region "$AWS_REGION"
+  if [[ $SKIP_KEYSPACES_LEDGER == false ]]; then
+    aws keyspaces delete-keyspace --keyspace-name migration --region "$AWS_REGION"
+  fi
 }
 
 function Init {
@@ -340,72 +343,79 @@ function Init {
               }' > /dev/null
   fi
 
-  progress 4 5 "Creating CQLReplicator's internal keyspace and table"
+  if [[ $SKIP_KEYSPACES_LEDGER == true ]]; then
+    progress 4 5 "Skipping CQLReplicator's internal keyspace"
+    progress 5 5 "Skipping CQLReplicator's internal table"
+  fi
 
-  # Create a keyspace - migration
-  aws keyspaces create-keyspace --keyspace-name migration --region "$AWS_REGION" > /dev/null
-  sleep 20
+  if [[ $SKIP_KEYSPACES_LEDGER == false ]]; then
+    progress 4 5 "Creating CQLReplicator's internal keyspace and table"
+    # Create a keyspace - migration
+    aws keyspaces create-keyspace --keyspace-name migration --region "$AWS_REGION" > /dev/null
+    sleep 20
 
-  # Create a table - ledger
-  aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{
-  "allColumns": [
-    {
-      "name": "ks",
-      "type": "text"
-    },
-    {
-      "name": "tbl",
-      "type": "text"
-    },
-    {
-      "name": "tile",
-      "type": "int"
-    },
-    {
-      "name": "ver",
-      "type": "text"
-    },
-    {
-      "name": "dt_load",
-      "type": "timestamp"
-    },
-    {
-      "name": "dt_offload",
-      "type": "timestamp"
-    },
-    {
-      "name": "load_status",
-      "type": "text"
-    },
-    {
-      "name": "location",
-      "type": "text"
-    },
-    {
-      "name": "offload_status",
-      "type": "text"
-    }
-  ],
-  "partitionKeys": [
-    {
-      "name": "ks"
-    },
-    {
-      "name": "tbl"
-    }
-  ],
-  "clusteringKeys": [
-    {
-      "name": "tile",
-      "orderBy": "ASC"
-    },
-    {
-      "name": "ver",
-      "orderBy": "ASC"
-    }
-  ]
-}' --region "$AWS_REGION" > /dev/null
-progress 5 5 "Creating CQLReplicator's internal keyspace and table"
+    # Create a table - ledger
+    aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{
+    "allColumns": [
+      {
+        "name": "ks",
+        "type": "text"
+      },
+      {
+        "name": "tbl",
+        "type": "text"
+      },
+      {
+        "name": "tile",
+        "type": "int"
+      },
+      {
+        "name": "ver",
+        "type": "text"
+      },
+      {
+        "name": "dt_load",
+        "type": "timestamp"
+      },
+      {
+        "name": "dt_offload",
+        "type": "timestamp"
+      },
+      {
+        "name": "load_status",
+        "type": "text"
+      },
+      {
+        "name": "location",
+        "type": "text"
+      },
+      {
+        "name": "offload_status",
+        "type": "text"
+      }
+    ],
+    "partitionKeys": [
+      {
+        "name": "ks"
+      },
+      {
+        "name": "tbl"
+      }
+    ],
+    "clusteringKeys": [
+      {
+        "name": "tile",
+        "orderBy": "ASC"
+      },
+      {
+        "name": "ver",
+        "orderBy": "ASC"
+      }
+    ]
+  }' --region "$AWS_REGION" > /dev/null
+  progress 5 5 "Creating CQLReplicator's internal keyspace and table"
+fi
+
 log "Deploy is completed"
 }
 
@@ -631,6 +641,10 @@ while (( "$#" )); do
       ;;
     --skip-glue-connector)
       SKIP_GLUE_CONNECTOR=true
+      shift 1
+      ;;
+    --skip-keyspaces-ledger)
+      SKIP_KEYSPACES_LEDGER=true
       shift 1
       ;;
     --)

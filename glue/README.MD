@@ -45,22 +45,23 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
                   --glue-iam-role glue-cassandra-migration --landing-zone s3://cql-replicator-1234567890-us-west-2
 ```
 
-`--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the
-self-referencing
-inbound rule for all traffic.
-`--subnet` - this is the subnet to which the Cassandra cluster belongs.
-`--az` - this is the AZ of the subnet
-`--region` - AWS region where the Cassandra cluster is deployed
-`glue-iam-role` - you
-need [the IAM role permissions](https://docs.aws.amazon.com/glue/latest/dg/create-an-iam-role.html)
-that AWS Glue can assume when calling other services on your behalf. Services: Amazon Keyspaces and S3
-`--landing zone` - this is an optional parameter, you can reuse any existing S3 buckets in the AWS account.
-If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
-files.
-`--target-type` - this is an optional parameter, the default value is `keyspaces`, but you might want to offload data
-directly to S3
-in parquet format by setting to `parquet`.
-`--skip-glue-connector` - this is an optional parameter that allows you to skip the glue connector creation step.
+- `--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the
+  self-referencing
+  inbound rule for all traffic.
+- `--subnet` - this is the subnet to which the Cassandra cluster belongs.
+- `--az` - this is the AZ of the subnet
+- `--region` - AWS region where the Cassandra cluster is deployed
+- `--glue-iam-role` - you
+  need [the IAM role permissions](https://docs.aws.amazon.com/glue/latest/dg/create-an-iam-role.html)
+  that AWS Glue can assume when calling other services on your behalf. Services: Amazon Keyspaces and S3
+- `--landing zone` - this is an optional parameter, you can reuse any existing S3 buckets in the AWS account.
+  If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
+  files.
+- `--target-type` - this is an optional parameter, the default value is `keyspaces`, but you might want to offload data
+  directly to S3 in parquet format by setting to `parquet`.
+- `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step.
+- `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
+  Keyspaces migration.ledger)
 
 ```shell
     cqlreplicator --state init --region us-west-2 \ 
@@ -70,7 +71,7 @@ in parquet format by setting to `parquet`.
                   --target-type parquet
 ```
 
-After running this command, you should find in the AWS account:
+After running the below command, you should find in the AWS account:
 
 1. CQLReplicator Glue job and Glue connector in AWS Glue
 2. Amazon S3 bucket that stores the artifacts

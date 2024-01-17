@@ -53,7 +53,7 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
 - `--glue-iam-role` - you
   need [the IAM role permissions](https://docs.aws.amazon.com/glue/latest/dg/create-an-iam-role.html)
   that AWS Glue can assume when calling other services on your behalf. Services: Amazon Keyspaces and S3
-- `--landing zone` - this is an optional parameter, you can reuse any existing S3 buckets in the AWS account
+- `--landing-zone` - this is an optional parameter, you can reuse any existing S3 buckets in the AWS account
   If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
   files
 - `--target-type` - this is an optional parameter, the default value is `keyspaces`, available options: `parquet`

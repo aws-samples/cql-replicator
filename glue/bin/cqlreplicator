@@ -268,9 +268,11 @@ function Init {
   if [[ $TARGET_TYPE == "memorydb" ]]; then
     uploader_helper "RedisConnector.conf" 0 1 5
   fi
-  if [[ $TARGET_TYPE == "keyspaces" ]]; then
-    uploader_helper "KeyspacesConnector.conf" 0 1 5
-  fi
+
+  # Should be used at least for the ledger
+  uploader_helper "KeyspacesConnector.conf" 0 1 5
+
+  # Source C*/K*
   uploader_helper "CassandraConnector.conf" 1 2 5
 
   local glue_bucket_artifacts=s3://aws-glue-assets-"$AWS_ACCOUNT"-"$AWS_REGION"

@@ -46,20 +46,19 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
 ```
 
 - `--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the
-  self-referencing
-  inbound rule for all traffic.
-- `--subnet` - this is the subnet to which the Cassandra cluster belongs.
+  self-referencing inbound rule for all traffic
+- `--subnet` - this is the subnet to which the Cassandra cluster belongs
 - `--az` - this is the AZ of the subnet
 - `--region` - AWS region where the Cassandra cluster is deployed
 - `--glue-iam-role` - you
   need [the IAM role permissions](https://docs.aws.amazon.com/glue/latest/dg/create-an-iam-role.html)
   that AWS Glue can assume when calling other services on your behalf. Services: Amazon Keyspaces and S3
-- `--landing zone` - this is an optional parameter, you can reuse any existing S3 buckets in the AWS account.
+- `--landing zone` - this is an optional parameter, you can reuse any existing S3 buckets in the AWS account
   If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
-  files.
-- `--target-type` - this is an optional parameter, the default value is `keyspaces`, but you might want to offload data
-  directly to S3 in parquet format by setting to `parquet`.
-- `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step.
+  files
+- `--target-type` - this is an optional parameter, the default value is `keyspaces`, available options: `parquet`
+  ,and `memorydb`
+- `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
   Keyspaces migration.ledger)
 
@@ -96,8 +95,8 @@ Let's run the following command to replicate the workload from the Cassandra clu
 Your source keyspace and table `ks_test_cql_replicator.test_cql_replicator` in the Cassandra cluster.
 Your target keyspace and table `ks_test_cql_replicator.test_cql_replicator` in Amazon Keyspaces.
 Parameter `--inc-traffic` - enables incremental traffic to not overload the Cassandra Cluster and Amazon Keyspaces
-with high number of requests. CQLReplicator is going to increase traffic every 2 minutes. In the following
-example with 8 tiles, one avg. Cassandra row is under 1KB, the traffic is going to be increased by 12.5% 
+with high number of requests. CQLReplicator is going to increase traffic every 4 minutes. In the following
+example with 8 tiles, one avg. Cassandra row is under 1KB, the traffic is going to be increased by 12.5%
 every 2 minutes. At peak traffic, it can reach up to 22,400 WCUs per second.
 
 ![](../img.png "Incremental traffic")

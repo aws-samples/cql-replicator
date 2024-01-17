@@ -155,7 +155,8 @@ object GlueApp {
       }
     }
 
-    val WAIT_TIME = 10000
+    // Cooldown period 60s let's spark to remove RDDs and release resources
+    val WAIT_TIME = 60000
     val MAX_RETRY_ATTEMPTS = 256
     // Unit ms
     val EXP_BACKOFF = 25
@@ -247,10 +248,20 @@ object GlueApp {
       }
     }
 
+    def removeLeadingEndingSlashes(str: String): String = {
+      str.
+        stripPrefix("/").
+        stripSuffix("/")
+    }
+
+    def removeS3prefixIfPresent(str: String): String = {
+      str.stripPrefix("s3://")
+    }
+
     def offloadToS3(jPayload: org.json4s.JValue, s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3): JValue = {
       val columnName = (offloadLargeObjects \ "column").values.toString
-      val bucket = (offloadLargeObjects \ "bucket").values.toString
-      val prefix = (offloadLargeObjects \ "prefix").values.toString
+      val bucket = removeS3prefixIfPresent((offloadLargeObjects \ "bucket").values.toString)
+      val prefix = removeLeadingEndingSlashes((offloadLargeObjects \ "prefix").values.toString)
       val xrefColumnName = (offloadLargeObjects \ "xref").values.toString
       val key = java.util.UUID.randomUUID.toString
       val largeObject = (jPayload \ columnName).values.toString
@@ -429,10 +440,7 @@ object GlueApp {
                 val tile = location._2
 
                 persistToTarget(shuffleDfV2(sourceDfV2), columns, columnsPos, tile)
-
-                keyspacesConn.withSessionDo {
-                  session => session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
-                }
+                session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
 
                 val cnt = sourceDfV2.count()
                 val content = s"""{"tile":$tile, "primaryKeys":$cnt}"""
@@ -446,8 +454,12 @@ object GlueApp {
 
               logger.info("Processing delta...")
 
-              val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail").drop("group")
-              val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head").drop("group")
+              val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail")
+                .drop("group")
+                .persist(StorageLevel.MEMORY_AND_DISK_SER)
+              val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head")
+                .drop("group")
+                .persist(StorageLevel.MEMORY_AND_DISK_SER)
               val newInsertsDF = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti")
 
               columnTs match {
@@ -455,25 +467,30 @@ object GlueApp {
                   persistToTarget(newInsertsDF, columns, columnsPos, currentTile)
                 }
                 case _ => {
-                  val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").filter($"tail.ts" > $"head.ts").selectExpr(pks.map(x => s"tail.$x"): _*)
-                  if (newInsertsDF.count() > 0 || newUpdatesDF.count() > 0) {
-                    //logger.info("Detected a change in C*")
+                  val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").
+                    filter($"tail.ts" > $"head.ts").
+                    selectExpr(pks.map(x => s"tail.$x"): _*).
+                    persist(StorageLevel.MEMORY_AND_DISK_SER)
+                  if (!(newInsertsDF.isEmpty && newUpdatesDF.isEmpty)) {
                     val sourceDfV3 = newInsertsDF.union(newUpdatesDF)
                     persistToTarget(sourceDfV3, columns, columnsPos, currentTile)
                   }
+                  newUpdatesDF.unpersist()
                 }
               }
 
-              keyspacesConn.withSessionDo {
-                session =>
-                  session.execute(s"BEGIN UNLOGGED BATCH " +
-                    s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'tail','SUCCESS', toTimestamp(now()), '');" +
-                    s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'head','SUCCESS', toTimestamp(now()), '');" +
-                    s"APPLY BATCH;")
-              }
+              dfTail.unpersist()
+              dfHead.unpersist()
+
+              session.execute(s"BEGIN UNLOGGED BATCH " +
+                s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'tail','SUCCESS', toTimestamp(now()), '');" +
+                s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'head','SUCCESS', toTimestamp(now()), '');" +
+                s"APPLY BATCH;")
+
             }
           }
         }
+          session.close()
       }
     }
 
@@ -565,6 +582,7 @@ object GlueApp {
             sys.exit()
           }
         }
+        logger.info(s"Cooldown period $WAIT_TIME ms")
         Thread.sleep(WAIT_TIME)
       }
     }

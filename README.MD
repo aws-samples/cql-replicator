@@ -1,147 +1,161 @@
-## CQLReplicator
+## NoSQL migration guide for purpose built databases with CQLReplicator
 
-The aim of this project is to assist customers is seamlessly migrating from self-managed Cassandra to Amazon Keyspaces,
-ensuring zero downtime. This means that customers can replicate their existing Cassandra workload in to Amazon Keyspaces,
-without needing to make any changes to their client-side code or using proxies.
+Welcome to the NoSQL migration guide. This guide is designed to assist you in migration your data from Cassandra to
+purpose-built NoSQL databases on AWS using CQLReplicator.
 
-### Architecture
+The guide covers multiple migration use cases, providing detailed instructions and examples to help you understand
+the process. Whether you're moving data from Cassandra to Amazon Keyspaces, S3, or Amazon MemoryDB for Redis.
 
-Customers have the flexibility to scale the migration workload by deploying multiple instances of CQLReplicator. Each instance
-of CQLReplicator is a java process responsible for handling specific token range (tile). In the event of a CQLReplicator failure,
-customers can simply restart the migration process from the point where it was interrupted by restarting the failed 
-CQLReplicator instances.
+In addition to migration use cases, the guide explores how you can leverage your data for Data Analytics/ML and
+incremental
+backup. Lear how to extract insights from Amazon Keyspaces, optimize your storage, and make data-driven decisions.
 
-![](CQLReplicator.png)
+### Near zero downtime migration to Amazon Keyspaces
 
-### Prerequisites
+The objective of this use-case is to support customers in seamlessly migrating from self-managed Cassandra clusters to
+Amazon Keyspaces.
+This migration approach ensures zero downtime, no code compilation, predictable incremental traffic, and migration
+costs.
 
-List any prerequisites needed to run CQLReplicator, such as:
+![](usecase-cass-to-keyspaces.png "Migration to Amazon Keyspaces")
 
-- AWS account
-- Docker
-- ECS Copilot CLI
-- Gradle 7.4.2
+#### Step 1: Identify Migration Workload
 
-### Getting Started
+Identify the keyspaces and tables in your Cassandra cluster that you want to migrate. You can use the `DESCRIBE` command
+in `CQLSH` to list all keyspaces and tables.
 
- Set up and deploy CQLReplicator using [AWS ECS Copilot](https://aws.github.io/copilot-cli/docs/getting-started/install/). Include the following steps:
+#### Step 2: Check Functional Compatibility
 
-### Configuration
+Amazon Keyspaces is compatible with CQL 3.11 API(backward-compatibility with version 2.x). Check
+with [supported Cassandra APIs,
+operations, functions, and data types in Amazon Keyspaces](https://docs.aws.amazon.com/keyspaces/latest/devguide/cassandra-apis.html).
 
-1. Clone the repository:
+#### Step 3: Check Cassandra Cluster Capacity
 
-   ```bash
-   git clone https://github.com/aws-samples/cql-replicator
-   ```
+Ensure that you have enough capacity/resources (CPUs, memory, network throughput, and storage) on the Cassandra cluster
+to handle
+migration workload.
 
-2. Navigate into the project directory:
-   ```bash
-   cd cql-replicator
-   ```
-   Create a S3 bucket `cqlreplicator`. The bucket stores the artifacts:
-   `config.properties`, `KeyspacesConnector.conf`, and `CassandraConnector.conf` e.g, `s3:/bucketname/keyspace_name/table_name`
+#### Step 4: Estimate Migration Costs
 
-   ```bash
-   export CQLR_BUCKET_NAME=cqlreplicator #S3 Bucket to store the artifacts
-   export CQLR_KS_NAME=ks_test_cql_replicator #S3 prefix for the keyspace name
-   export CQLR_TBL_NAME=test_cql_replicator #S3 prefix for the table name
-   ```
+Estimate the number of rows per table in your Cassandra cluster. This will help you estimate the migration costs for
+AWS Glue (which be used for CQLReplicator) and Amazon Keyspaces (which will store the migrated data).
 
-3. Build CQLReplicator:
-   ```bash
-   gradle build
-   gradle task deploy
-   ```
+#### Step 5: Prepare Target Environment
 
-4. Initialize the ECS Copilot environment:
-Configure the required resources, such as VPC, S3 buckets etc., using the prompts provided by the `copilot init` command.
+Deploy Amazon Keyspaces tables that correspond to your Cassandra tables. Remember to pr-warm or provision these tables
+to ensure
+optimal performance.
 
-   ```bash
-   copilot app init cql-replicator
-   ```
+#### Step 6: Run CQLReplicator
 
-5. Configure CQLReplicator:
-   * Configure the source and target tables in `config.properties`
-   * Configure migrated columns in `config.properties`
-   * Configure write time of regular columns to detect updates in the source table in `config.properties`
-   * Configure connectivity to the source Cassandra cluster `CassandraConnector.conf`
-   * Configure connectivity to the target Keyspaces table `KeyspacesConnector.conf`
-   * Copy all artifacts to s3://your-bucket-name/keyspacename/tablename
+Follow the instructions provided in the [CQLReplicator documentation](glue/README.MD) to configure, initialize, and run
+the migration tool.
 
-6. Deploy the CQLReplicator cluster:
-Initiate and deploy the service, and the test environment,
+### Near zero downtime migration to Amazon MemoryDB
 
-   ```bash
-   copilot svc init --name cql-replicator-service
-   ```
-   ```bash
-   copilot env init --name test
-   ```
-   ```bash
-   copilot env deploy --name test
-   ```
-   ```bash
-   copilot svc deploy --name cql-replicator-service --env test
-   ```
+![](usecase-cass-to-memorydb.png "Migration to Amazon MemoryDB")
 
-### Usage
+The objective of this use-case is to support customers in seamlessly migrating from self-managed Cassandra clusters to
+Amazon MemoryDB.
+This migration approach ensures zero downtime, no code compilation, predictable incremental traffic, and migration
+costs.
 
-CQLReplicator will immediately start replicating the Cassandra workload when all ECS tasks are running.
-Before restarting or updating the ECS tasks delete `tiles` with the locking files from `s3://bucket/keyspace_name/table_name`.
+#### Step 1: Identify Migration Workload
 
-#### Define the number of tiles
+Identify the keyspaces and tables in your Cassandra cluster that you want to migrate. You can use the `DESCRIBE` command
+in `CQLSH` to list all keyspaces and tables.
 
-One CQLReplicator can handle up to 1M primary keys, if you want to handle over 1M please scale up ECS tasks.
+#### Step 2: Check with target structure on MemoryDB
 
-You can avoid high ECS costs by replicating the historical workload with AWS Glue and after
-enable `ENABLE_REPLICATION_POINT` to handle only new workload after specific timestamp.
+CQLReplicator performs two keys transformations:
+**Primary Key Conversion**: CQLReplicator converts the primary key from Cassandra into a string format for MemoryDB,
+e.g.
+a primary key composed of multiple partition and clustering keys would be transformed into a single `key1#key2#key3` in
+MemoryDB.
+**Regular columns as JSON**: Regular columns from Cassandra are stored as JSON text in MemoryDB. This allows for
+flexible and efficient
+data access in MemoryDB, as JSON is widely used data interchange format.
 
-#### Restarting the ECS cluster
+#### Step 3: Check Cassandra Cluster Capacity
 
-After restarting the ECS cluster, the CQLReplicator instances will start replicating
-from a scratch. To void losing previously replicated workload you might use two workarounds:
-* Use Amazon EFS instead of ephemeral storage in `manifest.yml` e.g, 
-   ```yaml
-   storage:
-     volumes:
-       myManagedEFSVolume:
-        efs: true
-        path: /var/efs
-        read_only: false
-   ```
-  and set `LOCAL_STORAGE_PATH` to `/var/efs` in `config.properties`
-* Set `ENABLE_REPLICATION_POINT` to `true` and `STARTING_REPLICATION_TIMESTAMP` to the most recent timestamp
-  in `config.properties`.
+Ensure that you have enough capacity/resources (CPUs, memory, network throughput, and storage) on the Cassandra cluster
+to handle
+migration workload.
 
-#### Avoid the high CPU utilization of the Cassandra cluster
+#### Step 4: Estimate Migration Costs
 
-CQLReplicator might add a CPU overhead due to pooling data periodically.If the CPU utilization is over 
-70% you can increase `POOLING_PERIOD` from 1 second to a higher value and scale down 
-the CQLReplicator instances by reducing `REPLICATE_WITH_CORE_POOL_SIZE` and
-`REPLICATE_WITH_MAX_CORE_POOL_SIZE` and decrease the number of CPUs per ECS task. 
-Finally, you might deploy another Cassandra DC to shift your migration workload to it.
+Estimate the number of rows per table in your Cassandra cluster. This will help you estimate the migration costs for
+AWS Glue (which be used for CQLReplicator) and traffic against Amazon MemoryDB (which will store the migrated data).
 
-### Limitations
+#### Step 5: Prepare Target Environment
 
-CQLReplicator doesn't support replication of counters
+[Deploy Amazon MemoryDB cluster](https://docs.aws.amazon.com/memorydb/latest/devguide/set-up.html) that correspond to
+your Cassandra tables.
 
-### Cleanup
+#### Step 6: Run CQLReplicator
 
-Delete the CQLReplicator ECS cluster:
+Follow the instructions provided in the [CQLReplicator documentation](glue/README.MD) to configure, initialize, and run
+the migration tool.
 
-   ```bash
-   copilot svc delete --name cql-replicator-service  
-   copilot app delete --name cql-replicator
-   ```
+### Use-case for materialized views with Amazon Keyspaces
 
-### Run one CQLReplicator instance locally (only for testing purposes)
+Materialized view (MV) is a powerful concept to manage and access your data. MV allows you to create a new table
+(the materialized view) that is differently partitioned. This allows you to create MVs that are optimized for
+your specific access pattern.
 
-  ```bash
-  java -XX:+UseShenandoahGC --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED \
-       -Dlogback.configurationFile=/path-to-logback/logback.xml \
-       -cp CQLReplicator-1.0-SNAPSHOT.jar com.amazon.aws.cqlreplicator.Starter --tile 0 --tiles 1 \
-       --pathToConfig /path-to-conf/conf
-  ```
+It's important to remember to provision enough Read Capacity Units (RCUs) on the source table. This ensures that
+your source table can handle the additional read workload from CQLReplicator without impacting of your other
+applications.
+
+The main change you need to do is to replace a content of `conf/CassandraConnector.conf`
+by `conf/KeyspacesConnector.conf`.
+So, that `conf/CassandraConnector.conf` points CQLReplicator to Amazon Keyspaces instead of Cassandra cluster.
+
+Follow the instructions provided in the [CQLReplicator documentation](glue/README.MD) to configure, initialize, and run
+your replication process between the source table (base table) and the target table (MV).
+
+![](usecase-keyspaces-gsi-mv.png "MV")
+
+By using MV concept and CQLReplicator, you can create efficient, scalable, and flexible data access patterns with
+Amazon Keyspaces.
+
+### Use-case for incremental backup with Amazon Keyspaces
+
+Incremental backups are another way to back up your Amazon Keyspaces data on Amazon S3. With incremental backups every
+2 minutes, only the data has changed since your last backup is persisted.
+
+CQLReplicator can be used to facilitate this process. You can point CQLReplicator to a source table in Amazon Keyspaces
+and a target Amazon S3 bucket. CQLReplicator flushes parquet files by 32MB into the Amazon S3 bucket.
+
+![](usecase-cass-to-S3.png "Incremental backup")
+
+The structure of the S3 prefix is as follows: `bucket-name/[tile]/[operation]/[timestamp]/*.parquet`.
+The tile is the current CQLReplicator number that handles an operation, from 0 to N tiles, the operations include
+`INSERT`, `UPDATE`, and `DELETE`, the timestamp is a local timestamp in following format `yyyy-mm-dd hh:mm:ss`.
+
+### Use-case for Analytics/ML with Amazon Keyspaces
+
+The incremental backup feature in CQLReplicator, facilitated by AWS Glue, not only ensures incremental data backup but
+also opens up opportunities for advanced analytics and machine learning (ML).
+
+![](usecase-keyspaces-analytics.png "Analytics/ML")
+
+The parquet files, stored in Amazon S3 as part of the backup process, can be directly used by various AWS services for
+analytics and ML purposes:
+
+1. **Amazon SageMaker**: You can use the Parquet files in Amazon SageMaker to train ML models. SageMaker provides a
+   complete
+   set of tools for every set of the ML workflow.
+2. **Amazon EMR**: Amazon EMR can process large amount of data stored in Parquet files. You can run big data frameworks
+   such as Apache Spark and Hadoop on EMR to analyze your data.
+3. **Amazon Athena**: Amazon Athena allows you to query data directly from S3 using standard SQl. You can use Athena to
+   run ad-hoc queries on Parquet files.
+4. **AWS Glue**: AWS Glue can catalog your Parquet files in S3 and make them available for ETL jobs. You can transform
+   your data and make it available for a wide range of analytics and ML services.
+
+By leveraging these services, you can extract valuable insights from your data, build predictive models, and make
+data-driven decisions.
 
 ### License
 

@@ -331,18 +331,18 @@ public class RowDiscoveryTaskV2 extends AbstractTaskV2 {
                                     }
 
                                 } else if (ts > bytesToLong(storageService.readRow(primaryKey)) && ts != 0L) {
-                                        storageService.writeRow(primaryKey, longToBytes(ts));
-                                        jsonColumnHashMapPerPartition.put(cl, preparePayload(jsonPayload));
-                                        upsertRow(ts, cl, jsonColumnHashMapPerPartition, "UPDATE");
-                                        if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
-                                            try {
-                                                targetStorageLargeObjectsOnS3.write(jsonPayload.getS3Payload(), primaryKey);
-                                            } catch (IOException e) {
-                                                LOGGER.error(e.getMessage());
-                                                throw new RuntimeException(e);
-                                            }
+                                    storageService.writeRow(primaryKey, longToBytes(ts));
+                                    jsonColumnHashMapPerPartition.put(cl, preparePayload(jsonPayload));
+                                    upsertRow(ts, cl, jsonColumnHashMapPerPartition, "UPDATE");
+                                    if (!config.getProperty("S3_OFFLOAD_COLUMNS").equals("NONE")) {
+                                        try {
+                                            targetStorageLargeObjectsOnS3.write(jsonPayload.getS3Payload(), primaryKey);
+                                        } catch (IOException e) {
+                                            LOGGER.error(e.getMessage());
+                                            throw new RuntimeException(e);
                                         }
                                     }
+                                }
                             });
         }
     }

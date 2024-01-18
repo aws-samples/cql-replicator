@@ -3,12 +3,15 @@ The objective of this project is to support customers in seamlessly migrating fr
 This migration approach ensures zero downtime, no code compilation, predictable incremental traffic, and reduced migration costs.
 
 ## Architecture
-This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue jobs of CQLReplicator. 
-Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per tile) to distribute migration workload evenly across Glue data processing units. 
-A single replication glue job (DPU - 0.25X) can push up to 2800 WCUs per second against the target table in Amazon Keyspaces.
+This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue
+jobs of CQLReplicator.
+Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per tile) to distribute migration
+workload evenly across Glue data processing units.
+A single replication glue job (DPU - 0.25X) can push up to 2800 WCUs per second against the target table in Amazon
+Keyspaces.
 This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
-![](../architecture-glue.png "CQLReplicator on Glue")
+![](architecture-glue.png "CQLReplicator on Glue")
 
 ## Prerequisites
 List of prerequisites needed to run CQLReplicator with AWS Glue, such as:
@@ -99,7 +102,7 @@ with high number of requests. CQLReplicator is going to increase traffic every 4
 example with 8 tiles, one avg. Cassandra row is under 1KB, the traffic is going to be increased by 12.5%
 every 2 minutes. At peak traffic, it can reach up to 22,400 WCUs per second.
 
-![](../img.png "Incremental traffic")
+![](../ecs/img.png "Incremental traffic")
 
 ### Replicate near-real time updates and inserts
 ```shell
@@ -149,7 +152,13 @@ To obtain the number of rows replicated during the back filling phase, run the f
 ```
 
 ## Clean up
+
 The following command will delete the Glue job, connector, the S3 bucket, and Keyspaces'table ledger:
+
 ```shell
    cqlreplicator --state cleanup --landing-zone s3://cql-replicator-1234567890-us-west-2 --region "us-west-2"
 ```
+
+## License
+
+This tool licensed under the Apache-2 License. See the LICENSE file.

@@ -36,7 +36,8 @@
     <logger name="org.iq80.leveldb.Logger" level="ERROR" additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
-    <logger name="com.amazon.aws.cqlreplicator.task.replication.DeletedRowDiscoveryTask" level="ERROR" additivity="false">
+    <logger name="com.amazon.aws.cqlreplicator.task.replication.DeletedRowDiscoveryTask" level="ERROR"
+            additivity="false">
         <appender-ref ref="ASYNC"/>
     </logger>
 </configuration>

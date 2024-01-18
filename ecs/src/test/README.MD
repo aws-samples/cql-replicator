@@ -1,8 +1,9 @@
-### Run one cassandra instance 
+### Run one cassandra instance
 
 ```bash
   docker run --name test-cql-replicator -d -e CASSANDRA_NUM_TOKENS=8 -p 9042:9042 cassandra:3.11
 ```
+
 ### Generate random cassandra workload
 
 ```bash

@@ -141,15 +141,30 @@ To stop migration process gracefully run the following command:
 ```
 
 ## Recover from failures
+
 Customers can simply restart the migration process from the point where it was interrupted by restarting failed jobs.
 In order, to restart failed CQLReplicator jobs, you need to re-run `--state run` with the same parameters.
 
 ## Get migration stats
+
 To obtain the number of rows replicated during the back filling phase, run the following command:
+
 ```shell
    cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-west-2 \ 
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
 ```
+
+## Cost optimization
+
+In order to reduce AWS Glue costs after the historical workload moved to the target storage:
+
+1. Stop the migration
+   process: `cqlreplicator --state request-stop --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator`
+2. Restart the migration process with the same number of tiles but lower number of
+   DPUs: `cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 500000`
 
 ## Clean up
 

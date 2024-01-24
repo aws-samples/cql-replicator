@@ -484,6 +484,7 @@ function Start_Discovery {
   log "LANDING ZONE:" "$S3_LANDING_ZONE"
   log "WRITE TIME COLUMN:" $WRITETIME_COLUMN
   log "TTL COLUMN:" $TTL_COLUMN
+  log "ROWS PER DPU:" $ROWS_PER_WORKER
   local workers=$((1 + TILES / 2))
   log "Checking if the discovery job is already running..."
   check_discovery_runs "true"

@@ -704,6 +704,10 @@ while (( "$#" )); do
       JSON_MAPPING="$2"
       shitf 2
       ;;
+    --override-rows-per-worker)
+      ROWS_PER_WORKER="$2"
+      shift 2
+      ;;
     --skip-glue-connector)
       SKIP_GLUE_CONNECTOR=true
       shift 1

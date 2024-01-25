@@ -27,8 +27,7 @@ in `CQLSH` to list all keyspaces and tables.
 #### Step 2: Check Functional Compatibility
 
 Amazon Keyspaces is compatible with CQL 3.11 API(backward-compatibility with version 2.x). Check
-with [supported Cassandra APIs,
-operations, functions, and data types in Amazon Keyspaces](https://docs.aws.amazon.com/keyspaces/latest/devguide/cassandra-apis.html).
+with [supported Cassandra APIs, operations, functions, and data types in Amazon Keyspaces](https://docs.aws.amazon.com/keyspaces/latest/devguide/cassandra-apis.html).
 
 #### Step 3: Check Cassandra Cluster Capacity
 
@@ -149,7 +148,7 @@ analytics and ML purposes:
    set of tools for every set of the ML workflow.
 2. **Amazon EMR**: Amazon EMR can process large amount of data stored in Parquet files. You can run big data frameworks
    such as Apache Spark and Hadoop on EMR to analyze your data.
-3. **Amazon Athena**: Amazon Athena allows you to query data directly from S3 using standard SQl. You can use Athena to
+3. **Amazon Athena**: Amazon Athena allows you to query data directly from S3 using standard SQL. You can use Athena to
    run ad-hoc queries on Parquet files.
 4. **AWS Glue**: AWS Glue can catalog your Parquet files in S3 and make them available for ETL jobs. You can transform
    your data and make it available for a wide range of analytics and ML services.
@@ -158,5 +157,47 @@ By leveraging these services, you can extract valuable insights from your data, 
 data-driven decisions.
 
 ### License
+
+### Use-case for Search with Amazon Keyspaces (Preview)
+
+CQLReplicator is a tool to replicate payloads (INSERTS, UPDATES) from Amazon Keyspaces to Amazon OpenSearch Service.
+
+![](usecase-keyspaces-search.png "Amazon OpenSearch Service")
+
+#### Step 1: Identify Migration Workload
+
+Identify the keyspaces and tables in your source that you want to replicate to Amazon OpenSearch Service.
+You can use the `DESCRIBE` command in `CQLSH` to list all keyspaces and tables.
+
+#### Step 2: Check target index structure on Amazon OpenSearch Service
+
+Create a search index `target_keyspace_name-target_table_name` Amazon OpenSearch Service (optional). if the search index
+doesn't exist
+CQLReplicator will create a simple schema that maps all your columns to search fields. All fields will be `text`.
+
+#### Step 3: Check Amazon Keyspaces table Capacity
+
+Ensure that you have enough RCUs (read capacity units) on the Keyspaces table to handle replication traffic.
+
+#### Step 4: Estimate Replication Costs
+
+Estimate the number of rows in your source table. This will help you estimate the replication costs for
+AWS Glue (which be used for CQLReplicator) and traffic against Amazon OpenSearch service.
+
+#### Step 5: Prepare Target Environment
+
+[Deploy Amazon OpenSearch Service](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/gsg.html) that
+correspond to
+your Amazon Keyspaces tables.
+
+#### Step 6: Run CQLReplicator
+
+Follow the instructions provided in the [CQLReplicator documentation](glue/README.MD) to configure, initialize, and run
+the migration tool.
+
+#### Step 7: Validate the result
+
+if you want quickly validate the replicated workload with SQL
+use [opensearchsql](https://github.com/opensearch-project/sql)
 
 This tool licensed under the Apache-2 License. See the LICENSE file.

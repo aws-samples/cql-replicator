@@ -2,12 +2,14 @@
  * // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * // SPDX-License-Identifier: Apache-2.0
  */
-// Target Amazon Keyspaces
+
+// Target Amazon OpenSearch service - preview
 
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
+import com.amazonaws.services.glue.util.JsonOptions
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.Dataset
@@ -25,12 +27,13 @@ import org.apache.spark.sql.DataFrame
 
 import java.time.Duration
 import java.util.Optional
+import org.joda.time.LocalDateTime
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 
 import com.amazonaws.services.s3.{AmazonS3Client, AmazonS3, AmazonS3ClientBuilder}
-import com.amazonaws.services.s3.model.ObjectMetadata
+import com.amazonaws.services.s3.model.{ObjectMetadata, DeleteObjectsRequest, ObjectListing, S3ObjectSummary}
 import com.amazonaws.services.s3.model.S3Object
 import com.amazonaws.services.s3.model.S3ObjectInputStream
 
@@ -40,10 +43,9 @@ import com.datastax.oss.driver.api.core.NoNodeAvailableException
 import com.datastax.oss.driver.api.core.AllNodesFailedException
 import com.datastax.oss.driver.api.core.servererrors._
 
-import io.github.resilience4j.retry.{Retry, RetryConfig}
-import io.github.resilience4j.core.IntervalFunction
-
 import scala.util.{Try, Success, Failure}
+import scala.util.matching.Regex
+import scala.io.Source
 
 import scala.collection.mutable.StringBuilder
 
@@ -53,9 +55,9 @@ import org.json4s.jackson.JsonMethods._
 import java.util.Base64
 import java.nio.charset.StandardCharsets
 
-class LargeObjectException(s: String) extends RuntimeException {
-  println(s)
-}
+import java.io.{ByteArrayInputStream}
+import com.datastax.oss.driver.api.core.uuid.Uuids
+import scala.collection.parallel.immutable.ParSet
 
 class ProcessTypeException(s: String) extends RuntimeException {
   println(s)
@@ -65,8 +67,66 @@ class CassandraTypeException(s: String) extends RuntimeException {
   println(s)
 }
 
+class OssConnectionException(s: String) extends RuntimeException {
+  println(s)
+}
+
+case class OssConfig(opensearchNodes: String,
+                     opensearchPort: String,
+                     opensearchAwsSigv4Region: String,
+                     opensearchNodesWanOnly: Boolean,
+                     opensearchAwsSigv4Enabled: Boolean,
+                     secretId: String,
+                     opensearchNodesClientOnly: Boolean,
+                     opensearchNetSsl: Boolean,
+                     opensearchNodesResolveHostname: Boolean)
+
+case class FlushingSet[T](maxSize: Int, flushingClient: com.amazonaws.services.s3.AmazonS3, bucketName: String, key: String) {
+  private var set: ParSet[T] = ParSet.empty
+  private var size: Int = 0
+
+  final def add(element: T): Unit = this.synchronized {
+    val elementSize = element.toString.getBytes.length
+    if (size + elementSize >= maxSize) {
+      flush()
+      size = elementSize
+      set = ParSet.empty + element
+    } else {
+      size += elementSize
+      set = set + element
+    }
+  }
+
+  def flush(): Unit = this.synchronized {
+    if (!set.isEmpty) {
+      val fileName = Uuids.timeBased
+      val data = set.mkString("\n")
+      val inputStream = new ByteArrayInputStream(data.getBytes)
+      val metadata = new ObjectMetadata()
+      metadata.setContentLength(data.length)
+      flushingClient.putObject(bucketName, s"$key/$fileName.json", inputStream, metadata)
+      set = ParSet.empty
+      size = 0
+    }
+  }
+
+  def getSize(): Int = this.synchronized {
+    size
+  }
+}
+
 object GlueApp {
   def main(sysArgs: Array[String]) {
+
+    def readOssConfigFile(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String): OssConfig = {
+      val s3Object = s3Client.getObject(bucket, key)
+      val src = Source.fromInputStream(s3Object.getObjectContent())
+      val json = src.getLines.mkString
+      src.close()
+
+      implicit val formats = DefaultFormats
+      parse(json).extract[OssConfig]
+    }
 
     def shuffleDf(df: DataFrame): DataFrame = {
       val encoder = RowEncoder(df.schema)
@@ -155,11 +215,7 @@ object GlueApp {
       }
     }
 
-    // Cooldown period 60s let's spark to remove RDDs and release resources
     val WAIT_TIME = 60000
-    val MAX_RETRY_ATTEMPTS = 256
-    // Unit ms
-    val EXP_BACKOFF = 25
     val sparkContext: SparkContext = new SparkContext()
     val glueContext: GlueContext = new GlueContext(sparkContext)
     val sparkSession: SparkSession = glueContext.getSparkSession
@@ -172,7 +228,7 @@ object GlueApp {
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
     val totalTiles = args("TOTAL_TILES").toInt
-    // Internal configuration
+    // Internal configuration+
     sparkSession.conf.set(s"spark.sql.catalog.ledgerCatalog", "com.datastax.spark.connector.datasource.CassandraCatalog")
     sparkSession.conf.set(s"spark.sql.catalog.sourceCluster", "com.datastax.spark.connector.datasource.CassandraCatalog")
     sparkSession.conf.set(s"spark.sql.catalog.ledgerCatalog.spark.cassandra.connection.config.profile.path", "KeyspacesConnector.conf")
@@ -183,6 +239,8 @@ object GlueApp {
     val processType = args("PROCESS_TYPE") // discovery or replication
     val interanlLedger = s"ledgerCatalog.$ledgerKeyspaces.$ledgerTable"
     val patternForSingleQuotes = "(.*text.*)|(.*date.*)|(.*timestamp.*)|(.*inet.*)".r
+    val flushingThreshold = 1024 * 1024 * 32
+    val patternWhereClauseToMap: Regex = """(\w+)=['"]?(.*?)['"]?(?: and |$)""".r
 
     // Business configuration
     val srcTableName = args("SOURCE_TBL")
@@ -201,11 +259,11 @@ object GlueApp {
 
     //AmazonS3Client to check if a stop requested issued
     val s3client = new AmazonS3Client()
+    val ossConfig = readOssConfigFile(s3client, bcktName, "artifacts/OpenSearchConnector.conf")
 
     // Let's do preflight checks
     logger.info("Preflight check started")
     preFlightCheck(cassandraConn, srcKeyspaceName, srcTableName, "source")
-    preFlightCheck(keyspacesConn, trgKeyspaceName, trgTableName, "target")
     logger.info("Preflight check completed")
 
     val selectStmtWithTTL = ttlColumn match {
@@ -227,10 +285,15 @@ object GlueApp {
     val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
     val columns = inferKeys(cassandraConn, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap
     val columnsPos = scala.collection.immutable.TreeSet(columns.keys.toArray: _*).zipWithIndex
-    val offloadLargeObjTmp = new String(Base64.getDecoder().decode(olo.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
-    logger.info(s"Offload large objects to S3 bucket: $offloadLargeObjTmp")
 
-    val offloadLargeObjects = parseJSONConfig(offloadLargeObjTmp)
+    val offloadLageObjTmp = new String(Base64.getDecoder().decode(olo.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
+    logger.info(s"Offload large objects to S3 bucket: $offloadLageObjTmp")
+
+    val offloadLargeObjects = parseJSONConfig(offloadLageObjTmp)
+
+    def convertToMap(input: String): String = {
+      patternWhereClauseToMap.findAllIn(input).matchData.map { m => s"'${m.group(1)}':'${m.group(2)}'" }.mkString(", ")
+    }
 
     def stopRequested(bucket: String): Boolean = {
       val key = processType match {
@@ -248,39 +311,21 @@ object GlueApp {
       }
     }
 
-    def removeLeadingEndingSlashes(str: String): String = {
-      str.
-        stripPrefix("/").
-        stripSuffix("/")
-    }
+    def cleanUpJsonObjects(bucket: String, key: String): Unit = {
+      def deleteObjects(objectListing: ObjectListing): Unit = {
+        val summaries = objectListing.getObjectSummaries.asScala.toList
 
-    def removeS3prefixIfPresent(str: String): String = {
-      str.stripPrefix("s3://")
-    }
-
-    def offloadToS3(jPayload: org.json4s.JValue, s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3): JValue = {
-      val columnName = (offloadLargeObjects \ "column").values.toString
-      val bucket = removeS3prefixIfPresent((offloadLargeObjects \ "bucket").values.toString)
-      val prefix = removeLeadingEndingSlashes((offloadLargeObjects \ "prefix").values.toString)
-      val xrefColumnName = (offloadLargeObjects \ "xref").values.toString
-      val key = java.util.UUID.randomUUID.toString
-      val largeObject = (jPayload \ columnName).values.toString
-      val jsonStatement = jPayload transformField {
-        // Replaced s"s3://$bucket/$prefix/$key" by s"$key"
-        case JField(`xrefColumnName`, _) => JField(xrefColumnName, org.json4s.JsonAST.JString(s"$key"))
-      }
-      // Remove orginal payload from the target statement
-      val updatedJsonStatement = jsonStatement removeField {
-        case JField(`columnName`, _) => true
-        case _ => false
+        if (!summaries.isEmpty) {
+          val deleteRequest = new DeleteObjectsRequest(bucket)
+          deleteRequest.withKeys(summaries.map(_.getKey): _*)
+          s3client.deleteObjects(deleteRequest)
+        }
+        if (objectListing.isTruncated) {
+          deleteObjects(s3client.listNextBatchOfObjects(objectListing))
+        }
       }
 
-      Try {
-        s3ClientOnPartition.putObject(bucket, s"$prefix/$key", largeObject)
-      } match {
-        case Failure(_) => throw new LargeObjectException("Not able to persist the large object to S3")
-        case Success(_) => updatedJsonStatement
-      }
+      deleteObjects(s3client.listObjects(bucket, key))
     }
 
     def putStats(bucket: String, key: String, metric: String, value: String): Unit = {
@@ -301,81 +346,37 @@ object GlueApp {
       compact(render(jsonNew))
     }
 
-    def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int): Unit = {
+    def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String],
+                        columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(
         partition => {
-          val retryConfig = RetryConfig.custom.maxAttempts(MAX_RETRY_ATTEMPTS).
-            intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1)).
-            retryExceptions(classOf[WriteFailureException], classOf[WriteTimeoutException], classOf[ServerError], classOf[UnavailableException], classOf[NoNodeAvailableException], classOf[AllNodesFailedException]).build()
-          val retry = Retry.of("keyspaces", retryConfig)
-          val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = offloadLargeObjects match {
-            case JObject(List(("None", JString("None")))) => null
-            case _ => AmazonS3ClientBuilder.defaultClient()
-          }
-          /* This section only for debugging
-          val publisher = retry.getEventPublisher
-          publisher.onRetry(event => logger.info(s"Operation was retried on event $event"))
-          // onError you can offload failed rows to Amazon S3/SQS for the further processing
-          publisher.onError(event => logger.info(s"Operation was failed on event $event"))
-          */
-
+          val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = AmazonS3ClientBuilder.defaultClient()
+          val fl = FlushingSet[String](flushingThreshold, s3ClientOnPartition, bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
           partition.foreach(
             row => {
               val whereClause = rowToStatement(row, columns, columnsPos)
-
               if (!whereClause.isEmpty) {
                 cassandraConn.withSessionDo { session => {
-                  if (ttlColumn.equals("None")) {
+                  if (op == "insert" || op == "update") {
                     val rs = Option(session.execute(s"SELECT json * FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
                     if (!rs.isEmpty) {
                       val jsonRow = rs.get.getString(0).replace("'", "\\\\u0027")
-                      keyspacesConn.withSessionDo {
-                        session => {
-                          offloadLargeObjects match {
-                            case JObject(List(("None", JString("None")))) => Retry.decorateSupplier(retry,
-                              () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'")).get()
-                            case _ => {
-                              val json4sRow = parse(jsonRow)
-                              val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition)))
-                              Retry.decorateSupplier(retry,
-                                () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'")).get()
-                            }
-                          }
-
-                        }
-                      }
+                      fl.add(jsonRow)
                     }
                   }
-                  else {
-                    val rs = Option(session.execute(s"SELECT json $selectStmtWithTTL FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
-                    if (!rs.isEmpty) {
-                      val jsonRow = rs.get.getString(0).replace("'", "\\\\u0027")
-                      val json4sRow = parse(jsonRow)
-                      keyspacesConn.withSessionDo {
-                        session => {
-                          offloadLargeObjects match {
-                            case JObject(List(("None", JString("None")))) => {
-                              val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
-                              val ttlVal = getTTLvalue(json4sRow)
-                              Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
-                            }
-                            case _ => {
-                              val json4sRow = parse(jsonRow)
-                              val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition)
-                              val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
-                              val ttlVal = getTTLvalue(json4sRow)
-                              Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
-                            }
-                          }
-                        }
-                      }
-                    }
+                  if (op == "delete") {
+                    val keyValuePairs = convertToMap(whereClause)
+                    fl.add(s"{$keyValuePairs}")
                   }
                 }
                 }
               }
             }
           )
+          fl.getSize match {
+            case s if s > 0 => fl.flush
+            case _ =>
+          }
         }
       )
     }
@@ -419,6 +420,38 @@ object GlueApp {
       whereStmt.toString
     }
 
+    def jsonToOSS(df: DataFrame, op: String, tile: Int): Unit = {
+      if (!df.isEmpty) {
+        val fingerPrint = LocalDateTime.now()
+        persistToTarget(shuffleDfV2(df.drop("ts", "group")), columns, columnsPos, tile, op)
+
+        val path = s"$landingZone/tmp/$trgKeyspaceName/$trgTableName/$tile/$op"
+        val dfFromJson = glueContext.getSourceWithFormat(
+          connectionType = "s3",
+          format = "json",
+          options = JsonOptions(s"""{"paths": ["$path"]}""")
+        ).getDynamicFrame()
+
+        val indexName = s"$trgKeyspaceName-$trgTableName"
+        val datasink = glueContext.getSinkWithFormat(
+          connectionType = "opensearch",
+          options = JsonOptions(Map(
+            "opensearch.nodes.client.only" -> ossConfig.opensearchNodesClientOnly,
+            "opensearch.nodes" -> ossConfig.opensearchNodes,
+            "opensearch.port" -> ossConfig.opensearchPort,
+            "opensearch.nodes.wan.only" -> ossConfig.opensearchNodesWanOnly,
+            "opensearch.net.ssl" -> ossConfig.opensearchNetSsl,
+            "opensearch.aws.sigv4.enabled" -> ossConfig.opensearchAwsSigv4Enabled,
+            "opensearch.aws.sigv4.region" -> ossConfig.opensearchAwsSigv4Region,
+            "opensearch.nodes.resolve.hostname" -> ossConfig.opensearchNodesResolveHostname,
+            "connectionName" -> "cql-replicator-opensearch-integration",
+            "opensearch.resource" -> indexName,
+            "pushdown" -> "true")), transformationContext = "datasink").writeDynamicFrame(dfFromJson)
+
+        cleanUpJsonObjects(bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
+      }
+    }
+
     def dataReplicationProcess() {
       keyspacesConn.withSessionDo {
         session => {
@@ -432,54 +465,53 @@ object GlueApp {
 
             if (heads > 0 && tails == 0) {
 
-              logger.info(s"Historical data load.Processing locations: $locations")
+              logger.info(s"Historical data load. Processing locations: $locations")
               locations.foreach(location => {
 
                 val loc = location._1
                 val sourceDf = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/$loc")
-                val sourceDfV2 = sourceDf.drop("group").drop("ts")
                 val tile = location._2
+                val numPartitions = sourceDf.rdd.getNumPartitions
+                logger.info(s"Number of partitions $numPartitions")
+                jsonToOSS(sourceDf, "insert", tile)
 
-                persistToTarget(shuffleDfV2(sourceDfV2), columns, columnsPos, tile)
                 session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
 
-                val cnt = sourceDfV2.count()
+                val cnt = sourceDf.count()
                 val content = s"""{"tile":$tile, "primaryKeys":$cnt}"""
                 putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$tile", "count.json", content)
 
               }
               )
             }
-
             if ((heads > 0 && tails > 0) || (heads == 0 && tails > 0)) {
 
               logger.info("Processing delta...")
-
-              val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail")
-                .drop("group")
-                .persist(StorageLevel.MEMORY_AND_DISK_SER)
-              val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head")
-                .drop("group")
-                .persist(StorageLevel.MEMORY_AND_DISK_SER)
-              val newInsertsDF = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti")
+              val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail").persist(StorageLevel.MEMORY_AND_DISK_SER)
+              val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head").persist(StorageLevel.MEMORY_AND_DISK_SER)
+              val newInsertsDF = dfTail.as("tail").join(dfHead.as("head"), cond, "leftanti").persist(StorageLevel.MEMORY_AND_DISK_SER)
+              //TODO: DELETE
+              //val newDeletesDF = dfHead.as("head").join(dfTail.as("tail"), cond, "leftanti").persist(StorageLevel.MEMORY_AND_DISK_SER)
 
               columnTs match {
                 case "None" => {
-                  persistToTarget(newInsertsDF, columns, columnsPos, currentTile)
+                  jsonToOSS(newInsertsDF, "insert", currentTile)
+                  //TODO: DELETE
+                  //jsonToOSS(newDeletesDF, "delete", currentTile)
                 }
                 case _ => {
-                  val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").
-                    filter($"tail.ts" > $"head.ts").
-                    selectExpr(pks.map(x => s"tail.$x"): _*).
-                    persist(StorageLevel.MEMORY_AND_DISK_SER)
-                  if (!(newInsertsDF.isEmpty && newUpdatesDF.isEmpty)) {
-                    val sourceDfV3 = newInsertsDF.union(newUpdatesDF)
-                    persistToTarget(sourceDfV3, columns, columnsPos, currentTile)
-                  }
+                  val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").filter($"tail.ts" > $"head.ts").selectExpr(pks.map(x => s"tail.$x"): _*).persist(StorageLevel.MEMORY_AND_DISK_SER)
+                  jsonToOSS(newInsertsDF, "insert", currentTile)
+                  jsonToOSS(newUpdatesDF, "update", currentTile)
+                  // TODO: DELETE
+                  //jsonToOSS(newDeletesDF, "delete", currentTile)
                   newUpdatesDF.unpersist()
                 }
               }
 
+              newInsertsDF.unpersist()
+              // TODO: DELETE
+              //newDeletesDF.unpersist()
               dfTail.unpersist()
               dfHead.unpersist()
 
@@ -576,7 +608,6 @@ object GlueApp {
             sys.exit()
           }
         }
-        logger.info(s"Cooldown period $WAIT_TIME ms")
         Thread.sleep(WAIT_TIME)
       }
     }

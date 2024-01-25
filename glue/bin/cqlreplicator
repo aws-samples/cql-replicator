@@ -28,6 +28,9 @@ AWS_REGION=""
 SUBNET=""
 SG=""
 AZ=""
+TRG_SUBNET=""
+TRG_AZ=""
+TRG_SG=""
 GLUE_IAM_ROLE=""
 AWS_ACCOUNT=""
 KEYS_PER_TILE=0
@@ -36,6 +39,7 @@ ROWS_PER_WORKER=250000
 TARGET_TYPE=keyspaces
 SKIP_GLUE_CONNECTOR=false
 SKIP_KEYSPACES_LEDGER=false
+JSON_MAPPING=""
 OS=$(uname -a | awk '{print $1}')
 
 # Progress bar configuration
@@ -51,7 +55,8 @@ ARTIFACTS=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/sp
 "/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar"
 "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar"
 "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
-"/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
+"/redis/clients/jedis/4.4.6/jedis-4.4.6.jar"
+"/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar")
 
 set +x
 
@@ -153,11 +158,20 @@ function progress {
   fi
 }
 
+function check_file_exists() {
+  FILE=$1
+  if [ ! -f "$FILE" ]; then
+    log "File $FILE doesn't exists, please check place files correctly"
+    exit 1
+  fi
+}
+
 function uploader_helper() {
   local artifact_name="$1"
   local curr_pos=$2
   local next_pos=$3
   local final_pos=$4
+  check_file_exists "$path_to_conf/$artifact_name"
   progress $curr_pos $final_pos "Uploading $artifact_name                       "
       if ls "$path_to_conf/$artifact_name" > /dev/null
         then
@@ -212,6 +226,8 @@ function Clean_Up {
   local connection_name
   connection_name=$(aws glue get-job --job-name CQLReplicator --query 'Job.Connections.Connections[0]' --output text)
   aws glue delete-connection --connection-name "$connection_name" --region "$AWS_REGION"
+  aws glue delete-connection --connection-name cql-replicator-memorydb-integration --region "$AWS_REGION" > /dev/null
+  aws glue delete-connection --connection-name cql-replicator-opensearch-integration --region "$AWS_REGION" > /dev/null
   aws glue delete-job --job-name CQLReplicator --region "$AWS_REGION"
   if [[ $SKIP_KEYSPACES_LEDGER == false ]]; then
     aws keyspaces delete-keyspace --keyspace-name migration --region "$AWS_REGION"
@@ -269,6 +285,10 @@ function Init {
     uploader_helper "RedisConnector.conf" 0 1 5
   fi
 
+  if [[ $TARGET_TYPE == "opensearch" ]]; then
+    uploader_helper "OpenSearchConnector.conf" 0 1 5
+  fi
+
   # Should be used at least for the ledger
   uploader_helper "KeyspacesConnector.conf" 0 1 5
 
@@ -298,22 +318,44 @@ function Init {
       progress 3 5 "Creating Glue connector and CQLReplicator job       "
       glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
       aws glue create-connection --connection-input '{
-       "Name":"'$glue_conn_name'",
-       "Description":"CQLReplicator connection to the C* cluster",
-       "ConnectionType":"NETWORK",
-       "ConnectionProperties":{
-       "JDBC_ENFORCE_SSL": "false"
-      },
-       "PhysicalConnectionRequirements":{
-       "SubnetId":"'$SUBNET'",
-       "SecurityGroupIdList":['$SG'],
-       "AvailabilityZone":"'$AZ'"}
-       }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
+         "Name":"'$glue_conn_name'",
+         "Description":"CQLReplicator connection to the C* cluster",
+         "ConnectionType":"NETWORK",
+         "ConnectionProperties":{
+           "JDBC_ENFORCE_SSL": "false"
+           },
+         "PhysicalConnectionRequirements":{
+           "SubnetId":"'$SUBNET'",
+           "SecurityGroupIdList":['$SG'],
+           "AvailabilityZone":"'$AZ'"}
+           }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
+
+       if [[ $TARGET_TYPE == "opensearch" || $TARGET_TYPE == "memorydb" ]]; then
+         check_input "$TRG_SUBNET" "ERROR: subnet for $TARGET_TYPE is empty, must be provided"
+         check_input "$TRG_SG" "ERROR: sg for $TARGET_TYPE is empty, must be provided"
+         check_input "$TRG_AZ" "ERROR: az for $TARGET_TYPE is empty, must be provided"
+         glue_conn_name_oss="cql-replicator-$TARGET_TYPE-integration"
+         glue_conn_name+=",$glue_conn_name_oss"
+
+         aws glue create-connection --connection-input '{
+          "Name":"'$glue_conn_name_oss'",
+          "Description":"CQLReplicator connection to '$TARGET_TYPE'",
+          "ConnectionType":"NETWORK",
+          "ConnectionProperties":{
+            "JDBC_ENFORCE_SSL": "false"
+          },
+          "PhysicalConnectionRequirements":{
+            "SubnetId":"'$TRG_SUBNET'",
+            "SecurityGroupIdList":['$TRG_SG'],
+            "AvailabilityZone":"'$TRG_AZ'"}
+          }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
+
+       fi
 
        aws glue create-job \
            --name "CQLReplicator" \
            --role "$GLUE_IAM_ROLE" \
-           --description "$DESCRIPTION" \
+           --description "$DESCRIPTION -> $TARGET_TYPE" \
            --glue-version "4.0" \
            --number-of-workers 2 \
            --worker-type "G.1X" \
@@ -324,7 +366,7 @@ function Init {
            --region "$AWS_REGION" \
            --default-arguments '{
                "--job-language":"scala",
-               "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/jedis-4.4.6.jar,'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
+               "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/jedis-4.4.6.jar,'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar,'$S3_LANDING_ZONE'/artifacts/opensearch-spark-30_2.12-1.0.1.jar",
                "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min",
                "--class":"GlueApp"
            }' > /dev/null
@@ -335,7 +377,7 @@ function Init {
       aws glue create-job \
           --name "CQLReplicator" \
           --role "$GLUE_IAM_ROLE" \
-          --description "$DESCRIPTION" \
+          --description "$DESCRIPTION -> $TARGET_TYPE" \
           --glue-version "4.0" \
           --number-of-workers 2 \
           --worker-type "G.1X" \
@@ -345,7 +387,7 @@ function Init {
           --region "$AWS_REGION" \
           --default-arguments '{
               "--job-language":"scala",
-              "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/jedis-4.4.6.jar,'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
+              "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/jedis-4.4.6.jar,'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar,'$S3_LANDING_ZONE'/artifacts/opensearch-spark-30_2.12-1.0.1.jar",
               "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min",
               "--class":"GlueApp"
               }' > /dev/null
@@ -435,6 +477,7 @@ function Start_Discovery {
   check_input "$TARGET_KS" "ERROR: target keyspace name is empty, must be provided"
   check_input "$TARGET_TBL" "ERROR: target table name is empty, must be provided"
   check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
+  check_input "$AWS_REGION" "ERROR: landing zone must be provided"
   check_num_tiles
 
   log "TILES:" "$TILES"
@@ -443,6 +486,7 @@ function Start_Discovery {
   log "LANDING ZONE:" "$S3_LANDING_ZONE"
   log "WRITE TIME COLUMN:" $WRITETIME_COLUMN
   log "TTL COLUMN:" $TTL_COLUMN
+  log "ROWS PER DPU:" $ROWS_PER_WORKER
   local workers=$((1 + TILES / 2))
   log "Checking if the discovery job is already running..."
   check_discovery_runs "true"
@@ -631,8 +675,16 @@ while (( "$#" )); do
       SUBNET="$2"
       shift 2
       ;;
+    --target-subnet)
+      TRG_SUBNET="$2"
+      shift 2
+      ;;
     --sg|-g)
       SG="$2"
+      shift 2
+      ;;
+    --target-sg)
+      TRG_SG="$2"
       shift 2
       ;;
     --glue-iam-role|-m)
@@ -643,8 +695,20 @@ while (( "$#" )); do
       AZ="$2"
       shift 2
       ;;
+    --target-az)
+      TRG_AZ="$2"
+      shift 2
+      ;;
     --target-type|-j)
       TARGET_TYPE="$2"
+      shift 2
+      ;;
+    --json-mapping)
+      JSON_MAPPING="$2"
+      shitf 2
+      ;;
+    --override-rows-per-worker)
+      ROWS_PER_WORKER="$2"
       shift 2
       ;;
     --skip-glue-connector)

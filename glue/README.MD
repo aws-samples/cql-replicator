@@ -60,7 +60,7 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
   If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
   files
 - `--target-type` - this is an optional parameter, the default value is `keyspaces`, available options: `parquet`
-  ,and `memorydb`
+  , `memorydb`, `opensearch` (preview)
 - `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
   Keyspaces migration.ledger)
@@ -141,14 +141,72 @@ To stop migration process gracefully run the following command:
 ```
 
 ## Recover from failures
+
 Customers can simply restart the migration process from the point where it was interrupted by restarting failed jobs.
 In order, to restart failed CQLReplicator jobs, you need to re-run `--state run` with the same parameters.
 
 ## Get migration stats
+
 To obtain the number of rows replicated during the back filling phase, run the following command:
+
 ```shell
    cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-west-2 \ 
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
+```
+
+## Cost optimization
+
+In order to reduce AWS Glue costs after the historical workload moved to the target storage:
+
+1. Stop the migration
+   process: `cqlreplicator --state request-stop --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator`
+2. Restart the migration process with the same number of tiles but lower number of
+   DPUs: `cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 500000`
+
+## Replicate workload to Amazon OpenSearch (preview) or Amazon MemoryDB
+
+In order to connect to Amazon OpenSearch or Amazon MemoryDB you need configure `/conf/OpenSearchConnector.conf`
+or `/conf/RedisConnector.conf`
+
+The following command will create Glue connector to C* (optional for Amazon Keyspaces)
+uses `subnet-XXXXXXX`, `us-west-1a`, and `sg-1`, and
+Glue connector to Amazon OpenSearch Service/Amazon MemoryDB uses `subnet-YYYYYY`, `sg-2`, and `us-west-1a`:
+
+```shell
+cqlreplicator --state init --sg '"sg-1"' \
+                           --subnet "subnet-XXXXXXX" 
+                           --region "us-west-2" \ 
+                           --az "us-west-1a" \
+                           --glue-iam-role "GlueOMS" \
+                           --target-type opensearch \
+                           --target-sg "sg-2" \ 
+                           --target-subnet "subnet-YYYYYY" \
+                           --target-az "us-west-1a"
+```
+
+or
+
+```shell
+cqlreplicator --state init --sg '"sg-1"' \
+                           --subnet "subnet-XXXXXXX" 
+                           --region "us-west-2" \ 
+                           --az "us-west-1a" \
+                           --glue-iam-role "GlueOMS" \
+                           --target-type memorydb \
+                           --target-sg "sg-2" \ 
+                           --target-subnet "subnet-YYYYYY" \
+                           --target-az "us-west-1a"
+```
+
+After the init phase is completed you can run the following command to start the replication process:
+
+```shell
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
 ```
 
 ## Clean up

@@ -226,6 +226,8 @@ function Clean_Up {
   local connection_name
   connection_name=$(aws glue get-job --job-name CQLReplicator --query 'Job.Connections.Connections[0]' --output text)
   aws glue delete-connection --connection-name "$connection_name" --region "$AWS_REGION"
+  aws glue delete-connection --connection-name cql-replicator-memorydb-integration --region "$AWS_REGION" > /dev/null
+  aws glue delete-connection --connection-name cql-replicator-opensearch-integration --region "$AWS_REGION" > /dev/null
   aws glue delete-job --job-name CQLReplicator --region "$AWS_REGION"
   if [[ $SKIP_KEYSPACES_LEDGER == false ]]; then
     aws keyspaces delete-keyspace --keyspace-name migration --region "$AWS_REGION"
@@ -328,16 +330,16 @@ function Init {
            "AvailabilityZone":"'$AZ'"}
            }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
 
-       if [[ $TARGET_TYPE == "opensearch" ]]; then
+       if [[ $TARGET_TYPE == "opensearch" || $TARGET_TYPE == "memorydb" ]]; then
          check_input "$TRG_SUBNET" "ERROR: subnet for $TARGET_TYPE is empty, must be provided"
          check_input "$TRG_SG" "ERROR: sg for $TARGET_TYPE is empty, must be provided"
          check_input "$TRG_AZ" "ERROR: az for $TARGET_TYPE is empty, must be provided"
-         glue_conn_name_oss="cql-replicator-oss-integration"
+         glue_conn_name_oss="cql-replicator-$TARGET_TYPE-integration"
          glue_conn_name+=",$glue_conn_name_oss"
 
          aws glue create-connection --connection-input '{
           "Name":"'$glue_conn_name_oss'",
-          "Description":"CQLReplicator connection to the Amazon OpenSearch Service",
+          "Description":"CQLReplicator connection to '$TARGET_TYPE'",
           "ConnectionType":"NETWORK",
           "ConnectionProperties":{
             "JDBC_ENFORCE_SSL": "false"

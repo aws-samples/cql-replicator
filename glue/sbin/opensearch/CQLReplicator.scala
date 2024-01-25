@@ -3,7 +3,7 @@
  * // SPDX-License-Identifier: Apache-2.0
  */
 
-// Target Amazon OpenSearch service - experimental
+// Target Amazon OpenSearch service - preview
 
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
@@ -444,7 +444,7 @@ object GlueApp {
             "opensearch.aws.sigv4.enabled" -> ossConfig.opensearchAwsSigv4Enabled,
             "opensearch.aws.sigv4.region" -> ossConfig.opensearchAwsSigv4Region,
             "opensearch.nodes.resolve.hostname" -> ossConfig.opensearchNodesResolveHostname,
-            "connectionName" -> "cql-replicator-oss-integration",
+            "connectionName" -> "cql-replicator-opensearch-integration",
             "opensearch.resource" -> indexName,
             "pushdown" -> "true")), transformationContext = "datasink").writeDynamicFrame(dfFromJson)
 

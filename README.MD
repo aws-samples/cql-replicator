@@ -156,8 +156,6 @@ analytics and ML purposes:
 By leveraging these services, you can extract valuable insights from your data, build predictive models, and make
 data-driven decisions.
 
-### License
-
 ### Use-case for Search with Amazon Keyspaces (Preview)
 
 CQLReplicator is a tool to replicate payloads (INSERTS, UPDATES) from Amazon Keyspaces to Amazon OpenSearch Service.
@@ -199,5 +197,7 @@ the migration tool.
 
 if you want quickly validate the replicated workload with SQL
 use [opensearchsql](https://github.com/opensearch-project/sql)
+
+### License
 
 This tool licensed under the Apache-2 License. See the LICENSE file.

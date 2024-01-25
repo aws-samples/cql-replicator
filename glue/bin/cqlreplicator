@@ -326,7 +326,7 @@ function Init {
            },
          "PhysicalConnectionRequirements":{
            "SubnetId":"'$SUBNET'",
-           "SecurityGroupIdList":["'$SG'"],
+           "SecurityGroupIdList":['$SG'],
            "AvailabilityZone":"'$AZ'"}
            }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
 
@@ -346,7 +346,7 @@ function Init {
           },
           "PhysicalConnectionRequirements":{
             "SubnetId":"'$TRG_SUBNET'",
-            "SecurityGroupIdList":["'$TRG_SG'"],
+            "SecurityGroupIdList":['$TRG_SG'],
             "AvailabilityZone":"'$TRG_AZ'"}
           }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
 

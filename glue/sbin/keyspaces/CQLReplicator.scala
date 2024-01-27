@@ -65,6 +65,33 @@ class CassandraTypeException(s: String) extends RuntimeException {
   println(s)
 }
 
+class SupportFunctions() {
+  def correctEmptyBinJsonValues(cols: List[String], input: String): String = {
+    implicit val formats = DefaultFormats
+
+    if (cols.isEmpty) {
+      input
+    } else {
+      val json = parse(input)
+
+      def replace(json: JValue, cols: Seq[String]): JValue = cols match {
+        case Nil => json
+        case col :: tail =>
+          val updatedJson = (json \ col) match {
+            case JString("") => json transformField {
+              case JField(`col`, _) => JField(col, JString("0x"))
+            }
+            case _ => json
+          }
+          replace(updatedJson, tail)
+      }
+
+      val finalJson = replace(json, cols)
+      compact(render(finalJson))
+    }
+  }
+}
+
 object GlueApp {
   def main(sysArgs: Array[String]) {
 
@@ -98,6 +125,16 @@ object GlueApp {
         case _ => {
           meta.getPrimaryKey.asScala.map(x => Map(x.getName().toString -> x.getType().toString.toLowerCase))
         }
+      }
+    }
+
+    def getAllColumns(cc: CassandraConnector, ks: String, tbl: String): Seq[scala.collection.immutable.Map[String, String]] = {
+      cc.withSessionDo {
+        session =>
+          session.getMetadata.getKeyspace(ks).get().
+            getTable(tbl).get().
+            getColumns.entrySet.asScala.
+            map(x => Map(x.getKey.toString -> x.getValue.getType.toString)).toSeq
       }
     }
 
@@ -231,8 +268,10 @@ object GlueApp {
     val columnsPos = scala.collection.immutable.TreeSet(columns.keys.toArray: _*).zipWithIndex
     val offloadLargeObjTmp = new String(Base64.getDecoder().decode(olo.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
     logger.info(s"Offload large objects to S3 bucket: $offloadLargeObjTmp")
-
     val offloadLargeObjects = parseJSONConfig(offloadLargeObjTmp)
+
+    val allColumnsFromSource = getAllColumns(cassandraConn, srcKeyspaceName, srcTableName)
+    val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
 
     def stopRequested(bucket: String): Boolean = {
       val key = processType match {
@@ -306,6 +345,7 @@ object GlueApp {
     def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(
         partition => {
+          val supportFunctions = new SupportFunctions()
           val retryConfig = RetryConfig.custom.maxAttempts(MAX_RETRY_ATTEMPTS).
             intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1)).
             retryExceptions(classOf[WriteFailureException], classOf[WriteTimeoutException], classOf[ServerError], classOf[UnavailableException], classOf[NoNodeAvailableException], classOf[AllNodesFailedException]).build()
@@ -329,7 +369,7 @@ object GlueApp {
                     if (ttlColumn.equals("None")) {
                       val rs = Option(session.execute(s"SELECT json * FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
                       if (!rs.isEmpty) {
-                        val jsonRow = rs.get.getString(0).replace("'", "\\\\u0027")
+                        val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs.get.getString(0).replace("'", "\\\\u0027"))
                         keyspacesConn.withSessionDo {
                           session => {
                             offloadLargeObjects match {
@@ -349,7 +389,7 @@ object GlueApp {
                     else {
                       val rs = Option(session.execute(s"SELECT json $selectStmtWithTTL FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
                       if (!rs.isEmpty) {
-                        val jsonRow = rs.get.getString(0).replace("'", "\\\\u0027")
+                        val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs.get.getString(0).replace("'", "\\\\u0027"))
                         val json4sRow = parse(jsonRow)
                         keyspacesConn.withSessionDo {
                           session => {
@@ -483,8 +523,8 @@ object GlueApp {
                 options = JsonOptions(s"""{"paths": ["$pathHead"]}""")
               ).getDynamicFrame().toDF().drop("group").persist(StorageLevel.DISK_ONLY)
 
-              val newInsertsDF = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti")
-              val newDeletesDF = dfHead.drop("ts").as("head").join(dfTail.drop("ts").as("tail"), cond, "leftanti")
+              val newInsertsDF = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti").persist(StorageLevel.DISK_ONLY)
+              val newDeletesDF = dfHead.drop("ts").as("head").join(dfTail.drop("ts").as("tail"), cond, "leftanti").persist(StorageLevel.DISK_ONLY)
 
               columnTs match {
                 case "None" => {
@@ -493,12 +533,12 @@ object GlueApp {
                 case _ => {
                   val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").
                     filter($"tail.ts" > $"head.ts").
-                    selectExpr(pks.map(x => s"tail.$x"): _*)
+                    selectExpr(pks.map(x => s"tail.$x"): _*).persist(StorageLevel.DISK_ONLY)
                   if (!(newInsertsDF.isEmpty && newUpdatesDF.isEmpty)) {
                     persistToTarget(newInsertsDF, columns, columnsPos, currentTile, "insert")
                     persistToTarget(newUpdatesDF, columns, columnsPos, currentTile, "update")
-                    newUpdatesDF.unpersist()
                   }
+                  newUpdatesDF.unpersist()
                 }
               }
 

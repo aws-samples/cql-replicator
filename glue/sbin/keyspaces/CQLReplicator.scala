@@ -8,6 +8,7 @@ import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
+import com.amazonaws.services.glue.util.JsonOptions
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.Dataset
@@ -44,7 +45,6 @@ import io.github.resilience4j.retry.{Retry, RetryConfig}
 import io.github.resilience4j.core.IntervalFunction
 
 import scala.util.{Try, Success, Failure}
-
 import scala.collection.mutable.StringBuilder
 
 import org.json4s._
@@ -63,6 +63,33 @@ class ProcessTypeException(s: String) extends RuntimeException {
 
 class CassandraTypeException(s: String) extends RuntimeException {
   println(s)
+}
+
+class SupportFunctions() {
+  def correctEmptyBinJsonValues(cols: List[String], input: String): String = {
+    implicit val formats = DefaultFormats
+
+    if (cols.isEmpty) {
+      input
+    } else {
+      val json = parse(input)
+
+      def replace(json: JValue, cols: Seq[String]): JValue = cols match {
+        case Nil => json
+        case col :: tail =>
+          val updatedJson = (json \ col) match {
+            case JString("") => json transformField {
+              case JField(`col`, _) => JField(col, JString("0x"))
+            }
+            case _ => json
+          }
+          replace(updatedJson, tail)
+      }
+
+      val finalJson = replace(json, cols)
+      compact(render(finalJson))
+    }
+  }
 }
 
 object GlueApp {
@@ -98,6 +125,16 @@ object GlueApp {
         case _ => {
           meta.getPrimaryKey.asScala.map(x => Map(x.getName().toString -> x.getType().toString.toLowerCase))
         }
+      }
+    }
+
+    def getAllColumns(cc: CassandraConnector, ks: String, tbl: String): Seq[scala.collection.immutable.Map[String, String]] = {
+      cc.withSessionDo {
+        session =>
+          session.getMetadata.getKeyspace(ks).get().
+            getTable(tbl).get().
+            getColumns.entrySet.asScala.
+            map(x => Map(x.getKey.toString -> x.getValue.getType.toString)).toSeq
       }
     }
 
@@ -155,8 +192,8 @@ object GlueApp {
       }
     }
 
-    // Cooldown period 60s let's spark to remove RDDs and release resources
-    val WAIT_TIME = 60000
+    // Cooldown period 30s let's spark to remove RDDs and release resources
+    val WAIT_TIME = 30000
     val MAX_RETRY_ATTEMPTS = 256
     // Unit ms
     val EXP_BACKOFF = 25
@@ -199,6 +236,8 @@ object GlueApp {
     val ttlColumn = args("TTL_COLUMN")
     val olo = args("OFFLOAD_LARGE_OBJECTS")
 
+    val defaultPartitions = scala.math.max(2, (sparkContext.defaultParallelism / 2 - 2))
+
     //AmazonS3Client to check if a stop requested issued
     val s3client = new AmazonS3Client()
 
@@ -229,8 +268,10 @@ object GlueApp {
     val columnsPos = scala.collection.immutable.TreeSet(columns.keys.toArray: _*).zipWithIndex
     val offloadLargeObjTmp = new String(Base64.getDecoder().decode(olo.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
     logger.info(s"Offload large objects to S3 bucket: $offloadLargeObjTmp")
-
     val offloadLargeObjects = parseJSONConfig(offloadLargeObjTmp)
+
+    val allColumnsFromSource = getAllColumns(cassandraConn, srcKeyspaceName, srcTableName)
+    val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
 
     def stopRequested(bucket: String): Boolean = {
       val key = processType match {
@@ -301,9 +342,10 @@ object GlueApp {
       compact(render(jsonNew))
     }
 
-    def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int): Unit = {
+    def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(
         partition => {
+          val supportFunctions = new SupportFunctions()
           val retryConfig = RetryConfig.custom.maxAttempts(MAX_RETRY_ATTEMPTS).
             intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1)).
             retryExceptions(classOf[WriteFailureException], classOf[WriteTimeoutException], classOf[ServerError], classOf[UnavailableException], classOf[NoNodeAvailableException], classOf[AllNodesFailedException]).build()
@@ -318,60 +360,67 @@ object GlueApp {
           // onError you can offload failed rows to Amazon S3/SQS for the further processing
           publisher.onError(event => logger.info(s"Operation was failed on event $event"))
           */
-
           partition.foreach(
             row => {
               val whereClause = rowToStatement(row, columns, columnsPos)
-
               if (!whereClause.isEmpty) {
-                cassandraConn.withSessionDo { session => {
-                  if (ttlColumn.equals("None")) {
-                    val rs = Option(session.execute(s"SELECT json * FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
-                    if (!rs.isEmpty) {
-                      val jsonRow = rs.get.getString(0).replace("'", "\\\\u0027")
-                      keyspacesConn.withSessionDo {
-                        session => {
-                          offloadLargeObjects match {
-                            case JObject(List(("None", JString("None")))) => Retry.decorateSupplier(retry,
-                              () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'")).get()
-                            case _ => {
-                              val json4sRow = parse(jsonRow)
-                              val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition)))
-                              Retry.decorateSupplier(retry,
-                                () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'")).get()
+                if (op == "insert" || op == "update") {
+                  cassandraConn.withSessionDo { session => {
+                    if (ttlColumn.equals("None")) {
+                      val rs = Option(session.execute(s"SELECT json * FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
+                      if (!rs.isEmpty) {
+                        val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs.get.getString(0).replace("'", "\\\\u0027"))
+                        keyspacesConn.withSessionDo {
+                          session => {
+                            offloadLargeObjects match {
+                              case JObject(List(("None", JString("None")))) => Retry.decorateSupplier(retry,
+                                () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'")).get()
+                              case _ => {
+                                val json4sRow = parse(jsonRow)
+                                val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition)))
+                                Retry.decorateSupplier(retry,
+                                  () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'")).get()
+                              }
                             }
                           }
-
+                        }
+                      }
+                    }
+                    else {
+                      val rs = Option(session.execute(s"SELECT json $selectStmtWithTTL FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
+                      if (!rs.isEmpty) {
+                        val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs.get.getString(0).replace("'", "\\\\u0027"))
+                        val json4sRow = parse(jsonRow)
+                        keyspacesConn.withSessionDo {
+                          session => {
+                            offloadLargeObjects match {
+                              case JObject(List(("None", JString("None")))) => {
+                                val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
+                                val ttlVal = getTTLvalue(json4sRow)
+                                Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
+                              }
+                              case _ => {
+                                val json4sRow = parse(jsonRow)
+                                val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition)
+                                val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
+                                val ttlVal = getTTLvalue(json4sRow)
+                                Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
+                              }
+                            }
+                          }
                         }
                       }
                     }
                   }
-                  else {
-                    val rs = Option(session.execute(s"SELECT json $selectStmtWithTTL FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
-                    if (!rs.isEmpty) {
-                      val jsonRow = rs.get.getString(0).replace("'", "\\\\u0027")
-                      val json4sRow = parse(jsonRow)
-                      keyspacesConn.withSessionDo {
-                        session => {
-                          offloadLargeObjects match {
-                            case JObject(List(("None", JString("None")))) => {
-                              val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
-                              val ttlVal = getTTLvalue(json4sRow)
-                              Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
-                            }
-                            case _ => {
-                              val json4sRow = parse(jsonRow)
-                              val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition)
-                              val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
-                              val ttlVal = getTTLvalue(json4sRow)
-                              Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
-                            }
-                          }
-                        }
-                      }
-                    }
                   }
                 }
+                if (op == "delete") {
+                  keyspacesConn.withSessionDo {
+                    session => {
+                      Retry.decorateSupplier(retry,
+                        () => session.execute(s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause")).get()
+                    }
+                  }
                 }
               }
             }
@@ -436,11 +485,17 @@ object GlueApp {
               locations.foreach(location => {
 
                 val loc = location._1
-                val sourceDf = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/$loc")
+                val sourcePath = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/$loc"
+                val sourceDf = glueContext.getSourceWithFormat(
+                  connectionType = "s3",
+                  format = "parquet",
+                  options = JsonOptions(s"""{"paths": ["$sourcePath"]}""")
+                ).getDynamicFrame().toDF()
+
                 val sourceDfV2 = sourceDf.drop("group").drop("ts")
                 val tile = location._2
 
-                persistToTarget(shuffleDfV2(sourceDfV2), columns, columnsPos, tile)
+                persistToTarget(shuffleDfV2(sourceDfV2), columns, columnsPos, tile, "insert")
                 session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
 
                 val cnt = sourceDfV2.count()
@@ -454,32 +509,45 @@ object GlueApp {
             if ((heads > 0 && tails > 0) || (heads == 0 && tails > 0)) {
 
               logger.info("Processing delta...")
+              val pathTail = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail"
+              val dfTail = glueContext.getSourceWithFormat(
+                connectionType = "s3",
+                format = "parquet",
+                options = JsonOptions(s"""{"paths": ["$pathTail"]}""")
+              ).getDynamicFrame().toDF().drop("group").persist(StorageLevel.DISK_ONLY)
 
-              val dfTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail")
-                .drop("group")
-                .persist(StorageLevel.MEMORY_AND_DISK_SER)
-              val dfHead = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head")
-                .drop("group")
-                .persist(StorageLevel.MEMORY_AND_DISK_SER)
-              val newInsertsDF = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti")
+              val pathHead = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head"
+              val dfHead = glueContext.getSourceWithFormat(
+                connectionType = "s3",
+                format = "parquet",
+                options = JsonOptions(s"""{"paths": ["$pathHead"]}""")
+              ).getDynamicFrame().toDF().drop("group").persist(StorageLevel.DISK_ONLY)
+
+              val newInsertsDF = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti").persist(StorageLevel.DISK_ONLY)
+              val newDeletesDF = dfHead.drop("ts").as("head").join(dfTail.drop("ts").as("tail"), cond, "leftanti").persist(StorageLevel.DISK_ONLY)
 
               columnTs match {
                 case "None" => {
-                  persistToTarget(newInsertsDF, columns, columnsPos, currentTile)
+                  persistToTarget(newInsertsDF, columns, columnsPos, currentTile, "insert")
                 }
                 case _ => {
                   val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").
                     filter($"tail.ts" > $"head.ts").
-                    selectExpr(pks.map(x => s"tail.$x"): _*).
-                    persist(StorageLevel.MEMORY_AND_DISK_SER)
+                    selectExpr(pks.map(x => s"tail.$x"): _*).persist(StorageLevel.DISK_ONLY)
                   if (!(newInsertsDF.isEmpty && newUpdatesDF.isEmpty)) {
-                    val sourceDfV3 = newInsertsDF.union(newUpdatesDF)
-                    persistToTarget(sourceDfV3, columns, columnsPos, currentTile)
+                    persistToTarget(newInsertsDF, columns, columnsPos, currentTile, "insert")
+                    persistToTarget(newUpdatesDF, columns, columnsPos, currentTile, "update")
                   }
                   newUpdatesDF.unpersist()
                 }
               }
 
+              if (!newDeletesDF.isEmpty) {
+                persistToTarget(newDeletesDF, columns, columnsPos, currentTile, "delete")
+              }
+
+              newInsertsDF.unpersist()
+              newDeletesDF.unpersist()
               dfTail.unpersist()
               dfHead.unpersist()
 
@@ -496,9 +564,12 @@ object GlueApp {
     }
 
     def keysDiscoveryProcess() {
-      val primaryKeysDf = sparkSession.read.option("inferSchema", "true").table(source)
-      val primaryKeysDfwithTS = primaryKeysDf.selectExpr(pkFinal.map(c => c): _*)
-      val groupedPkDF = primaryKeysDfwithTS.withColumn("group", abs(xxhash64(pkFinalWithoutTs.map(c => col(c)): _*)) % totalTiles).repartition(col("group")).persist(StorageLevel.MEMORY_AND_DISK)
+      val primaryKeysDf = sparkSession.read.option("inferSchema", "true").
+        table(source).
+        selectExpr(pkFinal.map(c => c): _*).
+        persist(StorageLevel.DISK_ONLY)
+      val groupedPkDF = primaryKeysDf.withColumn("group", abs(xxhash64(pkFinalWithoutTs.map(c => col(c)): _*)) % totalTiles).
+        repartition(col("group"))
       val tiles = (0 to totalTiles - 1).toList.par
       tiles.foreach(tile => {
         keyspacesConn.withSessionDo {
@@ -523,8 +594,13 @@ object GlueApp {
             if ((!tail.isEmpty && tailLoadStatus == "SUCCESS") && (!head.isEmpty && headLoadStatus == "SUCCESS")) {
               logger.info("Swapping the tail and the head")
 
-              val staged = groupedPkDF.where(col("group") === tile).repartition(pks.map(c => col(c)): _*)
-              val oldTail = sparkSession.read.option("inferSchema", "true").parquet(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail").repartition(pks.map(c => col(c)): _*)
+              val staged = groupedPkDF.where(col("group") === tile).repartition(defaultPartitions, pks.map(c => col(c)): _*)
+              val oldTailPath = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail"
+              val oldTail = glueContext.getSourceWithFormat(
+                connectionType = "s3",
+                format = "parquet",
+                options = JsonOptions(s"""{"paths": ["$oldTailPath"]}""")
+              ).getDynamicFrame().toDF().repartition(defaultPartitions, pks.map(c => col(c)): _*)
 
               oldTail.write.mode("overwrite").save(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
               staged.write.mode("overwrite").save(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail")
@@ -540,7 +616,7 @@ object GlueApp {
             // The second round (tail and head)
             if (tail.isEmpty && (!head.isEmpty && headLoadStatus == "SUCCESS")) {
               logger.info("Loading a tail but keeping the head")
-              val staged = groupedPkDF.where(col("group") === tile).repartition(pks.map(c => col(c)): _*)
+              val staged = groupedPkDF.where(col("group") === tile).repartition(defaultPartitions, pks.map(c => col(c)): _*)
               staged.write.mode("overwrite").save(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail")
               session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','')")
             }
@@ -548,7 +624,7 @@ object GlueApp {
             // Historical upload, the first round (head)
             if (tail.isEmpty && head.isEmpty) {
               logger.info("Loading a head")
-              val staged = groupedPkDF.where(col("group") === tile).repartition(pks.map(c => col(c)): _*)
+              val staged = groupedPkDF.where(col("group") === tile).repartition(defaultPartitions, pks.map(c => col(c)): _*)
               staged.write.mode("overwrite").save(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
               session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
               val cnt = staged.count()
@@ -559,7 +635,7 @@ object GlueApp {
             session.close()
         }
       })
-      groupedPkDF.unpersist()
+      primaryKeysDf.unpersist()
     }
 
     Iterator.continually(stopRequested(bcktName)).takeWhile(_ == false).foreach {

@@ -7,7 +7,8 @@ This solution offers customers the flexibility to scale the migration workload u
 jobs of CQLReplicator.
 Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per tile) to distribute migration
 workload evenly across Glue data processing units.
-A single replication glue job (DPU - 0.25X) can push up to 2800 WCUs per second against the target table in Amazon
+A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1500 WCUs per second against the target table in
+Amazon
 Keyspaces.
 This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
@@ -99,12 +100,12 @@ Your source keyspace and table `ks_test_cql_replicator.test_cql_replicator` in t
 Your target keyspace and table `ks_test_cql_replicator.test_cql_replicator` in Amazon Keyspaces.
 Parameter `--inc-traffic` - enables incremental traffic to not overload the Cassandra Cluster and Amazon Keyspaces
 with high number of requests. CQLReplicator is going to increase traffic every 4 minutes. In the following
-example with 8 tiles, one avg. Cassandra row is under 1KB, the traffic is going to be increased by 12.5%
-every 2 minutes. At peak traffic, it can reach up to 22,400 WCUs per second.
+example with 8 tiles and one cassandra row is under 2KB, the traffic is going to be gradually increased every 4
+minutes. At peak traffic, it can reach up to 6,300 WCUs per second.
 
-![](../ecs/img.png "Incremental traffic")
+![](incremental-traffic.png "Incremental traffic")
 
-### Replicate near-real time updates and inserts
+### Replicate near-real time updates, inserts, and deletes
 ```shell
    cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 

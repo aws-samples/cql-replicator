@@ -564,9 +564,12 @@ object GlueApp {
     }
 
     def keysDiscoveryProcess() {
-      val primaryKeysDf = sparkSession.read.option("inferSchema", "true").table(source).persist(StorageLevel.DISK_ONLY)
-      val primaryKeysDfwithTS = primaryKeysDf.selectExpr(pkFinal.map(c => c): _*)
-      val groupedPkDF = primaryKeysDfwithTS.withColumn("group", abs(xxhash64(pkFinalWithoutTs.map(c => col(c)): _*)) % totalTiles).repartition(col("group"))
+      val primaryKeysDf = sparkSession.read.option("inferSchema", "true").
+        table(source).
+        selectExpr(pkFinal.map(c => c): _*).
+        persist(StorageLevel.DISK_ONLY)
+      val groupedPkDF = primaryKeysDf.withColumn("group", abs(xxhash64(pkFinalWithoutTs.map(c => col(c)): _*)) % totalTiles).
+        repartition(col("group"))
       val tiles = (0 to totalTiles - 1).toList.par
       tiles.foreach(tile => {
         keyspacesConn.withSessionDo {

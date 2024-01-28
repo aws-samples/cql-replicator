@@ -40,6 +40,7 @@ TARGET_TYPE=keyspaces
 SKIP_GLUE_CONNECTOR=false
 SKIP_KEYSPACES_LEDGER=false
 JSON_MAPPING=""
+REPLICATION_POINT_IN_TIME=0
 OS=$(uname -a | awk '{print $1}')
 
 # Progress bar configuration
@@ -487,6 +488,7 @@ function Start_Discovery {
   log "WRITE TIME COLUMN:" $WRITETIME_COLUMN
   log "TTL COLUMN:" $TTL_COLUMN
   log "ROWS PER DPU:" $ROWS_PER_WORKER
+  log "START REPLICATING FROM: $REPLICATION_POINT_IN_TIME (0 is disabled)"
   local workers=$((1 + TILES / 2))
   log "Checking if the discovery job is already running..."
   check_discovery_runs "true"
@@ -503,6 +505,7 @@ function Start_Discovery {
         "--TARGET_TBL":"'$TARGET_TBL'",
         "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
         "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
+        "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
         "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
      JOBS+=("$rs")
   fi
@@ -528,6 +531,7 @@ function Start_Replication {
           "--TARGET_TBL":"'$TARGET_TBL'",
           "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
           "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
+          "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
           "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
        JOBS+=("$rs")
       sleep $COOLING_PERIOD
@@ -707,6 +711,10 @@ while (( "$#" )); do
       JSON_MAPPING="$2"
       shitf 2
       ;;
+    --start-replication-from)
+      REPLICATION_POINT_IN_TIME="$2"
+      shift 2
+      ;;
     --override-rows-per-worker)
       ROWS_PER_WORKER="$2"
       shift 2
@@ -774,6 +782,10 @@ if [[ $STATE == cleanup ]]; then
 fi
 
 if [[ $STATE == stats ]]; then
+  check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
+  check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
+  check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
+  check_input "$AWS_REGION" "ERROR: landing zone must be provided"
   # the barrier without checking if the discovery job is running
   barrier "false"
   tile=0

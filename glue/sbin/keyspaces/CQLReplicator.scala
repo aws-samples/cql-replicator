@@ -34,6 +34,8 @@ import com.amazonaws.services.s3.{AmazonS3Client, AmazonS3, AmazonS3ClientBuilde
 import com.amazonaws.services.s3.model.ObjectMetadata
 import com.amazonaws.services.s3.model.S3Object
 import com.amazonaws.services.s3.model.S3ObjectInputStream
+import com.amazonaws.ClientConfiguration
+import com.amazonaws.retry.RetryPolicy
 
 import com.datastax.spark.connector.cql._
 import com.datastax.spark.connector._
@@ -192,7 +194,7 @@ object GlueApp {
       }
     }
 
-    // Cooldown period 30s let's spark to remove RDDs and release resources
+    // Cooldown period
     val WAIT_TIME = 30000
     val MAX_RETRY_ATTEMPTS = 256
     // Unit ms
@@ -204,7 +206,7 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
@@ -235,11 +237,13 @@ object GlueApp {
     val source = s"sourceCluster.$srcKeyspaceName.$srcTableName"
     val ttlColumn = args("TTL_COLUMN")
     val olo = args("OFFLOAD_LARGE_OBJECTS")
+    val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
 
     val defaultPartitions = scala.math.max(2, (sparkContext.defaultParallelism / 2 - 2))
 
-    //AmazonS3Client to check if a stop requested issued
-    val s3client = new AmazonS3Client()
+    //AmazonS3Client to check if a stop request was issued
+    val s3ClientConf = new ClientConfiguration().withRetryPolicy(RetryPolicy.builder().withMaxErrorRetry(5).build())
+    val s3client = AmazonS3ClientBuilder.standard().withClientConfiguration(s3ClientConf).build()
 
     // Let's do preflight checks
     logger.info("Preflight check started")
@@ -455,6 +459,7 @@ object GlueApp {
           case "decimal" => row.getDecimal(position)
           case "tinyint" => row.getByte(position)
           case "uuid" => row.getString(position)
+          case "boolean" => row.getBoolean(position)
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
           case _ => throw new CassandraTypeException(s"Unrecognized data type $colType")
@@ -564,10 +569,25 @@ object GlueApp {
     }
 
     def keysDiscoveryProcess() {
-      val primaryKeysDf = sparkSession.read.option("inferSchema", "true").
-        table(source).
-        selectExpr(pkFinal.map(c => c): _*).
-        persist(StorageLevel.DISK_ONLY)
+      val primaryKeysDf = columnTs match {
+        case "None" =>
+          sparkSession.read.option("inferSchema", "true").
+            table(source).
+            selectExpr(pkFinal.map(c => c): _*).
+            persist(StorageLevel.DISK_ONLY)
+        case ts if ts != "None" && replicationPointInTime == 0 =>
+          sparkSession.read.option("inferSchema", "true").
+            table(source).
+            selectExpr(pkFinal.map(c => c): _*).
+            persist(StorageLevel.DISK_ONLY)
+        case ts if ts != "None" && replicationPointInTime > 0 =>
+          sparkSession.read.option("inferSchema", "true").
+            table(source).
+            selectExpr(pkFinal.map(c => c): _*).
+            filter(($"ts" > replicationPointInTime) && ($"ts".isNotNull)).
+            persist(StorageLevel.DISK_ONLY)
+      }
+
       val groupedPkDF = primaryKeysDf.withColumn("group", abs(xxhash64(pkFinalWithoutTs.map(c => col(c)): _*)) % totalTiles).
         repartition(col("group"))
       val tiles = (0 to totalTiles - 1).toList.par

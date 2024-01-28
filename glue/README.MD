@@ -8,9 +8,7 @@ jobs of CQLReplicator.
 Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per tile) to distribute migration
 workload evenly across Glue data processing units.
 A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1500 WCUs per second against the target table in
-Amazon
-Keyspaces.
-This allows for easy estimation of the final traffic against Amazon Keyspaces.
+Amazon Keyspaces. This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
 ![](architecture-glue.png "CQLReplicator on Glue")
 
@@ -168,6 +166,19 @@ In order to reduce AWS Glue costs after the historical workload moved to the tar
    --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
    --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 500000`
 
+### Point in time replication
+
+if you want to replicate your data from a timestamp simply add the flag `--start-replication-from` followed by
+the timestamp to your command line:
+
+```shell
+   cqlreplicator --state request-stop --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2  \
+                 --writetime-column col1 --region us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --start-replication-from 1706408365278858
+```
+
 ## Replicate workload to Amazon OpenSearch (preview) or Amazon MemoryDB
 
 In order to connect to Amazon OpenSearch or Amazon MemoryDB you need configure `/conf/OpenSearchConnector.conf`
@@ -182,7 +193,7 @@ cqlreplicator --state init --sg '"sg-1"' \
                            --subnet "subnet-XXXXXXX" 
                            --region "us-west-2" \ 
                            --az "us-west-1a" \
-                           --glue-iam-role "GlueOMS" \
+                           --glue-iam-role "glue-oss-replication" \
                            --target-type opensearch \
                            --target-sg "sg-2" \ 
                            --target-subnet "subnet-YYYYYY" \
@@ -196,7 +207,7 @@ cqlreplicator --state init --sg '"sg-1"' \
                            --subnet "subnet-XXXXXXX" 
                            --region "us-west-2" \ 
                            --az "us-west-1a" \
-                           --glue-iam-role "GlueOMS" \
+                           --glue-iam-role "glue-memorydb-replication" \
                            --target-type memorydb \
                            --target-sg "sg-2" \ 
                            --target-subnet "subnet-YYYYYY" \

@@ -204,7 +204,7 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
@@ -235,6 +235,7 @@ object GlueApp {
     val source = s"sourceCluster.$srcKeyspaceName.$srcTableName"
     val ttlColumn = args("TTL_COLUMN")
     val olo = args("OFFLOAD_LARGE_OBJECTS")
+    val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
 
     val defaultPartitions = scala.math.max(2, (sparkContext.defaultParallelism / 2 - 2))
 
@@ -564,10 +565,20 @@ object GlueApp {
     }
 
     def keysDiscoveryProcess() {
-      val primaryKeysDf = sparkSession.read.option("inferSchema", "true").
-        table(source).
-        selectExpr(pkFinal.map(c => c): _*).
-        persist(StorageLevel.DISK_ONLY)
+      val primaryKeysDf = columnTs match {
+        case ts if ts == "None" =>
+          sparkSession.read.option("inferSchema", "true").
+            table(source).
+            selectExpr(pkFinal.map(c => c): _*).
+            persist(StorageLevel.DISK_ONLY)
+        case ts if ts != "None" && replicationPointInTime > 0 =>
+          sparkSession.read.option("inferSchema", "true").
+            table(source).
+            selectExpr(pkFinal.map(c => c): _*).
+            filter(($"ts" > replicationPointInTime) && ($"ts".isNotNull)).
+            persist(StorageLevel.DISK_ONLY)
+      }
+
       val groupedPkDF = primaryKeysDf.withColumn("group", abs(xxhash64(pkFinalWithoutTs.map(c => col(c)): _*)) % totalTiles).
         repartition(col("group"))
       val tiles = (0 to totalTiles - 1).toList.par

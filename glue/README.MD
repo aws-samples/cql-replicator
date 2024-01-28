@@ -152,7 +152,8 @@ To obtain the number of rows replicated during the back filling phase, run the f
 
 ```shell
    cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-west-2 \ 
-                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --region us-west-2
 ```
 
 ## Cost optimization

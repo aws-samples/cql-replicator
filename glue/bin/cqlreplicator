@@ -325,7 +325,7 @@ function Init {
     sleep 25
     if ls "$path_to_scala"/CQLReplicator.scala
     then
-      progress 3 5 "Uploading CQLReplicator.scala                      "
+      progress 3 5 "Uploading CQLReplicator.scala                  "
       aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator.scala > /dev/null
     else
       log "ERROR: $path_to_scala/CQLReplicator.scala not found"
@@ -336,7 +336,7 @@ function Init {
   # Create Glue Connector
   local glue_conn_name
   if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
-      progress 3 5 "Creating Glue connector and CQLReplicator job       "
+      progress 3 5 "Creating Glue connector and CQLReplicator job  "
       glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
       aws glue create-connection --connection-input '{
          "Name":"'$glue_conn_name'",
@@ -415,12 +415,12 @@ function Init {
   fi
 
   if [[ $SKIP_KEYSPACES_LEDGER == true ]]; then
-    progress 4 5 "Skipping CQLReplicator's internal keyspace"
-    progress 5 5 "Skipping CQLReplicator's internal table"
+    progress 4 5 "Skipping CQLReplicator's internal keyspace     "
+    progress 5 5 "Skipping CQLReplicator's internal table        "
   fi
 
   if [[ $SKIP_KEYSPACES_LEDGER == false ]]; then
-    progress 4 5 "Creating CQLReplicator's internal keyspace and table"
+    progress 4 5 "Creating CQLReplicator's internal resources    "
     # Create a keyspace - migration
     aws keyspaces create-keyspace --keyspace-name migration --region "$AWS_REGION" > /dev/null
     sleep 20
@@ -438,7 +438,7 @@ function Init {
     { "name": "offload_status", "type": "text" } ],
     "partitionKeys": [ { "name": "ks" }, { "name": "tbl" } ],
     "clusteringKeys": [ { "name": "tile", "orderBy": "ASC" }, { "name": "ver", "orderBy": "ASC" } ] }' --region "$AWS_REGION" > /dev/null
-  progress 5 5 "Creating CQLReplicator's internal keyspace and table"
+  progress 5 5 "Creating CQLReplicator's internal resources    "
 fi
 
 log "Deploy is completed"

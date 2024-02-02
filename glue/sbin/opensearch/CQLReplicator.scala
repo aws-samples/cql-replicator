@@ -407,6 +407,7 @@ object GlueApp {
           case "decimal" => row.getDecimal(position)
           case "tinyint" => row.getByte(position)
           case "uuid" => row.getString(position)
+          case "boolean" => row.getBoolean(position)
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
           case _ => throw new CassandraTypeException(s"Unrecognized data type $colType")

@@ -10,10 +10,10 @@ JOB_NAME=CQLReplicator
 TILES=2
 PROCESS_TYPE_DISCOVERY=discovery
 PROCESS_TYPE_REPLICATION=replication
-SOURCE_KS=ks_test_cql_replicator
-SOURCE_TBL=test_cql_replicator
-TARGET_KS=ks_test_cql_replicator
-TARGET_TBL=test_cql_replicator
+SOURCE_KS=""
+SOURCE_TBL=""
+TARGET_KS=""
+TARGET_TBL=""
 WRITETIME_COLUMN="None"
 TTL_COLUMN="None"
 S3_LANDING_ZONE=""
@@ -41,6 +41,7 @@ SKIP_GLUE_CONNECTOR=false
 SKIP_KEYSPACES_LEDGER=false
 JSON_MAPPING=""
 REPLICATION_POINT_IN_TIME=0
+REPLICATION_STATS_ENABLED=false
 OS=$(uname -a | awk '{print $1}')
 
 # Progress bar configuration
@@ -103,6 +104,25 @@ function check_input() {
       exit 1
   fi
   return 0
+}
+
+print_stat_table() {
+  # Assign the arguments to variables
+  local tile=$1
+  local inserts=$2
+  local updates=$3
+  local deletes=$4
+  local timestamp=$5
+  local head=$6
+  if [[ $head == true ]]; then
+    echo "+------------------------------------------------------------------------+"
+    # Print the table header with a border
+    printf "| %-8s | %-8s | %-8s | %-8s | %-20s       |\n" "Tile" "Inserts" "Updates" "Deletes" "Timestamp"
+    echo "+------------------------------------------------------------------------+"
+  fi
+  # Print the table data with a border
+  printf "| %-8d | %-8d | %-8d | %-8d | %-20s  |\n" $tile $inserts $updates $deletes "$timestamp"
+  echo "+------------------------------------------------------------------------+"
 }
 
 function check_discovery_runs() {
@@ -176,7 +196,7 @@ function uploader_helper() {
   progress $curr_pos $final_pos "Uploading $artifact_name                       "
       if ls "$path_to_conf/$artifact_name" > /dev/null
         then
-          progress $next_pos $final_pos "Uploading $artifact_name                  "
+          progress $next_pos $final_pos "Uploading $artifact_name                       "
           aws s3 cp "$path_to_conf"/"$artifact_name" "$S3_LANDING_ZONE"/artifacts/"$artifact_name" > /dev/null
         else
           log "ERROR: $path_to_conf/$artifact_name not found"
@@ -305,7 +325,7 @@ function Init {
     sleep 25
     if ls "$path_to_scala"/CQLReplicator.scala
     then
-      progress 3 5 "Uploading CQLReplicator.scala                      "
+      progress 3 5 "Uploading CQLReplicator.scala                  "
       aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator.scala > /dev/null
     else
       log "ERROR: $path_to_scala/CQLReplicator.scala not found"
@@ -316,7 +336,7 @@ function Init {
   # Create Glue Connector
   local glue_conn_name
   if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
-      progress 3 5 "Creating Glue connector and CQLReplicator job       "
+      progress 3 5 "Creating Glue connector and CQLReplicator job  "
       glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
       aws glue create-connection --connection-input '{
          "Name":"'$glue_conn_name'",
@@ -395,76 +415,30 @@ function Init {
   fi
 
   if [[ $SKIP_KEYSPACES_LEDGER == true ]]; then
-    progress 4 5 "Skipping CQLReplicator's internal keyspace"
-    progress 5 5 "Skipping CQLReplicator's internal table"
+    progress 4 5 "Skipping CQLReplicator's internal keyspace     "
+    progress 5 5 "Skipping CQLReplicator's internal table        "
   fi
 
   if [[ $SKIP_KEYSPACES_LEDGER == false ]]; then
-    progress 4 5 "Creating CQLReplicator's internal keyspace and table"
+    progress 4 5 "Creating CQLReplicator's internal resources    "
     # Create a keyspace - migration
     aws keyspaces create-keyspace --keyspace-name migration --region "$AWS_REGION" > /dev/null
     sleep 20
 
     # Create a table - ledger
     aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{
-    "allColumns": [
-      {
-        "name": "ks",
-        "type": "text"
-      },
-      {
-        "name": "tbl",
-        "type": "text"
-      },
-      {
-        "name": "tile",
-        "type": "int"
-      },
-      {
-        "name": "ver",
-        "type": "text"
-      },
-      {
-        "name": "dt_load",
-        "type": "timestamp"
-      },
-      {
-        "name": "dt_offload",
-        "type": "timestamp"
-      },
-      {
-        "name": "load_status",
-        "type": "text"
-      },
-      {
-        "name": "location",
-        "type": "text"
-      },
-      {
-        "name": "offload_status",
-        "type": "text"
-      }
-    ],
-    "partitionKeys": [
-      {
-        "name": "ks"
-      },
-      {
-        "name": "tbl"
-      }
-    ],
-    "clusteringKeys": [
-      {
-        "name": "tile",
-        "orderBy": "ASC"
-      },
-      {
-        "name": "ver",
-        "orderBy": "ASC"
-      }
-    ]
-  }' --region "$AWS_REGION" > /dev/null
-  progress 5 5 "Creating CQLReplicator's internal keyspace and table"
+    "allColumns": [ { "name": "ks", "type": "text" },
+    { "name": "tbl", "type": "text" },
+    { "name": "tile", "type": "int" },
+    { "name": "ver", "type": "text" },
+    { "name": "dt_load", "type": "timestamp" },
+    { "name": "dt_offload", "type": "timestamp" },
+    { "name": "load_status", "type": "text" },
+    { "name": "location", "type": "text" },
+    { "name": "offload_status", "type": "text" } ],
+    "partitionKeys": [ { "name": "ks" }, { "name": "tbl" } ],
+    "clusteringKeys": [ { "name": "tile", "orderBy": "ASC" }, { "name": "ver", "orderBy": "ASC" } ] }' --region "$AWS_REGION" > /dev/null
+  progress 5 5 "Creating CQLReplicator's internal resources    "
 fi
 
 log "Deploy is completed"
@@ -514,7 +488,7 @@ function Start_Discovery {
 function Start_Replication {
   cnt=0
   KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json - | head | jq '.primaryKeys')
-  log "Average primary keys per tile is $KEYS_PER_TILE"
+  log "Sampled primary keys per tile is $KEYS_PER_TILE"
   local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
   while [ $cnt -lt $TILES ]
   do
@@ -727,6 +701,10 @@ while (( "$#" )); do
       SKIP_KEYSPACES_LEDGER=true
       shift 1
       ;;
+    --replication-stats-enabled)
+      REPLICATION_STATS_ENABLED=true
+      shift 1
+      ;;
     --)
       shift
       break
@@ -768,6 +746,21 @@ function Gather_Stats() {
          then
          total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.primaryKeys') && REPLICATED_TOTAL=$(( REPLICATED_TOTAL + total_per_tile ))
       fi
+      if [[ $REPLICATION_STATS_ENABLED == true ]]; then
+        local inserted=0
+        inserted=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.insertedPrimaryKeys')
+        local updated=0
+        updated=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.updatedPrimaryKeys')
+        local deleted=0
+        deleted=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.deletedPrimaryKeys')
+        local timestamp=""
+        timestamp=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.updatedTimestamp')
+        local header=true
+        if [[ $tile != 0 ]]; then
+          header=false
+        fi
+        print_stat_table "$tile" "$inserted" "$updated" "$deleted" "$timestamp" "$header"
+      fi
     fi
   fi
 }
@@ -786,6 +779,10 @@ if [[ $STATE == stats ]]; then
   check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
   check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
   check_input "$AWS_REGION" "ERROR: landing zone must be provided"
+  check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
+  check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
+  check_input "$TARGET_TBL" "ERROR: target table name is empty, must be provided"
+  check_input "$TARGET_KS" "ERROR: target keyspace name is empty, must be provided"
   # the barrier without checking if the discovery job is running
   barrier "false"
   tile=0
@@ -795,7 +792,14 @@ if [[ $STATE == stats ]]; then
       Gather_Stats $tile "replication"
       ((tile++))
     done
-
   log "Discovered rows in" "$SOURCE_KS"."$SOURCE_TBL" is "$DISCOVERED_TOTAL"
   log "Replicated rows in" "$TARGET_KS"."$TARGET_TBL" is "$REPLICATED_TOTAL"
+  if [[ $REPLICATION_STATS_ENABLED == true ]]; then
+    t=0
+    while [ $t -lt "$TILES" ]
+    do
+      Gather_Stats $t "detailed-replication"
+      ((t++))
+    done
+  fi
 fi

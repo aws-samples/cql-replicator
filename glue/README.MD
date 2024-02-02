@@ -81,12 +81,15 @@ After running the below command, you should find in the AWS account:
 ## Start migration process
 
 To operate CQLReplicator on AWS Glue, you need to use `--state run` command, followed by a series of parameters. The
-precise
-configuration of these is primarily determined by your unique migration requirements. For instance, these settings may
-vary
-if you choose to replicate TTLs, updates, or offloading objects exceeding 1MB to Amazon S3.
+precise configuration of these is primarily determined by your unique migration requirements. For instance, these
+settings may
+vary if you choose to replicate TTLs, updates, or offloading objects exceeding 1MB to Amazon S3.
 
-Let's run the following command to replicate the workload from the Cassandra cluster to Amazon Keyspaces.
+Estimate the number of tiles, each tile (concurrent glue job) can handle up to 74M primary keys with 299 DPUs (G.025X)
+maximum,
+for example, 8 tiles can handle up to 598M primary keys.
+
+Let's run the following command to replicate the workload from the Cassandra cluster to Amazon Keyspaces:
 
 ```shell
    cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
@@ -146,12 +149,47 @@ In order, to restart failed CQLReplicator jobs, you need to re-run `--state run`
 
 ## Get migration stats
 
-To obtain the number of rows replicated during the back filling phase, run the following command:
+To obtain the number of replicated rows during the back filling phase, run the following command:
 
 ```shell
    cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-west-2 \ 
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
                  --region us-west-2
+```
+
+To obtain the number of replicated rows after the back filling phase, run the following command:
+
+```shell
+cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-west-2 \
+--src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+--region us-west-2 --replication-stats-enabled
+```
+
+```
+    ___ ___  _     ____            _ _           _
+  / ___/ _ \| |   |  _ \ ___ _ __ | (_) ___ __ _| |_ ___  _ __
+ | |  | | | | |   | |_) / _ \ '_ \| | |/ __/ _` | __/ _ \| '__|
+ | |__| |_| | |___|  _ <  __/ |_) | | | (_| (_| | || (_) | |
+  \____\__\_\_____|_| \_\___| .__/|_|_|\___\__,_|\__\___/|_|
+                            |_|
+·······································································
+:     __          _______   _____           _____                     :
+:    /\ \        / / ____| |  __ \         / ____|                    :
+:   /  \ \  /\  / / (___   | |__) | __ ___| (___   ___ _ ____   _____ :
+:  / /\ \ \/  \/ / \___ \  |  ___/ '__/ _ \\___ \ / _ \ '__\ \ / / _ \:
+: / ____ \  /\  /  ____) | | |   | | | (_) |___) |  __/ |   \ V /  __/:
+:/_/    \_\/  \/  |_____/  |_|   |_|  \___/_____/ \___|_|    \_/ \___|:
+·······································································
+[2024-02-02T16:50:18-05:00] OS: Linux
++------------------------------------------------------------------------+
+| Tile     | Inserts  | Updates  | Deletes  | Timestamp                  |
++------------------------------------------------------------------------+
+| 0        | 4        | 1        | 0        | "2024-02-02T21:50:12.888"  |
++------------------------------------------------------------------------+
+| 1        | 2        | 2        | 1        | "2024-02-02T21:50:25.454"  |
++------------------------------------------------------------------------+
+[2024-02-02T16:50:39-05:00] Discovered rows in casereview.casedetails is 70270
+[2024-02-02T16:50:39-05:00] Replicated rows in casereview.casedetails_2 is 70270
 ```
 
 ## Cost optimization

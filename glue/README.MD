@@ -5,8 +5,9 @@ This migration approach ensures zero downtime, no code compilation, predictable 
 ## Architecture
 This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue
 jobs of CQLReplicator.
-Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per tile) to distribute migration
-workload evenly across Glue data processing units.
+Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per one data processing unit
+G.025X) to distribute migration
+workload evenly across data processing units.
 A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1500 WCUs per second against the target table in
 Amazon Keyspaces. This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
@@ -188,9 +189,21 @@ cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-wes
 +------------------------------------------------------------------------+
 | 1        | 2        | 2        | 1        | "2024-02-02T21:50:25.454"  |
 +------------------------------------------------------------------------+
-[2024-02-02T16:50:39-05:00] Discovered rows in casereview.casedetails is 70270
-[2024-02-02T16:50:39-05:00] Replicated rows in casereview.casedetails_2 is 70270
+[2024-02-02T16:50:39-05:00] Discovered rows in ks_test_cql_replicator.test_cql_replicator is 70270
+[2024-02-02T16:50:39-05:00] Replicated rows in ks_test_cql_replicator.test_cql_replicator is 70270
 ```
+
+## AWS Glue Monitoring
+
+You can profile and monitor CQLReplicator operations using AWS Glue job profiler. It collects and processes raw data
+from AWS Glue jobs into readable, near real-time metrics stored in Amazon CloudWatch.
+These statistics are retained and aggregated in CloudWatch so that you can access historical information for a better
+perspective on how your application is performing.
+
+In order tp enable the CQLReplicator enhanced monitoring use the `--enhanced-monitoring-enabled` flag with your init
+command.
+
+***You may incur additional charges when you enable job metrics and CloudWatch custom metrics are created***
 
 ## Cost optimization
 
@@ -262,7 +275,7 @@ After the init phase is completed you can run the following command to start the
 
 ## Clean up
 
-The following command will delete the Glue job, connector, the S3 bucket, and Keyspaces'table ledger:
+The following command will delete the Glue job, connector, the S3 bucket, and the ledger table:
 
 ```shell
    cqlreplicator --state cleanup --landing-zone s3://cql-replicator-1234567890-us-west-2 --region "us-west-2"

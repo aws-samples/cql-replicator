@@ -669,7 +669,7 @@ while (( "$#" )); do
       TRG_SUBNET="$2"
       shift 2
       ;;
-    --sg|-g)
+    --security-groups|-sg)
       SG="$2"
       shift 2
       ;;
@@ -681,7 +681,7 @@ while (( "$#" )); do
       GLUE_IAM_ROLE="$2"
       shift 2
       ;;
-    --az|-z)
+    --availability-zone|-az)
       AZ="$2"
       shift 2
       ;;

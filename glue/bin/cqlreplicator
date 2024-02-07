@@ -44,6 +44,8 @@ REPLICATION_STATS_ENABLED=false
 GLUE_MONITORING=false
 SAFE_MODE=true
 OS=$(uname -a | awk '{print $1}')
+S3_PATH_LIBS=""
+MAVEN_REPO=https://repo1.maven.org/maven2
 
 # Progress bar configuration
 PS=40
@@ -51,15 +53,6 @@ PS=40
 PCC="|"
 PCU="-"
 PPS=2
-
-# Links to the artifacts
-MAVEN_REPO=https://repo1.maven.org/maven2
-ARTIFACTS=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar"
-"/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar"
-"/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar"
-"/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
-"/redis/clients/jedis/4.4.6/jedis-4.4.6.jar"
-"/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar")
 
 set +x
 
@@ -206,6 +199,26 @@ function uploader_helper() {
         fi
 }
 
+function uploader_jars() {
+  cnt=1
+  local artifacts=("$@")
+  total_artifacts=$(echo "${artifacts[@]}" | wc -w)
+  for link in "${artifacts[@]}"
+  do
+    file=$(basename "$link")
+    progress "$cnt" "$total_artifacts" "Uploading jar artifacts"
+    curl -s -O "$MAVEN_REPO""$link"
+    aws s3 cp "$file" "$S3_LANDING_ZONE"/artifacts/"$file" > /dev/null
+    rm "$file"
+    ((cnt++))
+  done
+}
+
+function join_array() {
+  local IFS=","
+  S3_PATH_LIBS+="$*"
+}
+
 function barrier() {
   flag_check_discovery_run="$1"
   while true
@@ -258,6 +271,7 @@ function Clean_Up {
 }
 
 function Init {
+
   if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
       check_input "$AZ" "ERROR:availability zone is, must be provided"
       check_input "$SUBNET" "ERROR:subnet is empty, must be provided"
@@ -285,20 +299,43 @@ function Init {
       fi
   fi
 
-  # Uploading Jars
-  cnt=1
-  total_artifacts=$(echo "${ARTIFACTS[@]}" | wc -w)
-  for link in "${ARTIFACTS[@]}"
-  do
-    file=$(basename "$link")
-    progress "$cnt" "$total_artifacts" "Uploading artifacts from the Maven repo"
-    curl -s -O "$MAVEN_REPO""$link"
-    aws s3 cp "$file" "$S3_LANDING_ZONE"/artifacts/"$file" > /dev/null
-    rm "$file"
-    ((cnt++))
-  done
+  # Uploading the jars
+  ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
+  ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
+  ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar")
+  S3_PATH_BASE=("$S3_LANDING_ZONE/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "$S3_LANDING_ZONE/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-retry-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-core-1.7.1.jar")
+  S3_PATH_MEMORYDB=("$S3_LANDING_ZONE/artifacts/jedis-4.4.6.jar")
+  S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar")
 
-  # Uploading config files
+  uploader_jars "${ARTIFACTS_BASE[@]}"
+  join_array "${S3_PATH_BASE[@]}"
+
+  if [[ $TARGET_TYPE == "keyspaces" ]]; then
+    uploader_jars "${ARTIFACTS_KEYSPACES[@]}"
+    S3_PATH_LIBS+=","
+    join_array "${S3_PATH_KEYSPACES[@]}"
+  fi
+
+  if [[ $TARGET_TYPE == "memorydb" ]]; then
+    uploader_jars "${ARTIFACTS_MEMORYDB[@]}"
+    S3_PATH_LIBS+=","
+    join_array "${S3_PATH_MEMORYDB[@]}"
+  fi
+
+  if [[ $TARGET_TYPE == "opensearch" ]]; then
+    uploader_jars "${ARTIFACTS_OSS[@]}"
+    S3_PATH_LIBS+=","
+    join_array "${S3_PATH_OSS[@]}"
+  fi
+
+  # Nothing to load in order to support parquet files, only for the vanilla Spark
+  #if [[ $TARGET_TYPE == "parquet" ]]; then
+  #      uploader_jars "$ARTIFACTS_PARQUET" "Uploading the target libraries for Parquet"
+  #fi
+
+  # Uploading the config files
   local path_to_conf
   local path_to_scala
   path_to_conf=$(ls -d "$BASE_FOLDER" | sed 's/bin/conf/g')
@@ -394,7 +431,7 @@ function Init {
            --region "$AWS_REGION" \
            --default-arguments '{
                "--job-language":"scala",
-               "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/jedis-4.4.6.jar,'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar,'$S3_LANDING_ZONE'/artifacts/opensearch-spark-30_2.12-1.0.1.jar",
+               "--extra-jars":"'$S3_PATH_LIBS'",
                "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
                "--class":"GlueApp"
                '$enhanced_monitoring'
@@ -416,7 +453,7 @@ function Init {
           --region "$AWS_REGION" \
           --default-arguments '{
               "--job-language":"scala",
-              "--extra-jars":"'$S3_LANDING_ZONE'/artifacts/jedis-4.4.6.jar,'$S3_LANDING_ZONE'/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-retry-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/resilience4j-core-1.7.1.jar,'$S3_LANDING_ZONE'/artifacts/vavr-0.10.4.jar,'$S3_LANDING_ZONE'/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar,'$S3_LANDING_ZONE'/artifacts/opensearch-spark-30_2.12-1.0.1.jar",
+              "--extra-jars":"'$S3_PATH_LIBS'",
               "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
               "--class":"GlueApp"
               '$enhanced_monitoring'
@@ -594,7 +631,7 @@ function Request_Stop {
 
 while (( "$#" )); do
   case "$1" in
-    --state|-c)
+    --state)
       STATE="$2"
       shift 2
       ;;
@@ -602,42 +639,42 @@ while (( "$#" )); do
       TILES="$2"
       shift 2
       ;;
-    --landing-zone|-l)
+    --landing-zone|--lz)
       S3_LANDING_ZONE="$2"
       shift 2
       ;;
-    --writetime-column|-w)
+    --writetime-column|--wc)
       WRITETIME_COLUMN="$2"
       shift 2
       ;;
-    --ttl-column|-e)
+    --ttl-column|--tc)
       TTL_COLUMN="$2"
       shift 2
       ;;
-    --src-keyspace|-k)
+    --src-keyspace|--sk)
       SOURCE_KS="$2"
       shift 2
       ;;
-    --src-table|-o)
+    --src-table|--st)
       SOURCE_TBL="$2"
       shift 2
       ;;
-    --trg-keyspace|-p)
+    --trg-keyspace|--tk)
       TARGET_KS="$2"
       shift 2
       ;;
-    --trg-table|-v)
+    --trg-table|--tt)
       TARGET_TBL="$2"
       shift 2
       ;;
-    --inc-traffic|-i)
+    --inc-traffic|--it)
       #You can increase this value to reduce traffic pressure
       COOLING_PERIOD="$INCR_TRAFFIC"
       log "Incremental traffic for the historical workload is enabled"
       log "Incremental period: $COOLING_PERIOD seconds"
       shift 1
       ;;
-    --offload-large-objects|-x)
+    --offload-large-objects|--olo)
       OFFLOAD_LARGE_OBJECTS="$2"
       check_input "$OFFLOAD_LARGE_OBJECTS" "offload large objects parameter must not be empty"
       validate_json "$OFFLOAD_LARGE_OBJECTS"
@@ -652,76 +689,71 @@ while (( "$#" )); do
       fi
       shift 2
       ;;
-    --stats|-s)
-      STATE="stats"
-      log "Uploading progress..."
-      shift 1
-      ;;
-    --region|-a)
+    --region|--sr)
       AWS_REGION="$2"
       shift 2
       ;;
-    --subnet|-n)
+    --subnet|--ss)
       SUBNET="$2"
       shift 2
       ;;
-    --target-subnet)
+    --target-subnet|--ts)
       TRG_SUBNET="$2"
       shift 2
       ;;
-    --security-groups|-sg)
+    --security-groups|--sg)
       SG="$2"
       shift 2
       ;;
-    --target-sg)
+    --target-sg|--tsg)
       TRG_SG="$2"
       shift 2
       ;;
-    --glue-iam-role|-m)
+    --glue-iam-role|--gir)
       GLUE_IAM_ROLE="$2"
       shift 2
       ;;
-    --availability-zone|-az)
+    --availability-zone|--az)
       AZ="$2"
       shift 2
       ;;
-    --target-az)
+    --target-az|--taz)
       TRG_AZ="$2"
       shift 2
       ;;
-    --target-type|-j)
+    --target-type|--ttp)
       TARGET_TYPE="$2"
       shift 2
       ;;
-    --json-mapping)
+    --json-mapping|--jm)
       JSON_MAPPING="$2"
       shitf 2
       ;;
-    --start-replication-from)
+    --start-replication-from|--srf)
       REPLICATION_POINT_IN_TIME="$2"
       shift 2
       ;;
-    --override-rows-per-worker)
+    --override-rows-per-worker|--orw)
       ROWS_PER_WORKER="$2"
       shift 2
       ;;
-    --skip-glue-connector)
+    --skip-glue-connector|--sgc)
       SKIP_GLUE_CONNECTOR=true
       shift 1
       ;;
-    --skip-keyspaces-ledger)
+    --skip-keyspaces-ledger|--skl)
       SKIP_KEYSPACES_LEDGER=true
       shift 1
       ;;
-    --replication-stats-enabled)
+    --replication-stats-enabled|--rse)
       REPLICATION_STATS_ENABLED=true
       shift 1
       ;;
-    --enhanced-monitoring-enabled)
+    --enhanced-monitoring-enabled|--eme)
       GLUE_MONITORING=true
       shift 1
       ;;
-    --safe-mode-disabled)
+    --safe-mode-disabled|--smd)
       SAFE_MODE=false
       shift 1
       ;;

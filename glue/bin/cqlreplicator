@@ -558,6 +558,15 @@ function Start_Replication {
   KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json - | head | jq '.primaryKeys')
   log "Sampled primary keys per tile is $KEYS_PER_TILE"
   local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
+  if [[ workers -gt 299 ]]; then
+    log "=== The total number of Glue workers are over 299 per each tile (glue job), you have two options:                  ==="
+    log "=== [1] Increase the number of tiles. In order to rerun with the higher number of tiles                            ==="
+    log "=== request a stop for this migration process, and after rerun again with the flag --cleanup-requested             ==="
+    log "======================================================================================================================"
+    log "=== [2] Increase the number of primary keys per worker. Default value is $ROWS_PER_WORKER per worker                         ==="
+    log "=== request a stop for this migration process and rerun again with the flag --override-rows-per-worker <new value> ==="
+    exit 1
+  fi
   while [ $cnt -lt $TILES ]
   do
     check_replication_runs $cnt

@@ -131,6 +131,22 @@ case class FlushingSet[T](maxSize: Int, flushingClient: com.amazonaws.services.s
 object GlueApp {
   def main(sysArgs: Array[String]) {
 
+    def cleanupLedger(cc: CassandraConnector,
+                      logger: GlueLogger,
+                      ks: String, tbl: String,
+                      cleanUpRequested: Boolean,
+                      pt: String): Unit = {
+      if (pt.equals("discovery") && cleanUpRequested) {
+        cc.withSessionDo {
+          session => {
+            session.execute(s"DELETE FROM migration.ledger WHERE ks='$ks' and tbl='$tbl'")
+          }
+            logger.info("Cleaned up the migration.ledger")
+            session.close()
+        }
+      }
+    }
+
     def readReplicationStatsObject(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String): ReplicationStats = {
       Try {
         val s3Object = s3Client.getObject(bucket, key)
@@ -253,7 +269,7 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME", "SAFE_MODE").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
@@ -297,6 +313,10 @@ object GlueApp {
     val olo = args("OFFLOAD_LARGE_OBJECTS")
     val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
     val defaultPartitions = scala.math.max(2, (sparkContext.defaultParallelism / 2 - 2))
+    val cleanUpRequested: Boolean = args("CLEANUP_REQUESTED") match {
+      case "false" => false
+      case _ => true
+    }
 
     //AmazonS3Client to check if a stop requested issued
     val s3ClientConf = new ClientConfiguration().withRetryPolicy(RetryPolicy.builder().withMaxErrorRetry(5).build())
@@ -695,6 +715,8 @@ object GlueApp {
       primaryKeysDf.unpersist()
     }
 
+    cleanupLedger(keyspacesConn, logger, srcKeyspaceName, srcTableName, cleanUpRequested, processType)
+
     Iterator.continually(stopRequested(bcktName)).takeWhile(_ == false).foreach {
       _ => {
         processType match {
@@ -709,6 +731,7 @@ object GlueApp {
             sys.exit()
           }
         }
+        logger.info(s"Cooldown period $WAIT_TIME ms")
         Thread.sleep(WAIT_TIME)
       }
     }

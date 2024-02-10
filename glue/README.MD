@@ -137,7 +137,9 @@ tables before running the cqlreplicator.
 ```
 
 ## Stop migration process
+
 To stop migration process gracefully run the following command:
+
 ```shell
    cqlreplicator --state request-stop --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
@@ -145,8 +147,17 @@ To stop migration process gracefully run the following command:
 
 ## Recover from failures
 
-Customers can simply restart the migration process from the point where it was interrupted by restarting failed jobs.
-In order, to restart failed CQLReplicator jobs, you need to re-run `--state run` with the same parameters.
+Customers can simply restart the migration process from the point where it was interrupted by restarting the failed
+CQLReplicators jobs. To restart the failed CQLReplicators jobs, you need to rerun your `run` command with the same
+parameters
+if both the discovery and some of the replicators have failed. If the discovery job is still running and some of the
+replicators have failed, you need to use extra flag `--skip-discovery`.
+
+## Cleanup the ledger
+
+If you wish to reset the CQLReplicator for a specific table, add the `--cleanup-requested` flag to your `run` command.
+This
+action will clean up both the internal CQlReplicator ledger table and the S3 data.
 
 ## Get migration stats
 
@@ -217,7 +228,7 @@ In order to reduce AWS Glue costs after the historical workload moved to the tar
    --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
    --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 500000`
 
-### Point in time replication
+## Point in time replication
 
 if you want to replicate your data from a timestamp simply add the flag `--start-replication-from` followed by
 the timestamp to your command line:

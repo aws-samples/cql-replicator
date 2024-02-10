@@ -890,7 +890,7 @@ if [[ $STATE == stats ]]; then
   check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
   check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
   check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
-  check_input "$AWS_REGION" "ERROR: landing zone must be provided"
+  check_input "$AWS_REGION" "ERROR: aws region must be provided"
   check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
   check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
   check_input "$TARGET_TBL" "ERROR: target table name is empty, must be provided"

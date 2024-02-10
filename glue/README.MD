@@ -228,7 +228,7 @@ In order to reduce AWS Glue costs after the historical workload moved to the tar
    --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
    --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 500000`
 
-### Point in time replication
+## Point in time replication
 
 if you want to replicate your data from a timestamp simply add the flag `--start-replication-from` followed by
 the timestamp to your command line:

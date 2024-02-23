@@ -4,7 +4,7 @@ Welcome to the NoSQL migration guide. This guide is designed to assist you in mi
 purpose-built NoSQL databases on AWS using CQLReplicator.
 
 The guide covers multiple migration use cases, providing detailed instructions and examples to help you understand
-the process. Whether you're moving data from Cassandra to Amazon Keyspaces, S3, or Amazon MemoryDB for Redis.
+the process. Whether you're moving data from Cassandra to Amazon Keyspaces, S3, DocumentDB or Amazon MemoryDB for Redis.
 
 In addition to migration use cases, the guide explores how you can leverage your data for Data Analytics/ML and
 incremental

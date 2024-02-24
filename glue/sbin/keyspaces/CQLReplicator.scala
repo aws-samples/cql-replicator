@@ -606,7 +606,7 @@ object GlueApp {
       compact(render(jsonNew))
     }
 
-    def getSourceRow(cls: String, wc: String, session: CqlSession, defaultFormat: DefaultFormats): String = {
+    def getSourceRow(cls: String, wc: String, session: CqlSession, defaultFormat: org.json4s.Formats): String = {
       val rs = jsonMapping4s.replication.useCustomSerializer match {
         case false => {
           val row = Option(session.execute(s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())

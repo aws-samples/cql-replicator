@@ -287,6 +287,113 @@ After the init phase is completed you can run the following command to start the
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
 ```
 
+## Compress selected columns
+
+To minimize the size of a large columns in the target table, use the `compressionConfig` in the json mapping.
+All selected columns will be encoded in JSON format and compressed with LZ4 compressor.
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_compressed_columns \
+                                      --json-mapping '{
+                                          "replication": {
+                                            "allColumns": true,
+                                            "columns":[],
+                                            "useCustomSerializer": false
+                                          },
+                                          "keyspaces": {
+                                          "compressionConfig": {
+                                            "enabled": true,
+                                            "compressAllNonPrimaryColumns": false,
+                                            "compressNonPrimaryColumns": ["col2","col3","col4","col5","col6","col7","col8"],
+                                            "targetNameColumn": "compressedPayload"
+                                          }}
+                                        }'
+```
+
+## Replicate only selected columns
+
+if you want to change the replicated columns set `allColumns`:`false`, and set the columns
+list `columns`:`["col1","col2"]`
+in the json mapping during the `run`, for example,
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_compressed_columns \
+                                      --json-mapping '{
+                                          "replication": {
+                                            "allColumns": false,
+                                            "columns":["col1", "col2"],
+                                            "useCustomSerializer": false
+                                          },
+                                          "keyspaces": {
+                                          "compressionConfig": {
+                                            "enabled": false,
+                                            "compressAllNonPrimaryColumns": false,
+                                            "compressNonPrimaryColumns": ["col2","col3","col4","col5","col6","col7","col8"],
+                                            "targetNameColumn": "compressedPayload"
+                                          }}
+                                        }'
+```
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns \
+                                      --json-mapping '{
+                                          "replication": {
+                                            "allColumns": false,
+                                            "columns":["key","col0","col1","col2","col3","col4","col5","col6"],
+                                            "useCustomSerializer": false
+                                          },
+                                          "keyspaces": {
+                                          "compressionConfig": {
+                                            "enabled": false,
+                                            "compressAllNonPrimaryColumns": false,
+                                            "compressNonPrimaryColumns": ["payload"],
+                                            "targetNameColumn": "compressed"
+                                          }}
+                                        }'
+```
+
+## Enable the custom JSON Serializer
+
+The CQLReplicator relies on Cassandra JSON encoding/decoding that has been introduced in Cassandra 2.2, but if you use
+older
+Cassandra version you must enable the custom JSON Serialization on the client side:
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns \
+                                      --json-mapping '{
+                                          "replication": {
+                                            "allColumns": false,
+                                            "columns":["key","col0","col1","col2","col3","col4","col5","col6"],
+                                            "useCustomSerializer": true
+                                          },
+                                          "keyspaces": {
+                                          "compressionConfig": {
+                                            "enabled": false,
+                                            "compressAllNonPrimaryColumns": false,
+                                            "compressNonPrimaryColumns": ["payload"],
+                                            "targetNameColumn": "compressed"
+                                          }}
+                                        }'
+```
+
+The following parameters must be
+set `allColumns`:`false`, `columns` : ["partitionKey", "clusteringKey","regularColumn"],
+and `useCustomSerializer`:`true`.
+
+### Limitations
+
+The custom JSON serializer supports the following data types: boolean, int, text, ascii, bigint, blob, counter, date,
+decimal,
+double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
+
 ## Clean up
 
 The following command will delete the Glue job, connector, the S3 bucket, and the ledger table:

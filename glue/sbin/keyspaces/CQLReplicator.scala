@@ -23,11 +23,6 @@ import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.DataFrame
-
-import java.time.Duration
-import java.util.Optional
-import org.joda.time.LocalDateTime
-
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 
@@ -43,6 +38,10 @@ import com.datastax.spark.connector._
 import com.datastax.oss.driver.api.core.NoNodeAvailableException
 import com.datastax.oss.driver.api.core.AllNodesFailedException
 import com.datastax.oss.driver.api.core.servererrors._
+import com.datastax.oss.driver.api.core.cql.Row
+import com.datastax.oss.driver.api.core.`type`.DataType
+import com.datastax.oss.driver.api.core.`type`.DataTypes
+import com.datastax.oss.driver.api.core.CqlSession
 
 import io.github.resilience4j.retry.{Retry, RetryConfig}
 import io.github.resilience4j.core.IntervalFunction
@@ -58,6 +57,15 @@ import org.json4s.jackson.Serialization.write
 
 import java.util.Base64
 import java.nio.charset.StandardCharsets
+import java.math.BigDecimal
+import java.net.InetAddress
+import java.nio.ByteBuffer
+import java.time.{Instant, LocalDate}
+import java.time.format.DateTimeFormatter
+import java.util.UUID
+import java.time.Duration
+import java.util.Optional
+import org.joda.time.LocalDateTime
 
 import net.jpountz.lz4.{LZ4Factory, LZ4Compressor}
 
@@ -77,11 +85,89 @@ class StatsS3Exception(s: String) extends RuntimeException {
   println(s)
 }
 
+class CompressionException(s: String) extends RuntimeException {
+  println(s)
+}
+
+class CustomSerializationException(s: String) extends RuntimeException {
+  println(s)
+}
+
 sealed trait Stats
 
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
 
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
+
+case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false)
+
+case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
+
+case class Keyspaces(compressionConfig: CompressionConfig)
+
+case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
+
+// **************************Custom JSON Serialzer Start*******************************************
+class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.driver.api.core.cql.Row] {
+  implicit val formats: DefaultFormats.type = DefaultFormats
+
+  def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
+    sep match {
+      case None => {
+        val output = bytes.map("%02x".format(_)).mkString
+        s"0x$output"
+      }
+      case _ => {
+        val output = bytes.map("%02x".format(_)).mkString(sep.get)
+        s"0x$output"
+      }
+    }
+  }
+
+  override def serialize(implicit format: org.json4s.Formats): PartialFunction[Any, JValue] = {
+    case row: com.datastax.oss.driver.api.core.cql.Row =>
+      val names = row.getColumnDefinitions.asScala.map(_.getName.asCql(true)).toList
+      val values = (0 until row.getColumnDefinitions.asScala.size).map { i =>
+        val name = names(i)
+        val dataType = row.getColumnDefinitions.get(i).getType
+        if (row.isNull(i)) {
+          name -> null
+        } else {
+          val value = getValue(row, i, dataType)
+          name -> value
+        }
+      }.toMap
+      Extraction.decompose(values)
+  }
+
+  private def getValue(row: com.datastax.oss.driver.api.core.cql.Row, i: Int, dataType: DataType): Any = {
+    dataType match {
+      case DataTypes.BOOLEAN => row.getBoolean(i)
+      case DataTypes.INT => row.getInt(i)
+      case DataTypes.TEXT => row.getString(i)
+      case DataTypes.ASCII => row.getString(i)
+      case DataTypes.BIGINT => row.getLong(i)
+      case DataTypes.BLOB => binToHex(row.getByteBuffer(i).array())
+      case DataTypes.COUNTER => row.getLong(i)
+      case DataTypes.DATE => row.getLocalDate(i).format(DateTimeFormatter.ISO_LOCAL_DATE)
+      case DataTypes.DECIMAL => row.getBigDecimal(i)
+      case DataTypes.DOUBLE => row.getDouble(i)
+      case DataTypes.FLOAT => row.getFloat(i)
+      case DataTypes.TIMESTAMP => row.getInstant(i).toString.replace("T", " ")
+      case DataTypes.SMALLINT => row.getInt(i)
+      case DataTypes.TIMEUUID => row.getUuid(i).toString
+      case DataTypes.UUID => row.getUuid(i).toString
+      case DataTypes.TINYINT => row.getByte(i)
+      case _ => throw new CustomSerializationException(s"Unsupported data type: $dataType")
+    }
+  }
+
+  override def deserialize(implicit format: org.json4s.Formats): PartialFunction[(org.json4s.TypeInfo, JValue), com.datastax.oss.driver.api.core.cql.Row] = {
+    ???
+  }
+}
+
+// *******************************Custom JSON Serialzer End*********************************************
 
 class SupportFunctions() {
   def correctEmptyBinJsonValues(cols: List[String], input: String): String = {
@@ -200,6 +286,14 @@ object GlueApp {
         }
     }
 
+    def parseJSONMapping(json: String): JsonMapping = json match {
+      case "None" => JsonMapping(Replication(), Keyspaces(CompressionConfig()))
+      case str => {
+        implicit val formats = DefaultFormats
+        parse(json).extract[JsonMapping]
+      }
+    }
+
     def preFlightCheck(connection: CassandraConnector, keyspace: String, table: String, dir: String): Unit = {
       val logger = new GlueLogger
       Try {
@@ -251,7 +345,7 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
@@ -294,6 +388,7 @@ object GlueApp {
     val source = s"sourceCluster.$srcKeyspaceName.$srcTableName"
     val ttlColumn = args("TTL_COLUMN")
     val olo = args("OFFLOAD_LARGE_OBJECTS")
+    val jsonMapping = args("JSON_MAPPING")
     val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
     val defaultPartitions = scala.math.max(2, (sparkContext.defaultParallelism / 2 - 2))
     val cleanUpRequested: Boolean = args("CLEANUP_REQUESTED") match {
@@ -310,15 +405,6 @@ object GlueApp {
     preFlightCheck(cassandraConn, srcKeyspaceName, srcTableName, "source")
     preFlightCheck(keyspacesConn, trgKeyspaceName, trgTableName, "target")
     logger.info("Preflight check completed")
-
-    val selectStmtWithTTL = ttlColumn match {
-      case "None" => ""
-      case _ => {
-        val tmpMeta = cassandraConn.openSession.getMetadata.getKeyspace(srcKeyspaceName).get.getTable(srcTableName).get
-        val lstColumns = tmpMeta.getColumns.asScala.map(x => x._1.toString).toSeq :+ s"ttl($ttlColumn)"
-        lstColumns.mkString(",")
-      }
-    }
 
     val pkFinal = columnTs match {
       case "None" => inferKeys(cassandraConn, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
@@ -337,6 +423,28 @@ object GlueApp {
     val allColumnsFromSource = getAllColumns(cassandraConn, srcKeyspaceName, srcTableName)
     val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
 
+    val jsonMappingRaw = new String(Base64.getDecoder().decode(jsonMapping.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
+    logger.info(s"Json mapping: $jsonMappingRaw")
+    val jsonMapping4s = parseJSONMapping(jsonMappingRaw)
+    val replicatedColumns = jsonMapping4s match {
+      case JsonMapping(Replication(true, _, _), _) => "*"
+      case rep => rep.replication.columns.mkString(",")
+    }
+
+    val selectStmtWithTTL = ttlColumn match {
+      case s if s.equals("None") => ""
+      case s if (!s.equals("None") && replicatedColumns.equals("*")) => {
+        //val tmpMeta = cassandraConn.openSession.getMetadata.getKeyspace(srcKeyspaceName).get.getTable(srcTableName).get
+        //val lstColumns = tmpMeta.getColumns.asScala.map(x => x._1.toString).toSeq :+ s"ttl($ttlColumn)"
+        val lstColumns = allColumnsFromSource.flatMap(_.keys).toSeq :+ s"ttl($ttlColumn)"
+        lstColumns.mkString(",")
+      }
+      case s if !(s.equals("None") || replicatedColumns.equals("*")) => {
+        val lstColumns = replicatedColumns.toSeq :+ s"ttl($ttlColumn)"
+        lstColumns.mkString(",")
+      }
+    }
+
     def compressWithLZ4(input: String): String = {
       val lz4Factory = LZ4Factory.fastestInstance()
       val compressor: LZ4Compressor = lz4Factory.fastCompressor()
@@ -346,6 +454,30 @@ object GlueApp {
       val compressedLength: Int = compressor.compress(inputBytes, 0, inputBytes.length, compressedOutput, 0, maxCompressedLength)
       val compressedBytes = compressedOutput.slice(0, compressedLength)
       Base64.getEncoder.encodeToString(compressedBytes)
+    }
+
+    def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
+      sep match {
+        case None => {
+          val output = bytes.map("%02x".format(_)).mkString
+          s"0x$output"
+        }
+        case _ => {
+          val output = bytes.map("%02x".format(_)).mkString(sep.get)
+          s"0x$output"
+        }
+      }
+    }
+
+    def compressWithLZ4B(input: String): Array[Byte] = {
+      val lz4Factory = LZ4Factory.fastestInstance()
+      val compressor: LZ4Compressor = lz4Factory.fastCompressor()
+      val inputBytes = input.getBytes("UTF-8")
+      val maxCompressedLength: Int = compressor.maxCompressedLength(inputBytes.length)
+      val compressedOutput = new Array[Byte](maxCompressedLength)
+      val compressedLength: Int = compressor.compress(inputBytes, 0, inputBytes.length, compressedOutput, 0, maxCompressedLength)
+      val compressedBytes = compressedOutput.slice(0, compressedLength)
+      compressedBytes
     }
 
     def stopRequested(bucket: String): Boolean = {
@@ -399,6 +531,39 @@ object GlueApp {
       }
     }
 
+    def compressValues(json: String): String = {
+      if (jsonMapping4s.keyspaces.compressionConfig.enabled) {
+        val jPayload = parse(json)
+
+        val compressColumns = jsonMapping4s.keyspaces.compressionConfig.compressAllNonPrimaryColumns match {
+          case true => {
+            val acfs = allColumnsFromSource.flatMap(_.keys).toSet
+            val excludePks = columns.map(x => x._1.toString).toSet
+            acfs.filterNot(excludePks.contains(_))
+          }
+          case _ => jsonMapping4s.keyspaces.compressionConfig.compressNonPrimaryColumns.toSet
+        }
+        val filteredJson = jPayload.removeField {
+          case (key, _) =>
+            compressColumns.contains(key)
+        }
+        val excludedJson = jPayload.filterField {
+          case (key, _) =>
+            compressColumns.contains(key)
+        }
+        val updatedJson = excludedJson.isEmpty match {
+          case false => {
+            val compressedPayload: Array[Byte] = compressWithLZ4B(compact(render(JObject(excludedJson))))
+            filteredJson merge JObject(jsonMapping4s.keyspaces.compressionConfig.targetNameColumn -> JString(binToHex(compressedPayload)))
+          }
+          case _ => throw new CompressionException("Compressed payload is empty")
+        }
+        compact(render(updatedJson))
+      } else {
+        json
+      }
+    }
+
     def putStats(bucket: String, key: String, objectName: String, stats: Stats): Unit = {
       implicit val formats = DefaultFormats
       val (newContent, message) = stats match {
@@ -441,9 +606,27 @@ object GlueApp {
       compact(render(jsonNew))
     }
 
+    def getSourceRow(cls: String, wc: String, session: CqlSession, defaultFormat: DefaultFormats): String = {
+      val rs = jsonMapping4s.replication.useCustomSerializer match {
+        case false => {
+          val row = Option(session.execute(s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+          row.get.getString(0).replace("'", "\\\\u0027")
+        }
+        case _ => {
+          val row = Option(session.execute(s"SELECT $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+          Serialization.write(row)(defaultFormat)
+        }
+      }
+      rs
+    }
+
     def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(
         partition => {
+          val customFormat = jsonMapping4s.replication.useCustomSerializer match {
+            case true => DefaultFormats + new CustomResultSetSerializer
+            case _ => DefaultFormats
+          }
           val supportFunctions = new SupportFunctions()
           val retryConfig = RetryConfig.custom.maxAttempts(MAX_RETRY_ATTEMPTS).
             intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1)).
@@ -466,9 +649,10 @@ object GlueApp {
                 if (op == "insert" || op == "update") {
                   cassandraConn.withSessionDo { session => {
                     if (ttlColumn.equals("None")) {
-                      val rs = Option(session.execute(s"SELECT json * FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
+                      val rs = getSourceRow(replicatedColumns, whereClause, session, customFormat)
                       if (!rs.isEmpty) {
-                        val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs.get.getString(0).replace("'", "\\\\u0027"))
+                        val jsonRowEscaped = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
+                        val jsonRow = compressValues(jsonRowEscaped)
                         keyspacesConn.withSessionDo {
                           session => {
                             offloadLargeObjects match {
@@ -486,9 +670,10 @@ object GlueApp {
                       }
                     }
                     else {
-                      val rs = Option(session.execute(s"SELECT json $selectStmtWithTTL FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
+                      val rs = getSourceRow(selectStmtWithTTL, whereClause, session, customFormat)
                       if (!rs.isEmpty) {
-                        val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs.get.getString(0).replace("'", "\\\\u0027"))
+                        val jsonRowEscaped = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
+                        val jsonRow = compressValues(jsonRowEscaped)
                         val json4sRow = parse(jsonRow)
                         keyspacesConn.withSessionDo {
                           session => {
@@ -535,7 +720,7 @@ object GlueApp {
       }
     }
 
-    def rowToStatement(row: Row, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)]): String = {
+    def rowToStatement(row: org.apache.spark.sql.Row, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)]): String = {
       val whereStmt = new StringBuilder
       columnsPos.foreach { el =>
         val colName = el._1

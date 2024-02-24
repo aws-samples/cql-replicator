@@ -38,7 +38,7 @@ ROWS_PER_WORKER=250000
 TARGET_TYPE=keyspaces
 SKIP_GLUE_CONNECTOR=false
 SKIP_KEYSPACES_LEDGER=false
-JSON_MAPPING=""
+JSON_MAPPING_B64=$(echo "None" | base64)
 REPLICATION_POINT_IN_TIME=0
 REPLICATION_STATS_ENABLED=false
 GLUE_MONITORING=false
@@ -504,7 +504,6 @@ log "Deploy is completed"
 }
 
 function Start_Discovery {
-  log "Starting discovery process..."
   check_input "$TILES" "ERROR: tiles parameter is empty, must be provided"
   check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
   check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
@@ -548,6 +547,7 @@ function Start_Discovery {
         "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
         "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
         "--CLEANUP_REQUESTED":"'$CLEANUP_REQUESTED'",
+        "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
         "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
      JOBS+=("$rs")
   fi
@@ -585,6 +585,7 @@ function Start_Replication {
           "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
           "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
           "--CLEANUP_REQUESTED":"false",
+          "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
           "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
        JOBS+=("$rs")
       sleep $COOLING_PERIOD
@@ -765,7 +766,17 @@ while (( "$#" )); do
       ;;
     --json-mapping|--jm)
       JSON_MAPPING="$2"
-      shitf 2
+      echo "$JSON_MAPPING" | jq empty
+      log "Provided a json mapping configuration $JSON_MAPPING"
+            # Should work for AWS CloudShell, use 0 to disable line wrapping
+      if [[ $OS == Linux ]]; then
+        JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64 -w 0)
+      fi
+            # Use base64 without params for MacOS instead
+      if [[ $OS == Darwin ]]; then
+        JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64)
+      fi
+      shift 2
       ;;
     --start-replication-from|--srf)
       REPLICATION_POINT_IN_TIME="$2"
@@ -810,8 +821,8 @@ while (( "$#" )); do
     --cleanup-requested|--cr)
       log "The ledger is going to be cleaned up"
       CLEANUP_REQUESTED="true"
-    shift 1
-    ;;
+      shift 1
+      ;;
     --)
       shift
       break

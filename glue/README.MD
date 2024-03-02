@@ -289,8 +289,8 @@ After the init phase is completed you can run the following command to start the
 
 ## Compress selected columns
 
-To minimize the size of a large columns in the target table, use the `compressionConfig` in the json mapping.
-All selected columns will be encoded in JSON format and compressed with LZ4 compressor.
+To minimize the size of large columns in the target table, enable the `compressionConfig` in the json mapping.
+All selected columns will be encoded in JSON format and compressed by LZ4 compressor.
 
 ```shell
 ./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \

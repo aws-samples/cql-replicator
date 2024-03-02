@@ -244,7 +244,8 @@ setting of the driver by a factor of three in `KeyspacesConnector.conf`.
 
 #### Step 4: Create the CQLReplicator ledger table in Account B
 
-Finally, you need to manually create `migration.ledger` table in Account B before running the replication process.
+During the init phase use the `--skip-keyspaces-ledger` to skip the `migration.ledger` creation in Account A.
+After, you need to manually create the `migration.ledger` table in Account B before running the replication process.
 
 ```bash
 aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{

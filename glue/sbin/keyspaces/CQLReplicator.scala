@@ -27,9 +27,7 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 
 import com.amazonaws.services.s3.{AmazonS3Client, AmazonS3, AmazonS3ClientBuilder}
-import com.amazonaws.services.s3.model.{ObjectMetadata, DeleteObjectsRequest, ObjectListing, S3ObjectSummary}
-import com.amazonaws.services.s3.model.S3Object
-import com.amazonaws.services.s3.model.S3ObjectInputStream
+import com.amazonaws.services.s3.model.{S3Object, S3ObjectInputStream, ObjectMetadata, DeleteObjectsRequest, ObjectListing, S3ObjectSummary}
 import com.amazonaws.ClientConfiguration
 import com.amazonaws.retry.RetryPolicy
 
@@ -99,7 +97,9 @@ case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String
 
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
 
-case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false)
+case class MaterialzedViewConfig(enabled: Boolean = false, mvName: String = "")
+
+case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterialzedViewConfig = MaterialzedViewConfig())
 
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
 
@@ -363,15 +363,11 @@ object GlueApp {
     val MAX_RETRY_ATTEMPTS = 256
     // Unit ms
     val EXP_BACKOFF = 25
-    sparkSession.conf.set(s"spark.sql.catalog.ledgerCatalog", "com.datastax.spark.connector.datasource.CassandraCatalog")
-    sparkSession.conf.set(s"spark.sql.catalog.sourceCluster", "com.datastax.spark.connector.datasource.CassandraCatalog")
-    sparkSession.conf.set(s"spark.sql.catalog.ledgerCatalog.spark.cassandra.connection.config.profile.path", "KeyspacesConnector.conf")
-    sparkSession.conf.set(s"spark.sql.catalog.sourceCluster.spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
+    sparkSession.conf.set(s"spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
 
     val ledgerTable = "ledger"
     val ledgerKeyspaces = "migration"
     val processType = args("PROCESS_TYPE") // discovery or replication
-    val interanlLedger = s"ledgerCatalog.$ledgerKeyspaces.$ledgerTable"
     val patternForSingleQuotes = "(.*text.*)|(.*date.*)|(.*timestamp.*)|(.*inet.*)".r
 
     // Business configuration
@@ -427,33 +423,20 @@ object GlueApp {
     logger.info(s"Json mapping: $jsonMappingRaw")
     val jsonMapping4s = parseJSONMapping(jsonMappingRaw)
     val replicatedColumns = jsonMapping4s match {
-      case JsonMapping(Replication(true, _, _), _) => "*"
+      case JsonMapping(Replication(true, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
     }
 
     val selectStmtWithTTL = ttlColumn match {
       case s if s.equals("None") => ""
       case s if (!s.equals("None") && replicatedColumns.equals("*")) => {
-        //val tmpMeta = cassandraConn.openSession.getMetadata.getKeyspace(srcKeyspaceName).get.getTable(srcTableName).get
-        //val lstColumns = tmpMeta.getColumns.asScala.map(x => x._1.toString).toSeq :+ s"ttl($ttlColumn)"
         val lstColumns = allColumnsFromSource.flatMap(_.keys).toSeq :+ s"ttl($ttlColumn)"
         lstColumns.mkString(",")
       }
       case s if !(s.equals("None") || replicatedColumns.equals("*")) => {
-        val lstColumns = replicatedColumns.toSeq :+ s"ttl($ttlColumn)"
-        lstColumns.mkString(",")
+        val lstColumns = s"$replicatedColumns,ttl($ttlColumn)"
+        lstColumns
       }
-    }
-
-    def compressWithLZ4(input: String): String = {
-      val lz4Factory = LZ4Factory.fastestInstance()
-      val compressor: LZ4Compressor = lz4Factory.fastCompressor()
-      val inputBytes = input.getBytes("UTF-8")
-      val maxCompressedLength: Int = compressor.maxCompressedLength(inputBytes.length)
-      val compressedOutput = new Array[Byte](maxCompressedLength)
-      val compressedLength: Int = compressor.compress(inputBytes, 0, inputBytes.length, compressedOutput, 0, maxCompressedLength)
-      val compressedBytes = compressedOutput.slice(0, compressedLength)
-      Base64.getEncoder.encodeToString(compressedBytes)
     }
 
     def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
@@ -512,7 +495,7 @@ object GlueApp {
       val prefix = removeLeadingEndingSlashes((offloadLargeObjects \ "prefix").values.toString)
       val xrefColumnName = (offloadLargeObjects \ "xref").values.toString
       val key = java.util.UUID.randomUUID.toString
-      val largeObject = compressWithLZ4((jPayload \ columnName).values.toString)
+      val largeObject = Base64.getEncoder.encodeToString(compressWithLZ4B((jPayload \ columnName).values.toString))
       val jsonStatement = jPayload transformField {
         // Replaced s"s3://$bucket/$prefix/$key" by s"$key"
         case JField(`xrefColumnName`, _) => JField(xrefColumnName, org.json4s.JsonAST.JString(s"$key"))
@@ -863,20 +846,24 @@ object GlueApp {
     }
 
     def keysDiscoveryProcess() {
+      val srcTableForDiscovery = jsonMapping4s.replication.useMaterializedView.enabled match {
+        case true => jsonMapping4s.replication.useMaterializedView.mvName
+        case _ => srcTableName
+      }
       val primaryKeysDf = columnTs match {
         case "None" =>
-          sparkSession.read.option("inferSchema", "true").
-            table(source).
+          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+            load().
             selectExpr(pkFinal.map(c => c): _*).
             persist(cachingMode)
         case ts if ts != "None" && replicationPointInTime == 0 =>
-          sparkSession.read.option("inferSchema", "true").
-            table(source).
+          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+            load().
             selectExpr(pkFinal.map(c => c): _*).
             persist(cachingMode)
         case ts if ts != "None" && replicationPointInTime > 0 =>
-          sparkSession.read.option("inferSchema", "true").
-            table(source).
+          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+            load().
             selectExpr(pkFinal.map(c => c): _*).
             filter(($"ts" > replicationPointInTime) && ($"ts".isNotNull)).
             persist(cachingMode)

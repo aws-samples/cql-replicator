@@ -144,8 +144,8 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
     dataType match {
       case DataTypes.BOOLEAN => row.getBoolean(i)
       case DataTypes.INT => row.getInt(i)
-      case DataTypes.TEXT => row.getString(i)
-      case DataTypes.ASCII => row.getString(i)
+      case DataTypes.TEXT => row.getString(i).replace("'", "\\\\u0027")
+      case DataTypes.ASCII => row.getString(i).replace("'", "\\\\u0027")
       case DataTypes.BIGINT => row.getLong(i)
       case DataTypes.BLOB => binToHex(row.getByteBuffer(i).array())
       case DataTypes.COUNTER => row.getLong(i)

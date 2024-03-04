@@ -50,7 +50,12 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
 
 - `--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the
   self-referencing inbound rule for all traffic
-- `--subnet` - this is the subnet to which the Cassandra cluster belongs
+- `--subnet` - this is the subnet to which the Cassandra cluster belongs. In AWS Glue, when a Glue job needs to run in
+  your Virtual Private Cloud (VPC),
+  AWS Glue sets up elastic network interfaces that enable your Glue jobs to connect securely to other resource within
+  your VPC. Each elastic network interface
+  is assigned a private IP address from the IP address range within the subnet you specified. For example, 20 workers
+  need 20 IP addresses.
 - `--az` - this is the AZ of the subnet
 - `--region` - AWS region where the Cassandra cluster is deployed
 - `--glue-iam-role` - you

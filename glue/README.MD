@@ -146,11 +146,26 @@ and stored in Base64 format on the S3 bucket.
 
 ## Stop migration process
 
-To stop migration process gracefully run the following command:
+To stop migration process gracefully run the following command for all tiles:
 
 ```shell
    cqlreplicator --state request-stop --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
+```
+
+To stop migration process gracefully run the following command for a single tile:
+
+```shell
+   cqlreplicator --state request-single-stop --tile 1 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
+```
+
+To start migration process for a single tile:
+
+```shell
+   cqlreplicator --state run-single -tile 1 --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
 ```
 
 ## Recover from failures
@@ -370,8 +385,8 @@ older
 Cassandra version you must enable the custom JSON Serialization on the client side:
 
 ```shell
-./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
-                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-west-2" --writetime-column col2 \
+                                      --region us-west-2 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns \
                                       --json-mapping '{
                                           "replication": {
@@ -398,6 +413,49 @@ and `useCustomSerializer`:`true`.
 The custom JSON serializer supports the following data types: boolean, int, text, ascii, bigint, blob, counter, date,
 decimal,
 double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
+
+## Know issues
+
+| Error Message/Issue                                                                                                           | CW Discovery logs | CW Replication logs | Work around                                                                                                                                                                                                     | Requires the ledger cleanup |
+|-------------------------------------------------------------------------------------------------------------------------------|-------------------|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------|
+| 1. No space left on device                                                                                                    | Yes               | No                  | Scale out the replication process by increasing the number of tiles                                                                                                                                             | Yes                         |
+| 2. No space left on device                                                                                                    | Yes               | No                  | Scale up the the DPU for the discovery glue job by replacing 1.X to 2.X in `cqlreplicator.sh`                                                                                                                   | No                          |
+| 3. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Create a new Glue connection with the new subnet and attach the CQLReplicator Glue Job                                                                                                                          | No                          |
+| 4. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Add the following param `--override-rows-per-worker 500000` to reduce the number of DPUs/IPs                                                                                                                    | No                          |
+| 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    | No                          |
+| 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> | No                          |
+
+### Work around for `Cassandra timeout during read query at consistency ONE` with Cassandra materialized view
+
+1. Create the materialized view `ks_test_cql_replicator_mv` based on the `ks_test_cql_replicator` in the Cassandra
+   cluster with the same primary key and one regular column
+2. Prepare the json mapping with ```"useMaterializedView": {"enabled": true, "mvName": "ks_test_cql_replicator_mv"}```
+3. Add the json mapping to the run command, e.g.
+
+```shell 
+./cqlreplicator --state run --tiles 8 --landing-zone "s3://cql-replicator-1234567890-us-west-2" --writetime-column col2 \ 
+                                      --ttl-column reg_column --region us-west-2 --src-keyspace ks_test_cql_replicator \ 
+                                      --src-table ks_test_cql_replicator --trg-keyspace ks_test_cql_replicator \ 
+                                      --trg-table ks_test_cql_replicator --json-mapping '{
+                                       "replication": {
+                                         "allColumns": true,
+                                         "columns":[""],
+                                         "useCustomSerializer": false,
+                                         "useMaterializedView": 
+                                           {
+                                             "enabled": true,
+                                             "mvName": "ks_test_cql_replicator_mv"
+                                           }
+                                       },
+                                       "keyspaces": {
+                                           "compressionConfig": {
+                                               "enabled": false,
+                                               "compressAllNonPrimaryColumns": false,
+                                               "compressNonPrimaryColumns": [""],
+                                               "targetNameColumn": ""
+                                           }
+                                       }}'
+```  
 
 ## Clean up
 

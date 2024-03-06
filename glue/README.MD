@@ -424,11 +424,12 @@ double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
 | 4. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Add the following param `--override-rows-per-worker 500000` to reduce the number of DPUs/IPs                                                                                                                    | No                          |
 | 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    | No                          |
 | 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> | No                          |
+| 7. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       | No                          |
 
 ### Work around for `Cassandra timeout during read query at consistency ONE` with Cassandra materialized view
 
 1. Create the materialized view `ks_test_cql_replicator_mv` based on the `ks_test_cql_replicator` in the Cassandra
-   cluster with the same primary key and one regular column
+   cluster with the same primary key and only one regular column
 2. Prepare the json mapping with ```"useMaterializedView": {"enabled": true, "mvName": "ks_test_cql_replicator_mv"}```
 3. Add the json mapping to the run command, e.g.
 

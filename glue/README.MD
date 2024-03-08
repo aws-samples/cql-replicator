@@ -60,7 +60,7 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
   If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
   files
 - `--target-type` - this is an optional parameter, the default value is `keyspaces`, available options: `parquet`
-  , `memorydb`, `opensearch` (preview)
+  , `memorydb`, `opensearch` (preview), `dynamodb`
 - `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
   Keyspaces migration.ledger)

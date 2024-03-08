@@ -31,6 +31,7 @@ AZ=""
 TRG_SUBNET=""
 TRG_AZ=""
 TRG_SG=""
+#Add relevant permissions to the IAM role to allow access to the DynamoDB table if the TARGET_TYPE is dynamodb
 GLUE_IAM_ROLE=""
 AWS_ACCOUNT=""
 KEYS_PER_TILE=0
@@ -317,10 +318,12 @@ function Init {
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
   ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar")
+  ARTIFACTS_DDB=("/software/amazon/awssdk/bundle/2.25.4/bundle-2.25.4.jar" "/software/amazon/awssdk/dynamodb/2.25.4/dynamodb-2.25.4.jar")
   S3_PATH_BASE=("$S3_LANDING_ZONE/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "$S3_LANDING_ZONE/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-retry-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-core-1.7.1.jar")
   S3_PATH_MEMORYDB=("$S3_LANDING_ZONE/artifacts/jedis-4.4.6.jar")
   S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar")
+  S3_PATH_DDB=("$S3_LANDING_ZONE/artifacts/bundle-2.25.4.jar" "$S3_LANDING_ZONE/dynamodb-2.25.4.jar")
 
   uploader_jars "${ARTIFACTS_BASE[@]}"
   join_array "${S3_PATH_BASE[@]}"
@@ -343,6 +346,12 @@ function Init {
     join_array "${S3_PATH_OSS[@]}"
   fi
 
+  if [[ $TARGET_TYPE == "dynamodb" ]]; then
+    uploader_jars "${ARTIFACTS_DDB[@]}"
+    S3_PATH_LIBS+=","
+    join_array "${S3_PATH_DDB[@]}"
+  fi
+
   # Nothing to load in order to support parquet files, only for the vanilla Spark
   #if [[ $TARGET_TYPE == "parquet" ]]; then
   #      uploader_jars "$ARTIFACTS_PARQUET" "Uploading the target libraries for Parquet"
@@ -360,6 +369,10 @@ function Init {
 
   if [[ $TARGET_TYPE == "opensearch" ]]; then
     uploader_helper "OpenSearchConnector.conf" 0 1 5
+  fi
+
+  if [[ $TARGET_TYPE == "dynamodb" ]]; then
+    uploader_helper "DynamoDBConnector.conf" 0 1 5
   fi
 
   # Should be used at least for the ledger

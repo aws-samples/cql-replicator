@@ -91,6 +91,10 @@ class CustomSerializationException(s: String) extends RuntimeException {
   println(s)
 }
 
+class DlqS3Exception(s: String) extends RuntimeException {
+  println(s)
+}
+
 sealed trait Stats
 
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
@@ -286,11 +290,11 @@ object GlueApp {
         }
     }
 
-    def parseJSONMapping(json: String): JsonMapping = json match {
-      case "None" => JsonMapping(Replication(), Keyspaces(CompressionConfig()))
-      case str => {
+    def parseJSONMapping(s: String): JsonMapping = s match {
+      case str if str.equals("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig()))
+      case str if !str.equals("None") => {
         implicit val formats = DefaultFormats
-        parse(json).extract[JsonMapping]
+        parse(s).extract[JsonMapping]
       }
     }
 
@@ -421,7 +425,8 @@ object GlueApp {
 
     val jsonMappingRaw = new String(Base64.getDecoder().decode(jsonMapping.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
     logger.info(s"Json mapping: $jsonMappingRaw")
-    val jsonMapping4s = parseJSONMapping(jsonMappingRaw)
+
+    val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\r\\n|\\r|\\n", ""))
     val replicatedColumns = jsonMapping4s match {
       case JsonMapping(Replication(true, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
@@ -547,6 +552,16 @@ object GlueApp {
       }
     }
 
+    def persistToDlq(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String, event: String): Unit = {
+      //Try {
+      val ts = LocalDateTime.now().toString
+      s3Client.putObject(bucket, s"$key/$ts.msg", event)
+      //} match {
+      //case Failure(_) => throw new DlqS3Exception(s"Can't persist the event to the S3 bucket $bucket")
+      //case Success(_) => logger.info("Persisted the failed event to dlq folder")
+      //}
+    }
+
     def putStats(bucket: String, key: String, objectName: String, stats: Stats): Unit = {
       implicit val formats = DefaultFormats
       val (newContent, message) = stats match {
@@ -619,15 +634,17 @@ object GlueApp {
             case JObject(List(("None", JString("None")))) => null
             case _ => AmazonS3ClientBuilder.defaultClient()
           }
-          /* This section only for debugging
+
+          val s3ClientOnPartitionDlq: com.amazonaws.services.s3.AmazonS3 = AmazonS3ClientBuilder.defaultClient()
           val publisher = retry.getEventPublisher
-          publisher.onRetry(event => logger.info(s"Operation was retried on event $event"))
-          // onError you can offload failed rows to Amazon S3/SQS for the further processing
-          publisher.onError(event => logger.info(s"Operation was failed on event $event"))
-          */
+
           partition.foreach(
             row => {
               val whereClause = rowToStatement(row, columns, columnsPos)
+              //publisher.onIgnoredError(event => {
+              //  logger.info(s"Operation was failed on event $event. The event should be reprocessed")
+              //  persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", whereClause)
+              //})
               if (!whereClause.isEmpty) {
                 if (op == "insert" || op == "update") {
                   cassandraConn.withSessionDo { session => {
@@ -639,13 +656,23 @@ object GlueApp {
                         keyspacesConn.withSessionDo {
                           session => {
                             offloadLargeObjects match {
-                              case JObject(List(("None", JString("None")))) => Retry.decorateSupplier(retry,
-                                () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'")).get()
+                              case JObject(List(("None", JString("None")))) => {
+                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'"
+                                val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
+                                resTry match {
+                                  case Success(_) =>
+                                  case Failure(_) => persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
+                                }
+                              }
                               case _ => {
                                 val json4sRow = parse(jsonRow)
                                 val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition)))
-                                Retry.decorateSupplier(retry,
-                                  () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'")).get()
+                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'"
+                                val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
+                                resTry {
+                                  case Success(_) =>
+                                  case Failure(_) => persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
+                                }
                               }
                             }
                           }
@@ -684,8 +711,12 @@ object GlueApp {
                 if (op == "delete") {
                   keyspacesConn.withSessionDo {
                     session => {
-                      Retry.decorateSupplier(retry,
-                        () => session.execute(s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause")).get()
+                      val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause"
+                      val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
+                      resTry {
+                        case Success(_) =>
+                        case Failure(_) => persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
+                      }
                     }
                   }
                 }

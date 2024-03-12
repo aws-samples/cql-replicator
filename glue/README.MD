@@ -69,6 +69,11 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
 - `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
   Keyspaces migration.ledger)
+- `--replay-log` - this option allows you to replay failed operations during the replication phase, use cases: 
+  1) you have large partitions (over tens of megabytes) in the source, 
+  2) you expect the high number of retries against the target (over 256 retries).
+  The logs will be stored in your landing S3 bucket, e.g. s3://cql-replicator-1234567890-us-west-2/ks-name/tbl-name/dlq,
+  the file format is log-epoch.msg 
 
 ```shell
     cqlreplicator --state init --region us-west-2 \ 

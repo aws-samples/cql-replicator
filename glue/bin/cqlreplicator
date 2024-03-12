@@ -50,6 +50,7 @@ SKIP_DISCOVERY=false
 DEFAULT_ENV=""
 MAVEN_REPO=https://repo1.maven.org/maven2
 CLEANUP_REQUESTED="false"
+REPLAY_LOG="false"
 
 # Progress bar configuration
 PS=40
@@ -78,8 +79,9 @@ cat << "EOF"
 EOF
 
 # preflight checks
-command -v aws -v >/dev/null 2>&1 || { echo >&2 "aws cli requires but it's not installed.  Aborting."; exit 1; }
-command -v curl -V >/dev/null 2>&1 || { echo >&2 "curl requires but it's not installed.  Aborting."; exit 1; }
+command -v aws -v >/dev/null 2>&1 || { echo >&2 "aws cli requires but it's not installed. Aborting."; exit 1; }
+command -v curl -V >/dev/null 2>&1 || { echo >&2 "curl requires but it's not installed. Aborting."; exit 1; }
+command -v jq -V >/dev/null 2>&1 || { echo >&2 "jq requires but it's not installed. Aborting."; exit 1; }
 command -v bc -v >/dev/null 2>&1 || { echo >&2 "bc requires but it's not installed. Aborting. You could try to run: sudo yum install bc -y"; exit 1; }
 
 log() {
@@ -548,6 +550,7 @@ function Start_Discovery {
         "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
         "--CLEANUP_REQUESTED":"'$CLEANUP_REQUESTED'",
         "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
+        "--REPLAY_LOG":"'$REPLAY_LOG'",
         "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
      JOBS+=("$rs")
   fi
@@ -585,6 +588,7 @@ function Start_Replication {
           "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
           "--CLEANUP_REQUESTED":"false",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
+          "--REPLAY_LOG":"'$REPLAY_LOG'",
           "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
        JOBS+=("$rs")
       sleep $COOLING_PERIOD
@@ -624,6 +628,7 @@ function Start_Single_Replication {
           "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
           "--CLEANUP_REQUESTED":"false",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
+          "--REPLAY_LOG":"'$REPLAY_LOG'",
           "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
     JOBS+=("$rs")
   fi
@@ -865,6 +870,11 @@ while (( "$#" )); do
     --cleanup-requested|--cr)
       log "The ledger is going to be cleaned up"
       CLEANUP_REQUESTED="true"
+      shift 1
+      ;;
+    --replay-log|--rl)
+      log "The log of failed retries will be replayed, in order: inserts, updates, and deletes"
+      REPLAY_LOG=true
       shift 1
       ;;
     --)

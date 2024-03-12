@@ -15,7 +15,6 @@ import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.SparkSession
-import scala.collection.JavaConverters._
 import org.apache.spark.sql.cassandra._
 import scala.collection.mutable.ListBuffer
 import org.apache.spark.storage.StorageLevel
@@ -27,7 +26,7 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 
 import com.amazonaws.services.s3.{AmazonS3Client, AmazonS3, AmazonS3ClientBuilder}
-import com.amazonaws.services.s3.model.{S3Object, S3ObjectInputStream, ObjectMetadata, DeleteObjectsRequest, ObjectListing, S3ObjectSummary}
+import com.amazonaws.services.s3.model.{S3Object, S3ObjectInputStream, ObjectMetadata, DeleteObjectsRequest, ObjectListing, S3ObjectSummary, GetObjectRequest, ListObjectsV2Request}
 import com.amazonaws.ClientConfiguration
 import com.amazonaws.retry.RetryPolicy
 
@@ -47,6 +46,7 @@ import io.github.resilience4j.core.IntervalFunction
 import scala.util.{Try, Success, Failure}
 import scala.collection.mutable.StringBuilder
 import scala.io.Source
+import scala.collection.JavaConverters._
 
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
@@ -203,6 +203,49 @@ class SupportFunctions() {
 object GlueApp {
   def main(sysArgs: Array[String]) {
 
+    def isLogObjectPresent(ksName: String,
+                           tblName: String,
+                           bucketName: String,
+                           s3Client: com.amazonaws.services.s3.AmazonS3,
+                           tile: Int, op: String): Option[String] = {
+      val prefix = s"$ksName/$tblName/dlq/$tile/$op"
+      val listObjectsRequest = new ListObjectsV2Request().withBucketName(bucketName).withPrefix(prefix)
+      val objectListing = s3Client.listObjectsV2(listObjectsRequest)
+      val firstObjectKeyOption = objectListing.getObjectSummaries.asScala.headOption.map(_.getKey)
+      firstObjectKeyOption
+    }
+
+    // Strictly Serializable
+    def replayLogs(logger: GlueLogger,
+                   ksName: String,
+                   tblName: String,
+                   bucketName: String,
+                   s3Client: com.amazonaws.services.s3.AmazonS3,
+                   tile: Int,
+                   op: String,
+                   cc: CassandraConnector ): Unit = {
+        val session = cc.openSession
+        Iterator.continually(isLogObjectPresent(ksName, tblName, bucketName, s3Client, tile, op)).takeWhile(_.nonEmpty).foreach {
+          key => {
+            val keyTmp = key.get
+            val getObjectRequest = new GetObjectRequest(bucketName, keyTmp)
+            val s3Object = s3Client.getObject(getObjectRequest)
+            val objectContent = scala.io.Source.fromInputStream(s3Object.getObjectContent).mkString
+            Try {
+              logger.info(s"Detected a failed $op '$keyTmp' in the dlq. The $op is going to be replayed.")
+              session.execute(s"$objectContent IF NOT EXISTS").all()
+            } match {
+              case Failure(_) =>
+              case Success(_) => {
+                s3Client.deleteObject(bucketName, keyTmp)
+                logger.info(s"Operation $op '$keyTmp' replayed and removed from the dlq successfully.")
+              }
+            }
+        }
+      }
+        session.close()
+    }
+
     def cleanupLedger(cc: CassandraConnector,
                       logger: GlueLogger,
                       ks: String, tbl: String,
@@ -349,21 +392,23 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
     val totalTiles = args("TOTAL_TILES").toInt
     val safeMode = args("SAFE_MODE")
+    val replayLog = Try(args("REPLAY_LOG").toBoolean).getOrElse(false)
     // Internal configuration
     val WAIT_TIME = safeMode match {
-      case "true" => 25000
+      case "true" => 20000
       case _ => 0
     }
     val cachingMode = safeMode match {
       case "true" => StorageLevel.DISK_ONLY
       case _ => StorageLevel.MEMORY_AND_DISK_SER
     }
+    // An increased number of retry attemps could potenantially result in a significant number of operations being delayed
     val MAX_RETRY_ATTEMPTS = 256
     // Unit ms
     val EXP_BACKOFF = 25
@@ -553,13 +598,8 @@ object GlueApp {
     }
 
     def persistToDlq(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String, event: String): Unit = {
-      //Try {
       val ts = LocalDateTime.now().toString
-      s3Client.putObject(bucket, s"$key/$ts.msg", event)
-      //} match {
-      //case Failure(_) => throw new DlqS3Exception(s"Can't persist the event to the S3 bucket $bucket")
-      //case Success(_) => logger.info("Persisted the failed event to dlq folder")
-      //}
+      s3Client.putObject(bucket, s"$key/log-$ts.msg", event)
     }
 
     def putStats(bucket: String, key: String, objectName: String, stats: Stats): Unit = {
@@ -636,15 +676,16 @@ object GlueApp {
           }
 
           val s3ClientOnPartitionDlq: com.amazonaws.services.s3.AmazonS3 = AmazonS3ClientBuilder.defaultClient()
+          /* Only for debugging
           val publisher = retry.getEventPublisher
+          publisher.onIgnoredError(event => {
+            logger.info(s"Operation was failed on event $event. The event should be reprocessed")
+          })
+          */
 
           partition.foreach(
             row => {
               val whereClause = rowToStatement(row, columns, columnsPos)
-              //publisher.onIgnoredError(event => {
-              //  logger.info(s"Operation was failed on event $event. The event should be reprocessed")
-              //  persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", whereClause)
-              //})
               if (!whereClause.isEmpty) {
                 if (op == "insert" || op == "update") {
                   cassandraConn.withSessionDo { session => {
@@ -669,7 +710,7 @@ object GlueApp {
                                 val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition)))
                                 val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'"
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
-                                resTry {
+                                resTry match {
                                   case Success(_) =>
                                   case Failure(_) => persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
                                 }
@@ -713,7 +754,7 @@ object GlueApp {
                     session => {
                       val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause"
                       val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
-                      resTry {
+                      resTry match {
                         case Success(_) =>
                         case Failure(_) => persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
                       }
@@ -979,6 +1020,14 @@ object GlueApp {
             keysDiscoveryProcess
           }
           case "replication" => {
+            if (replayLog) {
+              // Replay inserts
+              replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "insert", keyspacesConn)
+              // Replay updates
+              replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "update", keyspacesConn)
+              // Replay deletes
+              replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "delete", keyspacesConn)
+            }
             dataReplicationProcess
           }
           case _ => {

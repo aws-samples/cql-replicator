@@ -9,6 +9,7 @@ target/
 deploy/
 build/
 opt/
+glue-test/
 ecs/docker/CQLReplicator.zip
 # Ignore Gradle GUI config
 gradle-app.setting

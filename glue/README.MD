@@ -50,7 +50,12 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
 
 - `--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the
   self-referencing inbound rule for all traffic
-- `--subnet` - this is the subnet to which the Cassandra cluster belongs
+- `--subnet` - this is the subnet to which the Cassandra cluster belongs. In AWS Glue, when a Glue job needs to run in
+  your Virtual Private Cloud (VPC),
+  AWS Glue sets up elastic network interfaces that enable your Glue jobs to connect securely to other resource within
+  your VPC. Each elastic network interface
+  is assigned a private IP address from the IP address range within the subnet you specified. For example, 20 workers
+  need 20 IP addresses.
 - `--az` - this is the AZ of the subnet
 - `--region` - AWS region where the Cassandra cluster is deployed
 - `--glue-iam-role` - you
@@ -63,7 +68,7 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
   , `memorydb`, `opensearch` (preview)
 - `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
-  Keyspaces migration.ledger)
+  Keyspaces migration.ledger) 
 
 ```shell
     cqlreplicator --state init --region us-west-2 \ 
@@ -129,20 +134,76 @@ Before running the migration process
 configure [lifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html)
 for the S3 bucket to delete objects after expiration. The xref column should be present in the source and the target
 tables before running the cqlreplicator.
+The payload will be compressed by [LZ4](https://fuchsia.googlesource.com/third_party/lz4/+/refs/tags/v1.7.5/README.md)and stored in Base64 format on the S3 bucket.
+
 ```shell
 ./cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --src-keyspace ks_test_cql_replicator \
                 --src-table test_cql_replicator --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
-                --region us-west-2 --ttl-column col3 --offload-large-objects '{"column":"col1","bucket":"my-application-resource",
-                                          "prefix":"ks_test_cql_replicator/test_cql_replicator/col1","xref":"link"}'
+                --region us-west-2 --ttl-column col3 --json-mapping '
+                {
+                 "replication": {
+                   "allColumns": true,
+                   "columns":[""],
+                   "useCustomSerializer": false,
+                   "useMaterializedView": {
+                     "enabled": false,
+                     "mvName": "mvName"
+                  }
+                },
+                 "keyspaces": {
+                   "compressionConfig": {
+                   "enabled": false,
+                   "compressAllNonPrimaryColumns": false,
+                   "compressNonPrimaryColumns": [""],
+                   "targetNameColumn": ""
+                 },
+                 "largeObjectsConfig": {
+                   "enabled": true,
+                   "column": "col1",
+                   "bucket": "my-application-resource",
+                   "prefix": "ks_test_cql_replicator/test_cql_replicator/col1",
+                   "enableRefByTimeUUID": false,
+                   "xref": "link"
+                 }
+                }}'
 ```
+If you enable `enableRefByTimeUUID` the S3 bucket will be populated in the following format s3://my-application-resource/ks_test_cql_replicator/test_cql_replicator/col1/<timeUUID>.
+The target column link will be populated by a referencing timeUUID, and col1 will be skipped.
+
+If you disable `enableRefByTimeUUID` the S3 bucket will be populated in the following format s3://my-application-resource/ks_test_cql_replicator/test_cql_replicator/col1/key=<col0>:<key>/payload,
+where col0 is the clustering column, and key is the partition key. The target column link and col1 will be skipped.
+
+### Replay failed operations (inserts, updates, and deletes)
+
+`--replay-log` - this option allows you to replay failed operations during the replication phase, use cases:
+1) you have large partitions (over tens of megabytes) in the source,
+2) you expect the high number of retries against the target (over 256 retries).
+
+The logs will be stored in your landing S3 bucket, e.g. s3://cql-replicator-1234567890-us-west-2/ks-name/tbl-name/dlq,
+the file format is `log-epoch.msg`.
 
 ## Stop migration process
 
-To stop migration process gracefully run the following command:
+To stop migration process gracefully run the following command for all tiles:
 
 ```shell
    cqlreplicator --state request-stop --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
+```
+
+To stop migration process gracefully run the following command for a single tile:
+
+```shell
+   cqlreplicator --state request-single-stop --tile 1 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator
+```
+
+To start migration process for a single tile:
+
+```shell
+   cqlreplicator --state run-single -tile 1 --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
 ```
 
 ## Recover from failures
@@ -156,8 +217,8 @@ replicators have failed, you need to use extra flag `--skip-discovery`.
 ## Cleanup the ledger
 
 If you wish to reset the CQLReplicator for a specific table, add the `--cleanup-requested` flag to your `run` command.
-This
-action will clean up both the internal CQlReplicator ledger table and the S3 data.
+This action will clean up both the internal CQLReplicator ledger table and the S3 data, but don't forget to remove it
+if you want to stop it and run it again.
 
 ## Get migration stats
 
@@ -283,6 +344,157 @@ After the init phase is completed you can run the following command to start the
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
 ```
+
+## Compress selected columns
+
+To minimize the size of large columns in the target table, enable the `compressionConfig` in the json mapping.
+All selected columns will be encoded in JSON format and compressed by LZ4 compressor.
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_compressed_columns \
+                                      --json-mapping '{
+                                          "replication": {
+                                            "allColumns": true,
+                                            "columns":[],
+                                            "useCustomSerializer": false
+                                          },
+                                          "keyspaces": {
+                                          "compressionConfig": {
+                                            "enabled": true,
+                                            "compressAllNonPrimaryColumns": false,
+                                            "compressNonPrimaryColumns": ["col2","col3","col4","col5","col6","col7","col8"],
+                                            "targetNameColumn": "compressedPayload"
+                                          }}
+                                        }'
+```
+
+## Replicate only selected columns
+
+if you want to change the replicated columns set `allColumns`:`false`, and set the columns
+list `columns`:`["col1","col2"]`
+in the json mapping during the `run`, for example,
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_compressed_columns \
+                                      --json-mapping '{
+                                          "replication": {
+                                            "allColumns": false,
+                                            "columns":["col1", "col2"],
+                                            "useCustomSerializer": false
+                                          },
+                                          "keyspaces": {
+                                          "compressionConfig": {
+                                            "enabled": false,
+                                            "compressAllNonPrimaryColumns": false,
+                                            "compressNonPrimaryColumns": ["col2","col3","col4","col5","col6","col7","col8"],
+                                            "targetNameColumn": "compressedPayload"
+                                          }}
+                                        }'
+```
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns \
+                                      --json-mapping '{
+                                          "replication": {
+                                            "allColumns": false,
+                                            "columns":["key","col0","col1","col2","col3","col4","col5","col6"],
+                                            "useCustomSerializer": false
+                                          },
+                                          "keyspaces": {
+                                          "compressionConfig": {
+                                            "enabled": false,
+                                            "compressAllNonPrimaryColumns": false,
+                                            "compressNonPrimaryColumns": ["payload"],
+                                            "targetNameColumn": "compressed"
+                                          }}
+                                        }'
+```
+
+## Enable the custom JSON Serializer
+
+The CQLReplicator relies on Cassandra JSON encoding/decoding that has been introduced in Cassandra 2.2, but if you use
+older
+Cassandra version you must enable the custom JSON Serialization on the client side:
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-west-2" --writetime-column col2 \
+                                      --region us-west-2 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns \
+                                      --json-mapping '{
+                                          "replication": {
+                                            "allColumns": false,
+                                            "columns":["key","col0","col1","col2","col3","col4","col5","col6"],
+                                            "useCustomSerializer": true
+                                          },
+                                          "keyspaces": {
+                                          "compressionConfig": {
+                                            "enabled": false,
+                                            "compressAllNonPrimaryColumns": false,
+                                            "compressNonPrimaryColumns": ["payload"],
+                                            "targetNameColumn": "compressed"
+                                          }}
+                                        }'
+```
+
+The following parameters must be
+set `allColumns`:`false`, `columns` : ["partitionKey", "clusteringKey","regularColumn"],
+and `useCustomSerializer`:`true`.
+
+### Limitations
+
+The custom JSON serializer supports the following data types: boolean, int, text, ascii, bigint, blob, counter, date,
+decimal,
+double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
+
+## Know issues
+
+| Error Message/Issue                                                                                                           | CW Discovery logs | CW Replication logs | Work around                                                                                                                                                                                                     | Requires the ledger cleanup |
+|-------------------------------------------------------------------------------------------------------------------------------|-------------------|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------|
+| 1. No space left on device                                                                                                    | Yes               | No                  | Scale out the replication process by increasing the number of tiles                                                                                                                                             | Yes                         |
+| 2. No space left on device                                                                                                    | Yes               | No                  | Scale up the the DPU for the discovery glue job by replacing 1.X to 2.X in `cqlreplicator.sh`                                                                                                                   | No                          |
+| 3. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Create a new Glue connection with the new subnet and attach the CQLReplicator Glue Job                                                                                                                          | No                          |
+| 4. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Add the following param `--override-rows-per-worker 500000` to reduce the number of DPUs/IPs                                                                                                                    | No                          |
+| 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    | No                          |
+| 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> | No                          |
+| 7. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       | No                          |
+
+### Work around for `Cassandra timeout during read query at consistency ONE` with Cassandra materialized view
+
+1. Create the materialized view `ks_test_cql_replicator_mv` based on the `ks_test_cql_replicator` in the Cassandra
+   cluster with the same primary key and only one regular column
+2. Prepare the json mapping with ```"useMaterializedView": {"enabled": true, "mvName": "ks_test_cql_replicator_mv"}```
+3. Add the json mapping to the run command, e.g.
+
+```shell 
+./cqlreplicator --state run --tiles 8 --landing-zone "s3://cql-replicator-1234567890-us-west-2" --writetime-column col2 \ 
+                                      --ttl-column reg_column --region us-west-2 --src-keyspace ks_test_cql_replicator \ 
+                                      --src-table ks_test_cql_replicator --trg-keyspace ks_test_cql_replicator \ 
+                                      --trg-table ks_test_cql_replicator --json-mapping '{
+                                       "replication": {
+                                         "allColumns": true,
+                                         "columns":[""],
+                                         "useCustomSerializer": false,
+                                         "useMaterializedView": 
+                                           {
+                                             "enabled": true,
+                                             "mvName": "ks_test_cql_replicator_mv"
+                                           }
+                                       },
+                                       "keyspaces": {
+                                           "compressionConfig": {
+                                               "enabled": false,
+                                               "compressAllNonPrimaryColumns": false,
+                                               "compressNonPrimaryColumns": [""],
+                                               "targetNameColumn": ""
+                                           }
+                                       }}'
+```  
 
 ## Clean up
 

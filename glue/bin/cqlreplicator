@@ -8,6 +8,7 @@ MIGRATOR_VERSION=0.3
 DESCRIPTION="Toolbox for Amazon Keyspaces"
 JOB_NAME=CQLReplicator
 TILES=2
+TILE=""
 PROCESS_TYPE_DISCOVERY=discovery
 PROCESS_TYPE_REPLICATION=replication
 SOURCE_KS=""
@@ -22,7 +23,6 @@ INCR_TRAFFIC=240
 JOBS=()
 DISCOVERED_TOTAL=0
 REPLICATED_TOTAL=0
-OFFLOAD_LARGE_OBJECTS_B64=$(echo "None" | base64)
 BASE_FOLDER=$(pwd -L)
 AWS_REGION=""
 SUBNET=""
@@ -38,7 +38,7 @@ ROWS_PER_WORKER=250000
 TARGET_TYPE=keyspaces
 SKIP_GLUE_CONNECTOR=false
 SKIP_KEYSPACES_LEDGER=false
-JSON_MAPPING=""
+JSON_MAPPING_B64=$(echo "None" | base64)
 REPLICATION_POINT_IN_TIME=0
 REPLICATION_STATS_ENABLED=false
 GLUE_MONITORING=false
@@ -49,6 +49,7 @@ SKIP_DISCOVERY=false
 DEFAULT_ENV=""
 MAVEN_REPO=https://repo1.maven.org/maven2
 CLEANUP_REQUESTED="false"
+REPLAY_LOG="false"
 
 # Progress bar configuration
 PS=40
@@ -77,8 +78,9 @@ cat << "EOF"
 EOF
 
 # preflight checks
-command -v aws -v >/dev/null 2>&1 || { echo >&2 "aws cli requires but it's not installed.  Aborting."; exit 1; }
-command -v curl -V >/dev/null 2>&1 || { echo >&2 "curl requires but it's not installed.  Aborting."; exit 1; }
+command -v aws -v >/dev/null 2>&1 || { echo >&2 "aws cli requires but it's not installed. Aborting."; exit 1; }
+command -v curl -V >/dev/null 2>&1 || { echo >&2 "curl requires but it's not installed. Aborting."; exit 1; }
+command -v jq -V >/dev/null 2>&1 || { echo >&2 "jq requires but it's not installed. Aborting."; exit 1; }
 command -v bc -v >/dev/null 2>&1 || { echo >&2 "bc requires but it's not installed. Aborting. You could try to run: sudo yum install bc -y"; exit 1; }
 
 log() {
@@ -504,7 +506,6 @@ log "Deploy is completed"
 }
 
 function Start_Discovery {
-  log "Starting discovery process..."
   check_input "$TILES" "ERROR: tiles parameter is empty, must be provided"
   check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
   check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
@@ -525,14 +526,13 @@ function Start_Discovery {
   log "SAFE MODE: $SAFE_MODE"
   local workers=$((1 + TILES / 2))
   log "Checking if the discovery job is already running..."
-  check_discovery_runs "true"
   if [[ $CLEANUP_REQUESTED == "true" ]]; then
     log "The ledger is going to be cleaned up"
     confirm "<=== Do you want to continue? ===> "
     log "Deleting objects in $S3_LANDING_ZONE/$SOURCE_KS/$SOURCE_TBL..."
     aws s3 rm "$S3_LANDING_ZONE/$SOURCE_KS/$SOURCE_TBL" --recursive > /dev/null 2>&1
   fi
-  if [ $? = 0 ]; then
+  if check_discovery_runs "true"; then
     Delete_Stop_Event_D
     log "Starting the discovery job..."
     rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type G.1X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
@@ -545,9 +545,10 @@ function Start_Discovery {
         "--TARGET_TBL":"'$TARGET_TBL'",
         "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
         "--SAFE_MODE":"'$SAFE_MODE'",
-        "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
         "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
         "--CLEANUP_REQUESTED":"'$CLEANUP_REQUESTED'",
+        "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
+        "--REPLAY_LOG":"'$REPLAY_LOG'",
         "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
      JOBS+=("$rs")
   fi
@@ -569,8 +570,7 @@ function Start_Replication {
   fi
   while [ $cnt -lt $TILES ]
   do
-    check_replication_runs $cnt
-    if [ $? = 0 ]; then
+    if check_replication_runs $cnt; then
       Delete_Stop_Event_R $cnt
       rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type G.025X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
           "--TILE":"'$cnt'",
@@ -582,9 +582,10 @@ function Start_Replication {
           "--TARGET_TBL":"'$TARGET_TBL'",
           "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
           "--SAFE_MODE":"'$SAFE_MODE'",
-          "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
           "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
           "--CLEANUP_REQUESTED":"false",
+          "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
+          "--REPLAY_LOG":"'$REPLAY_LOG'",
           "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
        JOBS+=("$rs")
       sleep $COOLING_PERIOD
@@ -592,6 +593,41 @@ function Start_Replication {
     ((cnt++))
     progress "$cnt" "$TILES" "Starting Glue Jobs"
   done
+}
+
+function Start_Single_Replication {
+  cnt=$TILE
+  KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json - | head | jq '.primaryKeys')
+  log "Sampled primary keys per tile is $KEYS_PER_TILE"
+  local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
+  if [[ workers -gt 299 ]]; then
+    log "=== The total number of Glue workers are over 299 per each tile (glue job), you have two options:                  ==="
+    log "=== [1] Increase the number of tiles. In order to rerun with the higher number of tiles                            ==="
+    log "=== request a stop for this migration process, and after rerun again with the flag --cleanup-requested             ==="
+    log "======================================================================================================================"
+    log "=== [2] Increase the number of primary keys per worker. Default value is $ROWS_PER_WORKER per worker                         ==="
+    log "=== request a stop for this migration process and rerun again with the flag --override-rows-per-worker <new value> ==="
+    exit 1
+  fi
+  if check_replication_runs "$cnt"; then
+    Delete_Stop_Event_R "$cnt"
+    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type G.025X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
+          "--TILE":"'$cnt'",
+          "--TOTAL_TILES":"'$TILES'",
+          "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
+          "--SOURCE_KS":"'$SOURCE_KS'",
+          "--SOURCE_TBL":"'$SOURCE_TBL'",
+          "--TARGET_KS":"'$TARGET_KS'",
+          "--TARGET_TBL":"'$TARGET_TBL'",
+          "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
+          "--SAFE_MODE":"'$SAFE_MODE'",
+          "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
+          "--CLEANUP_REQUESTED":"false",
+          "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
+          "--REPLAY_LOG":"'$REPLAY_LOG'",
+          "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
+    JOBS+=("$rs")
+  fi
 }
 
 function validate_json() {
@@ -631,13 +667,13 @@ function validate_json() {
 }
 
 function Delete_Stop_Event_D {
-  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/discovery/stopRequested
+  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested"
   # Debug
   # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested"
 }
 
 function Delete_Stop_Event_R {
-  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/replication/"$1"/stopRequested
+  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/"$1"/stopRequested"
   # Debug
   # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested"
 }
@@ -646,15 +682,21 @@ function Request_Stop {
   tile=0
   log "Requested a stop for the discovery job"
 
-  if aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/discovery/stopRequested >/dev/null
+  if aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested" >/dev/null
   then
     while [ $tile -lt $TILES ]
     do
-      log "Requested a stop for the replication tile:" $tile
-      aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key $SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested >/dev/null
+      log "Requested a stop for the replication tile: $tile"
+      aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested" >/dev/null
       ((tile++))
     done
   fi
+}
+
+function Request_Single_Stop {
+  tile=$TILE
+  log "Requested a stop for the replication tile: $tile"
+  aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested" >/dev/null
 }
 
 (( $#<1 )) && Usage_Exit
@@ -667,6 +709,10 @@ while (( "$#" )); do
       ;;
     --tiles|-t)
       TILES="$2"
+      shift 2
+      ;;
+    --tile|-tl)
+      TILE="$2"
       shift 2
       ;;
     --landing-zone|--lz)
@@ -712,21 +758,6 @@ while (( "$#" )); do
       log "Custom incremental period: $COOLING_PERIOD seconds"
       shift 2
       ;;
-    --offload-large-objects|--olo)
-      OFFLOAD_LARGE_OBJECTS="$2"
-      check_input "$OFFLOAD_LARGE_OBJECTS" "offload large objects parameter must not be empty"
-      validate_json "$OFFLOAD_LARGE_OBJECTS"
-      log "Provided a configuration to offload large objects:" "$OFFLOAD_LARGE_OBJECTS"
-      # Should work for AWS CloudShell, use 0 to disable line wrapping
-      if [[ $OS == Linux ]]; then
-          OFFLOAD_LARGE_OBJECTS_B64=$(echo "$OFFLOAD_LARGE_OBJECTS" | base64 -w 0)
-      fi
-      # Use base64 without params for MacOS instead
-      if [[ $OS == Darwin ]]; then
-          OFFLOAD_LARGE_OBJECTS_B64=$(echo "$OFFLOAD_LARGE_OBJECTS" | base64)
-      fi
-      shift 2
-      ;;
     --region|--sr)
       AWS_REGION="$2"
       shift 2
@@ -765,7 +796,17 @@ while (( "$#" )); do
       ;;
     --json-mapping|--jm)
       JSON_MAPPING="$2"
-      shitf 2
+      echo "$JSON_MAPPING" | jq empty
+      log "Provided a json mapping configuration $JSON_MAPPING"
+            # Should work for AWS CloudShell, use 0 to disable line wrapping
+      if [[ $OS == Linux ]]; then
+        JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64 -w 0)
+      fi
+            # Use base64 without params for MacOS instead
+      if [[ $OS == Darwin ]]; then
+        JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64)
+      fi
+      shift 2
       ;;
     --start-replication-from|--srf)
       REPLICATION_POINT_IN_TIME="$2"
@@ -810,8 +851,13 @@ while (( "$#" )); do
     --cleanup-requested|--cr)
       log "The ledger is going to be cleaned up"
       CLEANUP_REQUESTED="true"
-    shift 1
-    ;;
+      shift 1
+      ;;
+    --replay-log|--rl)
+      log "The log of failed retries will be replayed, in order: inserts, updates, and deletes"
+      REPLAY_LOG=true
+      shift 1
+      ;;
     --)
       shift
       break
@@ -835,6 +881,17 @@ if [[ $STATE == run ]]; then
   fi
   Start_Replication
   log "Started jobs:" "${JOBS[@]}"
+fi
+
+if [[ $STATE == run-single ]]; then
+  check_input "$TILE" "ERROR: tile parameter is empty, must be provided"
+  Start_Single_Replication
+  log "Started jobs:" "${JOBS[@]}"
+fi
+
+if [[ $STATE == request-single-stop ]]; then
+  check_input "$TILE" "ERROR: tile parameter is empty, must be provided"
+  Request_Single_Stop
 fi
 
 if [[ $STATE == request-stop ]]; then

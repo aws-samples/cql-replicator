@@ -26,7 +26,9 @@ in `CQLSH` to list all keyspaces and tables.
 
 #### Step 2: Check Functional Compatibility
 
-Amazon Keyspaces is compatible with CQL 3.11 API(backward-compatibility with version 2.x). Check
+Amazon Keyspaces
+is [compatible](https://github.com/aws-samples/amazon-keyspaces-toolkit/blob/master/bin/toolkit-compat-tool.py) with CQL
+3.11 API(backward-compatibility with version 2.x). Check
 with [supported Cassandra APIs, operations, functions, and data types in Amazon Keyspaces](https://docs.aws.amazon.com/keyspaces/latest/devguide/cassandra-apis.html).
 
 #### Step 3: Check Cassandra Cluster Capacity
@@ -197,6 +199,73 @@ the migration tool.
 
 if you want quickly validate the replicated workload with SQL
 use [opensearchsql](https://github.com/opensearch-project/sql)
+
+### Use-case for replicating Amazon Keyspaces table between AWS accounts
+
+![](usecase-keyspaces-aws-accounts.png "Replicating Amazon Keyspaces table between AWS accounts")
+
+You can replicate the Amazon Keyspaces table from a different account without a shared VPC endpoint by using the public
+endpoint
+or deploying a private VPC endpoint in the target account. When not using a shared VPC, each account requires its own
+VPC endpoint.
+In our example Account B requires its own VPC endpoints to share the table. When using VPC endpoints in this
+configuration,
+Amazon Keyspaces appears as a single node cluster to the Cassandra client driver instead of a multi-node cluster.
+
+#### Step 1: Identify Migration Workload in Account A
+
+Identify the keyspaces and tables in your source that you want to replicate to Account B.
+You can use the `DESCRIBE` command in `CQLSH` to list all keyspaces and tables.
+
+#### Step 2: Check Amazon Keyspaces table Capacity
+
+Ensure that you have enough RCUs (read capacity units) on the Keyspaces table to handle replication traffic.
+
+#### Step 3: Configure connectives
+
+- `conf/KeyspacesConnector.conf` points CQLReplicator to Amazon Keyspaces in Account B.
+- `conf/CassandraConnector.conf` points CQLReplicator to Amazon Keyspaces in Account A.
+
+Upon connection, the client driver reaches the DNS server which returns one of the available endpoints in the account’s
+VPC.
+But the client driver is not able to access the `system.peers` table to discover additional endpoints.
+Because there are fewer hosts available, the driver makes fewer connections. To adjust this, increase the connection
+pool
+setting of the driver by a factor of three in `KeyspacesConnector.conf`.
+
+```yaml
+  connection {
+  max-requests-per-connection = 2000
+  pool {
+  local.size = 3
+  }
+  }
+ ```
+
+#### Step 4: Create the CQLReplicator ledger table in Account B
+
+During the init phase use the `--skip-keyspaces-ledger` to skip the `migration.ledger` creation in Account A.
+After, you need to manually create the `migration.ledger` table in Account B before running the replication process.
+
+```bash
+aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{
+    "allColumns": [ { "name": "ks", "type": "text" },
+    { "name": "tbl", "type": "text" },
+    { "name": "tile", "type": "int" },
+    { "name": "ver", "type": "text" },
+    { "name": "dt_load", "type": "timestamp" },
+    { "name": "dt_offload", "type": "timestamp" },
+    { "name": "load_status", "type": "text" },
+    { "name": "location", "type": "text" },
+    { "name": "offload_status", "type": "text" } ],
+    "partitionKeys": [ { "name": "ks" }, { "name": "tbl" } ],
+    "clusteringKeys": [ { "name": "tile", "orderBy": "ASC" }, { "name": "ver", "orderBy": "ASC" } ] }'
+```
+
+#### Step 5: Run CQLReplicator
+
+Follow the instructions provided in the [CQLReplicator documentation](glue/README.MD) to configure, initialize, and run
+the migration tool.
 
 ### License
 

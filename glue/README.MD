@@ -134,15 +134,44 @@ Before running the migration process
 configure [lifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html)
 for the S3 bucket to delete objects after expiration. The xref column should be present in the source and the target
 tables before running the cqlreplicator.
-Your payload will be compressed by [LZ4](https://fuchsia.googlesource.com/third_party/lz4/+/refs/tags/v1.7.5/README.md)
-and stored in Base64 format on the S3 bucket.
+The payload will be compressed by [LZ4](https://fuchsia.googlesource.com/third_party/lz4/+/refs/tags/v1.7.5/README.md)and stored in Base64 format on the S3 bucket.
 
 ```shell
 ./cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --src-keyspace ks_test_cql_replicator \
                 --src-table test_cql_replicator --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
-                --region us-west-2 --ttl-column col3 --offload-large-objects '{"column":"col1","bucket":"my-application-resource",
-                                          "prefix":"ks_test_cql_replicator/test_cql_replicator/col1","xref":"link"}'
+                --region us-west-2 --ttl-column col3 --json-mapping '
+                {
+                 "replication": {
+                   "allColumns": true,
+                   "columns":[""],
+                   "useCustomSerializer": false,
+                   "useMaterializedView": {
+                     "enabled": false,
+                     "mvName": "mvName"
+                  }
+                },
+                 "keyspaces": {
+                   "compressionConfig": {
+                   "enabled": false,
+                   "compressAllNonPrimaryColumns": false,
+                   "compressNonPrimaryColumns": [""],
+                   "targetNameColumn": ""
+                 },
+                 "largeObjectsConfig": {
+                   "enabled": true,
+                   "column": "col1",
+                   "bucket": "my-application-resource",
+                   "prefix": "ks_test_cql_replicator/test_cql_replicator/col1",
+                   "enableRefByTimeUUID": false,
+                   "xref": "link"
+                 }
+                }}'
 ```
+If you enable `enableRefByTimeUUID` the S3 bucket will be populated in the following format s3://my-application-resource/ks_test_cql_replicator/test_cql_replicator/col1/<timeUUID>.
+The target column link will be populated by a referencing timeUUID, and col1 will be skipped.
+
+If you disable `enableRefByTimeUUID` the S3 bucket will be populated in the following format s3://my-application-resource/ks_test_cql_replicator/test_cql_replicator/col1/key=<col0>:<key>/payload,
+where col0 is the clustering column, and key is the partition key. The target column link and col1 will be skipped.
 
 ### Replay failed operations (inserts, updates, and deletes)
 

@@ -23,7 +23,6 @@ INCR_TRAFFIC=240
 JOBS=()
 DISCOVERED_TOTAL=0
 REPLICATED_TOTAL=0
-OFFLOAD_LARGE_OBJECTS_B64=$(echo "None" | base64)
 BASE_FOLDER=$(pwd -L)
 AWS_REGION=""
 SUBNET=""
@@ -546,7 +545,6 @@ function Start_Discovery {
         "--TARGET_TBL":"'$TARGET_TBL'",
         "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
         "--SAFE_MODE":"'$SAFE_MODE'",
-        "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
         "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
         "--CLEANUP_REQUESTED":"'$CLEANUP_REQUESTED'",
         "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
@@ -584,7 +582,6 @@ function Start_Replication {
           "--TARGET_TBL":"'$TARGET_TBL'",
           "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
           "--SAFE_MODE":"'$SAFE_MODE'",
-          "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
           "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
           "--CLEANUP_REQUESTED":"false",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
@@ -624,7 +621,6 @@ function Start_Single_Replication {
           "--TARGET_TBL":"'$TARGET_TBL'",
           "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
           "--SAFE_MODE":"'$SAFE_MODE'",
-          "--OFFLOAD_LARGE_OBJECTS":"'$OFFLOAD_LARGE_OBJECTS_B64'",
           "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
           "--CLEANUP_REQUESTED":"false",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
@@ -760,21 +756,6 @@ while (( "$#" )); do
       COOLING_PERIOD="$2"
       log "Custom incremental traffic for the historical workload is enabled"
       log "Custom incremental period: $COOLING_PERIOD seconds"
-      shift 2
-      ;;
-    --offload-large-objects|--olo)
-      OFFLOAD_LARGE_OBJECTS="$2"
-      check_input "$OFFLOAD_LARGE_OBJECTS" "offload large objects parameter must not be empty"
-      validate_json "$OFFLOAD_LARGE_OBJECTS"
-      log "Provided a configuration to offload large objects:" "$OFFLOAD_LARGE_OBJECTS"
-      # Should work for AWS CloudShell, use 0 to disable line wrapping
-      if [[ $OS == Linux ]]; then
-          OFFLOAD_LARGE_OBJECTS_B64=$(echo "$OFFLOAD_LARGE_OBJECTS" | base64 -w 0)
-      fi
-      # Use base64 without params for MacOS instead
-      if [[ $OS == Darwin ]]; then
-          OFFLOAD_LARGE_OBJECTS_B64=$(echo "$OFFLOAD_LARGE_OBJECTS" | base64)
-      fi
       shift 2
       ;;
     --region|--sr)

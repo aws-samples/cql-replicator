@@ -29,6 +29,7 @@ import com.datastax.oss.driver.api.core.servererrors._
 import com.datastax.oss.driver.api.core.`type`.DataType
 import com.datastax.oss.driver.api.core.`type`.DataTypes
 import com.datastax.oss.driver.api.core.CqlSession
+import com.datastax.oss.driver.api.core.uuid.Uuids
 
 import io.github.resilience4j.retry.{Retry, RetryConfig}
 import io.github.resilience4j.core.IntervalFunction
@@ -36,6 +37,8 @@ import io.github.resilience4j.core.IntervalFunction
 import scala.util.{Failure, Success, Try}
 import scala.io.Source
 import scala.collection.JavaConverters._
+import scala.annotation.tailrec
+import scala.util.matching.Regex
 
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
@@ -48,8 +51,6 @@ import java.time.format.DateTimeFormatter
 import java.time.Duration
 import org.joda.time.LocalDateTime
 import net.jpountz.lz4.{LZ4Compressor, LZ4Factory}
-
-import scala.annotation.tailrec
 
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
@@ -90,8 +91,8 @@ case class MaterialzedViewConfig(enabled: Boolean = false, mvName: String = "")
 case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterialzedViewConfig = MaterialzedViewConfig())
 
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
-
-case class Keyspaces(compressionConfig: CompressionConfig)
+case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
+case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig)
 
 case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
 
@@ -187,6 +188,11 @@ class SupportFunctions() {
 
 object GlueApp {
   def main(sysArgs: Array[String]): Unit = {
+    val patternWhereClauseToMap: Regex = """(\w+)=['"]?(.*?)['"]?(?: and |$)""".r
+
+    def convertCassandraKeyToGenericKey(input: String): String = {
+      patternWhereClauseToMap.findAllIn(input).matchData.map { m => s"${m.group(2)}" }.mkString(":")
+    }
 
     def isLogObjectPresent(ksName: String,
                            tblName: String,
@@ -315,7 +321,7 @@ object GlueApp {
     }
 
     def parseJSONMapping(s: String): JsonMapping = s match {
-      case str if str.equals("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig()))
+      case str if str.equals("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig()))
       case str if !str.equals("None") => {
         implicit val formats: DefaultFormats.type = DefaultFormats
         parse(s).extract[JsonMapping]
@@ -373,7 +379,7 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "OFFLOAD_LARGE_OBJECTS", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
@@ -410,7 +416,6 @@ object GlueApp {
     val bcktName = landingZone.replaceAll("s3://", "")
     val columnTs = args("WRITETIME_COLUMN")
     val ttlColumn = args("TTL_COLUMN")
-    val olo = args("OFFLOAD_LARGE_OBJECTS")
     val jsonMapping = args("JSON_MAPPING")
     val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
     val defaultPartitions = scala.math.max(2, (sparkContext.defaultParallelism / 2 - 2))
@@ -439,9 +444,6 @@ object GlueApp {
     val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
     val columns = inferKeys(cassandraConn, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap
     val columnsPos = scala.collection.immutable.TreeSet(columns.keys.toArray: _*).zipWithIndex
-    val offloadLargeObjTmp = new String(Base64.getDecoder.decode(olo.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
-    logger.info(s"Offload large objects to S3 bucket: $offloadLargeObjTmp")
-    val offloadLargeObjects = parseJSONConfig(offloadLargeObjTmp)
 
     val allColumnsFromSource = getAllColumns(cassandraConn, srcKeyspaceName, srcTableName)
     val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
@@ -517,27 +519,47 @@ object GlueApp {
       str.stripPrefix("s3://")
     }
 
-    def offloadToS3(jPayload: org.json4s.JValue, s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3): JValue = {
-      val columnName = (offloadLargeObjects \ "column").values.toString
-      val bucket = removeS3prefixIfPresent((offloadLargeObjects \ "bucket").values.toString)
-      val prefix = removeLeadingEndingSlashes((offloadLargeObjects \ "prefix").values.toString)
-      val xrefColumnName = (offloadLargeObjects \ "xref").values.toString
-      val key = java.util.UUID.randomUUID.toString
+    def offloadToS3(jPayload: org.json4s.JValue, s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3, whereClause: String): JValue = {
+      val localConfig = jsonMapping4s.keyspaces.largeObjectsConfig
+      val columnName = localConfig.column
+      val bucket = removeS3prefixIfPresent(localConfig.bucket)
+      val prefix = removeLeadingEndingSlashes(localConfig.prefix)
+      val xrefColumnName = localConfig.xref
+      val key = Uuids.timeBased().toString
       val largeObject = Base64.getEncoder.encodeToString(compressWithLZ4B((jPayload \ columnName).values.toString))
-      val jsonStatement = jPayload transformField {
-        // Replaced s"s3://$bucket/$prefix/$key" by s"$key"
-        case JField(`xrefColumnName`, _) => JField(xrefColumnName, org.json4s.JsonAST.JString(s"$key"))
+
+      val updatedJsonStatement = localConfig.enableRefByTimeUUID match {
+        case true => {
+          val jsonStatement = jPayload transformField {
+            case JField(`xrefColumnName`, _) => JField(xrefColumnName, org.json4s.JsonAST.JString(s"$key"))
+          }
+          jsonStatement removeField {
+            case JField(`columnName`, _) => true
+            case _ => false
+          }
+        }
+        case _ => {
+          jPayload removeField {
+            case JField(`columnName`, _) => true
+            case _ => false
+          }
+        }
       }
-      // Remove original payload from the target statement
-      val updatedJsonStatement = jsonStatement removeField {
-        case JField(`columnName`, _) => true
-        case _ => false
+
+      val targetPrefix = localConfig.enableRefByTimeUUID match {
+        case true => {
+          s"$prefix/$key"
+        }
+        case _ => {
+          // Structure: key=pk1:pk2..cc1:cc2/payload
+          s"$prefix/key=${convertCassandraKeyToGenericKey(whereClause)}/payload"
+        }
       }
 
       Try {
-        s3ClientOnPartition.putObject(bucket, s"$prefix/$key", largeObject)
+        s3ClientOnPartition.putObject(bucket, targetPrefix, largeObject)
       } match {
-        case Failure(_) => throw new LargeObjectException("Not able to persist the large object to S3")
+        case Failure(r) => throw new LargeObjectException(s"Not able to persist the large object to the S3 bucket due to $r")
         case Success(_) => updatedJsonStatement
       }
     }
@@ -648,8 +670,8 @@ object GlueApp {
             intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1)).
             retryExceptions(classOf[WriteFailureException], classOf[WriteTimeoutException], classOf[ServerError], classOf[UnavailableException], classOf[NoNodeAvailableException], classOf[AllNodesFailedException]).build()
           val retry = Retry.of("keyspaces", retryConfig)
-          val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = offloadLargeObjects match {
-            case JObject(List(("None", JString("None")))) => null
+          val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
+            case false => null
             case _ => AmazonS3ClientBuilder.defaultClient()
           }
 
@@ -674,8 +696,8 @@ object GlueApp {
                         val jsonRow = compressValues(jsonRowEscaped)
                         keyspacesConn.withSessionDo {
                           session => {
-                            offloadLargeObjects match {
-                              case JObject(List(("None", JString("None")))) => {
+                            jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
+                              case false => {
                                 val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'"
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                                 resTry match {
@@ -685,7 +707,7 @@ object GlueApp {
                               }
                               case _ => {
                                 val json4sRow = parse(jsonRow)
-                                val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition)))
+                                val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition, whereClause)))
                                 val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'"
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                                 resTry match {
@@ -706,15 +728,15 @@ object GlueApp {
                         val json4sRow = parse(jsonRow)
                         keyspacesConn.withSessionDo {
                           session => {
-                            offloadLargeObjects match {
-                              case JObject(List(("None", JString("None")))) => {
+                            jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
+                              case false => {
                                 val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
                                 val ttlVal = getTTLvalue(json4sRow)
                                 Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
                               }
                               case _ => {
                                 val json4sRow = parse(jsonRow)
-                                val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition)
+                                val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
                                 val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
                                 val ttlVal = getTTLvalue(json4sRow)
                                 Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()

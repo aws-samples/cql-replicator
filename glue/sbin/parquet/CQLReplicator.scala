@@ -17,7 +17,6 @@ import org.apache.spark.storage.StorageLevel
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.DataFrame
 import org.joda.time.LocalDateTime
-import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import org.apache.spark.sql.cassandra._
 
 import com.amazonaws.services.s3.AmazonS3ClientBuilder
@@ -55,6 +54,10 @@ class CassandraTypeException(s: String) extends RuntimeException {
 class StatsS3Exception(s: String) extends RuntimeException {
   println(s)
 }
+class PersistToTargetException(s: String) extends RuntimeException {
+  println(s)
+}
+
 case class MaterialzedViewConfig(enabled: Boolean = false, mvName: String = "")
 case class TtlAddOn(enabled: Boolean = false, predicateOp: String = "greaterThan", predicateVal: Long = 0)
 case class PointInTimeReplicationConfig(predicateOp: String = "greaterThan")
@@ -64,7 +67,7 @@ case class Replication(allColumns: Boolean = true,
                        columns: List[String] = List(""),
                        useCustomSerializer: Boolean = false,
                        useMaterializedView: MaterialzedViewConfig = MaterialzedViewConfig())
-case class S3Config(bucket: String = "", prefix: String = "", maxFileSizeMb: Int = 32)
+case class S3Config(bucket: String = null, prefix: String = null, maxFileSizeMb: Int = 32)
 case class JsonMapping(replication: Replication, s3: S3Config)
 
 sealed trait Stats
@@ -398,7 +401,7 @@ object GlueApp {
     logger.info(s"Json mapping: $jsonMappingRaw")
     val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\r\\n|\\r|\\n", ""))
     val replicatedColumns = jsonMapping4s match {
-      case JsonMapping(Replication(true, _, _, _,_,_), _) => "*"
+      case JsonMapping(Replication(true, _, _, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
     }
 
@@ -451,6 +454,7 @@ object GlueApp {
           deleteObjects(s3client.listNextBatchOfObjects(objectListing))
         }
       }
+
       deleteObjects(s3client.listObjects(bucket, key))
     }
 
@@ -491,18 +495,18 @@ object GlueApp {
     }
 
     def getSourceRow(cls: String, wc: String, session: CqlSession, defaultFormat: org.json4s.Formats): String = {
-      val rs = jsonMapping4s.replication.useCustomSerializer match {
-        case false => {
-          val row = Option(session.execute(s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
-          // TODO: Check if the row is empty (where deleted ot TTL)
-          // TODO: log it
-          // TODO: Persist into deleted folder
-          row.get.getString(0).replace("'", "\\\\u0027")
-        }
-        case _ => {
-          val row = Option(session.execute(s"SELECT $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+      val rs = if (jsonMapping4s.replication.useCustomSerializer) {
+        val row = Option(session.execute(s"SELECT $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+        if (row.nonEmpty)
           Serialization.write(row)(defaultFormat)
-        }
+        else
+          ""
+      } else {
+        val row = Option(session.execute(s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+        if (row.nonEmpty)
+          row.get.getString(0).replace("'", "\\\\u0027")
+        else
+          ""
       }
       rs
     }
@@ -529,10 +533,13 @@ object GlueApp {
                       case _ => getSourceRow(selectStmtWithTTL, whereClause, session, customFormat)
                     }
 
-                    if (rs.nonEmpty && ttlColumn == "None") {
-                      val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
-                      fl.add(jsonRow)
-                    } else {
+                    rs.isEmpty match {
+                      case true => logger.info(s"$whereClause not found in the source, the row might be already deleted or expired")
+                      case false if ttlColumn == "None" => {
+                        val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
+                        fl.add(jsonRow)
+                      }
+                      case false if ttlColumn != "None" => {
                         if (jsonMapping4s.replication.ttlAddOn.enabled) {
                           val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
                           val json4sRow = parse(jsonRow)
@@ -545,6 +552,7 @@ object GlueApp {
                             case _ =>
                           }
                         }
+                      }
                     }
                   }
                   if (op == "delete") {
@@ -615,17 +623,21 @@ object GlueApp {
         case false => {
           persistToTarget(shuffleDfV2(df.drop("ts", "group")), columns, columnsPos, tile, op)
           val prefix = s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op"
-          val isS3NonEmpty = s3prefixExist(s3client,bcktName,prefix)
+          val isS3NonEmpty = s3prefixExist(s3client, bcktName, prefix)
           if (isS3NonEmpty == true) {
             val fingerPrint = LocalDateTime.now()
             val dfFromJson = sparkSession.read.option("inferSchema", "true").json(s"$landingZone/tmp/$trgKeyspaceName/$trgTableName/$tile/$op/*").dropDuplicates()
+            val parquetBucket = Option(jsonMapping4s.s3.bucket).getOrElse(bcktName)
+            val parquetPrefix = Option(jsonMapping4s.s3.prefix).getOrElse("parquet-storage")
+            println(s"bucket: $parquetBucket")
+            println(s"prefix: $parquetPrefix")
             dfFromJson.write.format("parquet")
               .mode("overwrite")
-              .save(s"s3://${jsonMapping4s.s3.bucket}/${jsonMapping4s.s3.prefix}/$trgKeyspaceName/$trgTableName/$tile/$op/$fingerPrint")
-            cleanUpJsonObjects(bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
+              .save(s"s3://$parquetBucket/$parquetPrefix/$trgKeyspaceName/$trgTableName/$tile/$op/$fingerPrint")
           }
-          df.count()
+          cleanUpJsonObjects(bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
         }
+          df.count()
         case _ => 0
       }
       cnt

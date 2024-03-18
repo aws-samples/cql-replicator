@@ -302,49 +302,6 @@ the timestamp to your command line:
                  --start-replication-from 1706408365278858
 ```
 
-## Replicate workload to Amazon OpenSearch (preview) or Amazon MemoryDB
-
-In order to connect to Amazon OpenSearch or Amazon MemoryDB you need configure `/conf/OpenSearchConnector.conf`
-or `/conf/RedisConnector.conf`
-
-The following command will create Glue connector to C* (optional for Amazon Keyspaces)
-uses `subnet-XXXXXXX`, `us-west-1a`, and `sg-1`, and
-Glue connector to Amazon OpenSearch Service/Amazon MemoryDB uses `subnet-YYYYYY`, `sg-2`, and `us-west-1a`:
-
-```shell
-cqlreplicator --state init --sg '"sg-1"' \
-                           --subnet "subnet-XXXXXXX" 
-                           --region "us-west-2" \ 
-                           --az "us-west-1a" \
-                           --glue-iam-role "glue-oss-replication" \
-                           --target-type opensearch \
-                           --target-sg "sg-2" \ 
-                           --target-subnet "subnet-YYYYYY" \
-                           --target-az "us-west-1a"
-```
-
-or
-
-```shell
-cqlreplicator --state init --sg '"sg-1"' \
-                           --subnet "subnet-XXXXXXX" 
-                           --region "us-west-2" \ 
-                           --az "us-west-1a" \
-                           --glue-iam-role "glue-memorydb-replication" \
-                           --target-type memorydb \
-                           --target-sg "sg-2" \ 
-                           --target-subnet "subnet-YYYYYY" \
-                           --target-az "us-west-1a"
-```
-
-After the init phase is completed you can run the following command to start the replication process:
-
-```shell
-   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
-                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
-                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
-```
-
 ## Compress selected columns
 
 To minimize the size of large columns in the target table, enable the `compressionConfig` in the json mapping.
@@ -503,6 +460,105 @@ The following command will delete the Glue job, connector, the S3 bucket, and th
 ```shell
    cqlreplicator --state cleanup --landing-zone s3://cql-replicator-1234567890-us-west-2 --region "us-west-2"
 ```
+
+## Replicate data to other targets
+
+The CQLReplicator can replicate data not only from Cassandra to Amazon Keyspaces, but
+also you can use other AWS services as the target, for example, Amazon S3, OpenSearch, and MemoryDB.
+
+### Replicate workload to Amazon S3
+
+You can use the CQLReplicator to replicate the workload from Amazon Keyspaces to Amazon S3, the following init command
+deploys the CQLReplicator for Amazon S3.
+
+```shell
+cqlreplicator --state init --sg '"sg-1"' \
+                           --subnet "subnet-XXXXXXX" 
+                           --region "us-west-2" \ 
+                           --az "us-west-1a" \
+                           --glue-iam-role "glue-s3-replication" \
+                           --target-type parquet
+```
+The following run command starts 8 tiles, and replicate the source table `test_cql_replicator`
+to `s3://cql-replicator-backup/snapshots/keyspace_prefix/table_prefix/[0-7]/[insert|update|delete]/YYYY-MM-HHTMM:SS:ss.sss`.
+
+```shell
+./cqlreplicator --state run --tiles 8 --landing-zone "s3://cql-replicator-1234567890-us-west-2" --ttl-column col2 --region us-west-2 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --trg-keyspace keyspace_prefix  --trg-table table_prefix --writetime-column col1 --json-mapping '
+    {"replication": {
+            "allColumns": true,
+            "ttlAddOn": {
+              "enabled": false,
+              "predicateOp": "lessThan",
+              "predicateVal": 900000
+            },
+            "pointInTimeReplicationConfig": {
+              "predicateOp": "greaterThan"
+            },
+            "columns":[""],
+            "useCustomSerializer": false,
+            "useMaterializedView": {
+              "enabled": false,
+              "mvName": "mvName"
+            }
+        },
+        "s3": {
+          "bucket":"cql-replicator-backup",
+          "prefix": "snapshots",
+          "maxFileSizeMb": 32
+      }}'
+```
+You can specify the S3 bucket name and prefix to store the parquet files. Moreover, you might want to replicate within a specific 
+ timestamp and filter out rows based the TTL parameter in `ttlAddOn` section.
+
+### Replicate workload to Amazon MemoryDB
+
+In order to connect to Amazon MemoryDB you need configure `/conf/RedisConnector.conf` and after run the following command:
+
+```shell
+cqlreplicator --state init --sg '"sg-1"' \
+                           --subnet "subnet-XXXXXXX" 
+                           --region "us-west-2" \ 
+                           --az "us-west-1a" \
+                           --glue-iam-role "glue-memorydb-replication" \
+                           --target-type memorydb \
+                           --target-sg "sg-2" \ 
+                           --target-subnet "subnet-YYYYYY" \
+                           --target-az "us-west-1a"
+```
+
+```shell
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
+```
+### Replicate workload to Amazon OpenSearch
+
+In order to connect to Amazon OpenSearch you need to prepare the connectivity file `/conf/OpenSearchConnector.conf`.
+
+The following command will create Glue connector to C* (optional for Amazon Keyspaces) uses `subnet-XXXXXXX`, `us-west-1a`, and `sg-1`, and
+Glue connector to Amazon OpenSearch Service uses `subnet-YYYYYY`, `sg-2`, and `us-west-1a`:
+
+```shell
+cqlreplicator --state init --sg '"sg-1"' \
+                           --subnet "subnet-XXXXXXX" 
+                           --region "us-west-2" \ 
+                           --az "us-west-1a" \
+                           --glue-iam-role "glue-oss-replication" \
+                           --target-type opensearch \
+                           --target-sg "sg-2" \ 
+                           --target-subnet "subnet-YYYYYY" \
+                           --target-az "us-west-1a"
+```
+
+After the init phase is completed you can run the following command to start the replication process:
+
+```shell
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
+```
+The CQLReplicator replicates your rows as text, the column name will be mapped to the fields in the index without changes
+and the target index name will be in the following format: `trg-keyspace`-`trg-table`.
 
 ## License
 

@@ -322,7 +322,7 @@ object GlueApp {
 
     def parseJSONMapping(s: String): JsonMapping = {
       Option(s) match {
-        case Some("None") => JsonMapping(Replication(), S3Config())
+        case Some("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig()))
         case _ =>
           implicit val formats: DefaultFormats.type = DefaultFormats
           parse(s).extract[JsonMapping]

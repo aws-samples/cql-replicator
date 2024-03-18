@@ -629,8 +629,6 @@ object GlueApp {
             val dfFromJson = sparkSession.read.option("inferSchema", "true").json(s"$landingZone/tmp/$trgKeyspaceName/$trgTableName/$tile/$op/*").dropDuplicates()
             val parquetBucket = Option(jsonMapping4s.s3.bucket).getOrElse(bcktName)
             val parquetPrefix = Option(jsonMapping4s.s3.prefix).getOrElse("parquet-storage")
-            println(s"bucket: $parquetBucket")
-            println(s"prefix: $parquetPrefix")
             dfFromJson.write.format("parquet")
               .mode("overwrite")
               .save(s"s3://$parquetBucket/$parquetPrefix/$trgKeyspaceName/$trgTableName/$tile/$op/$fingerPrint")

@@ -310,21 +310,22 @@ object GlueApp {
       }
     }
 
-    def parseJSONConfig(i: String): org.json4s.JValue = i match {
-      case "None" => JObject(List(("None", JString("None"))))
-      case str =>
-        try {
-          parse(str)
-        } catch {
-          case _: Throwable => JObject(List(("None", JString("None"))))
-        }
-    }
-
+    /*
     def parseJSONMapping(s: String): JsonMapping = s match {
       case str if str.equals("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig()))
       case str if !str.equals("None") => {
         implicit val formats: DefaultFormats.type = DefaultFormats
         parse(s).extract[JsonMapping]
+      }
+    }
+     */
+
+    def parseJSONMapping(s: String): JsonMapping = {
+      Option(s) match {
+        case Some("None") => JsonMapping(Replication(), S3Config())
+        case _ =>
+          implicit val formats: DefaultFormats.type = DefaultFormats
+          parse(s).extract[JsonMapping]
       }
     }
 
@@ -670,12 +671,7 @@ object GlueApp {
             intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1)).
             retryExceptions(classOf[WriteFailureException], classOf[WriteTimeoutException], classOf[ServerError], classOf[UnavailableException], classOf[NoNodeAvailableException], classOf[AllNodesFailedException]).build()
           val retry = Retry.of("keyspaces", retryConfig)
-          val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
-            case false => null
-            case _ => AmazonS3ClientBuilder.defaultClient()
-          }
-
-          val s3ClientOnPartitionDlq: com.amazonaws.services.s3.AmazonS3 = AmazonS3ClientBuilder.defaultClient()
+          val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = AmazonS3ClientBuilder.defaultClient()
           /* Only for debugging
           val publisher = retry.getEventPublisher
           publisher.onIgnoredError(event => {
@@ -702,7 +698,7 @@ object GlueApp {
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                                 resTry match {
                                   case Success(_) =>
-                                  case Failure(_) => persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
+                                  case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
                                 }
                               }
                               case _ => {
@@ -712,7 +708,7 @@ object GlueApp {
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                                 resTry match {
                                   case Success(_) =>
-                                  case Failure(_) => persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
+                                  case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
                                 }
                               }
                             }
@@ -756,7 +752,7 @@ object GlueApp {
                       val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                       resTry match {
                         case Success(_) =>
-                        case Failure(_) => persistToDlq(s3ClientOnPartitionDlq, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
+                        case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
                       }
                     }
                   }
@@ -928,6 +924,7 @@ object GlueApp {
           sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
             load().
             selectExpr(pkFinal.map(c => c): _*).
+            withColumn("ts", lit(0)).
             persist(cachingMode)
         case ts if ts != "None" && replicationPointInTime == 0 =>
           sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").

@@ -49,6 +49,7 @@ import java.util.Base64
 import java.nio.charset.StandardCharsets
 import java.time.format.DateTimeFormatter
 import java.time.Duration
+import java.nio.ByteBuffer
 import org.joda.time.LocalDateTime
 import net.jpountz.lz4.{LZ4Compressor, LZ4Factory}
 
@@ -491,7 +492,9 @@ object GlueApp {
       val compressedOutput = new Array[Byte](maxCompressedLength)
       val compressedLength: Int = compressor.compress(inputBytes, 0, inputBytes.length, compressedOutput, 0, maxCompressedLength)
       val compressedBytes = compressedOutput.slice(0, compressedLength)
-      compressedBytes
+      val sizePrefix = ByteBuffer.allocate(4).putInt(input.length).array()
+      // Add leading 4 bytes (Int) in the compressed value byte array. #125
+      sizePrefix ++ compressedBytes
     }
 
     def stopRequested(bucket: String): Boolean = {

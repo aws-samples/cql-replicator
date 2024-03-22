@@ -1,0 +1,468 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'IAM Role to get started with AWS Glue and Amazon Keyspaces'
+Parameters:
+  CQLReplicatorS3BucketName: 
+      NoEcho: false
+      Description: S3 bucket name to store artifacts
+      Type: String
+      Default: 'cql-replicator-mustbeunique'
+      MinLength: 3
+      MaxLength: 63
+      AllowedPattern: (?!(^xn--|.+-s3alias$))^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$
+  KeyspacesGlueServiceRoleName: 
+      NoEcho: false
+      Description: Glue service role to connect to Amazon Keyspaces and S3
+      Type: String
+      Default: 'amazon-keyspaces-glue-servicerole-mustbeunique'
+      MinLength: 3
+      MaxLength: 63
+      AllowedPattern: (?!(^xn--|.+-s3alias$))^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$
+  CloudwatchDashBoardNameParameter:
+    Type: String
+    Default: 'CQLReplicator'
+    MinLength: 3
+    MaxLength: 63
+    Description: The name of your Amazon Cloud Watch Dashboard for your table's metrics
+  SourceKeyspaceNameParameter:
+    Type: String
+    Default: 'source_keyspace'
+    MinLength: 3
+    MaxLength: 63
+    Description: The name of your source table's keyspace
+  SourceTableNameParameter:
+    Type: String
+    Default: 'source_table'
+    MinLength: 3
+    MaxLength: 63
+    Description: The name of your source table
+  TargetKeyspaceNameParameter:
+    Type: String
+    Default: 'target_keyspace'
+    MinLength: 3
+    MaxLength: 63
+    Description: The name of your destination table's keyspace
+  TargetTableNameParameter:
+    Type: String
+    Default: 'target_table'
+    MinLength: 3
+    MaxLength: 63
+    Description: The name of your cqlrepicator's keyspace
+  MigrationKeyspaceNameParameter:
+    Type: String
+    Default: 'migration'
+    MinLength: 3
+    MaxLength: 63
+    Description: The name of your  cqlrepicator's ledger table
+  MigrationLedgerTableNameParameter:
+    Type: String
+    Default: 'ledger'
+    MinLength: 3
+    MaxLength: 63
+    Description: The name of your destination table
+  SourceAWSRegionParameter:
+    Type: String
+    Default: 'us-east-1'
+    MinLength: 3
+    MaxLength: 20
+    Description: The location of your source region
+  TargetAWSRegionParameter:
+    Type: String
+    Default: 'us-east-1'
+    MinLength: 3
+    MaxLength: 20
+    Description: The location of your target region
+Resources:
+  KeyspacesGlueJobServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${KeyspacesGlueServiceRoleName}'
+      Description: 'AWS Glue service role to write and read data from Amazon Keyspaces'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: glue.amazonaws.com
+          Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+      - arn:aws:iam::aws:policy/AmazonKeyspacesFullAccess
+      - arn:aws:iam::aws:policy/service-role/AWSGlueServiceNotebookRole
+      - arn:aws:iam::aws:policy/CloudWatchFullAccess
+      - arn:aws:iam::aws:policy/CloudWatchFullAccessV2
+      - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: iampass
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 'iam:PassRole'
+                Resource: '*'
+  KeyspacesGlueBucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Sub '${CQLReplicatorS3BucketName}'
+  #Type: AWS::Glue::Connection
+  #Properties:
+  #  CatalogId: SparkCassandraConnector
+  #  ConnectionInput: 
+  #    SparkCassandraConnector
+  #      ConnectionProperties: ''
+  #ConnectionType: CUSTOM
+  #Description: Spark Cassandra Connector
+  #MatchCriteria: 
+  #  - String
+  #Name: Spark Cassandra Connector
+  #PhysicalConnectionRequirements: 
+   # PhysicalConnectionRequirements
+  CWD725Q:
+      Type: AWS::CloudWatch::Dashboard
+      Properties:
+        DashboardName:
+          Ref: CloudwatchDashBoardNameParameter
+        DashboardBody:
+          !Sub
+          '{
+    "widgets": [
+        {
+            "height": 6,
+            "width": 9,
+            "y": 6,
+            "x": 14,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "AWS/Cassandra", "SuccessfulRequestLatency", "TableName", "${TargetTableNameParameter}", "Keyspace", "${TargetKeyspaceNameParameter}", "Operation", "INSERT", { "region": "${TargetAWSRegionParameter}", "color": "#69ae34", "label": "INSERT" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "latency target",
+                "stat": "Average"
+            }
+        },
+        {
+            "height": 6,
+            "width": 8,
+            "y": 0,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "Read Capacity", "id": "e1", "region": "${SourceAWSRegionParameter}", "color": "#b088f5" } ],
+                    [ "AWS/Cassandra", "ConsumedReadCapacityUnits", "TableName", "${SourceTableNameParameter}", "Keyspace", "${SourceKeyspaceNameParameter}", { "region": "${SourceAWSRegionParameter}", "id": "m1", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${SourceAWSRegionParameter}",
+                "period": 300,
+                "title": "consumed capacity source",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 9,
+            "y": 18,
+            "x": 14,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "User Errors", "id": "e1", "region": "${TargetAWSRegionParameter}", "color": "#A76F63" } ],
+                    [ { "expression": "m2/PERIOD(m2)", "label": "System Errors", "id": "e2", "region": "${TargetAWSRegionParameter}", "color": "#fe6e73" } ],
+                    [ "AWS/Cassandra", "UserErrors", "TableName", "${TargetTableNameParameter}", "Keyspace", "${TargetKeyspaceNameParameter}", "Operation", "INSERT", { "region": "${TargetAWSRegionParameter}", "id": "m1", "visible": false } ],
+                    [ ".", "SystemErrors", ".", ".", ".", ".", ".", ".", { "region": "${TargetAWSRegionParameter}", "id": "m2", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "User Errors target",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 8,
+            "y": 30,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "AWS/Cassandra", "ReturnedItemCountBySelect", "TableName", "${SourceTableNameParameter}", "Keyspace", "${SourceKeyspaceNameParameter}", "Operation", "SELECT", { "region": "${SourceAWSRegionParameter}", "color": "#b088f5" } ],
+                    [ "...", { "region": "${SourceAWSRegionParameter}", "stat": "p99", "color": "#eb92ad" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${SourceAWSRegionParameter}",
+                "period": 300,
+                "title": "rows returned source",
+                "stat": "Average"
+            }
+        },
+        {
+            "height": 6,
+            "width": 8,
+            "y": 6,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "AWS/Cassandra", "SuccessfulRequestLatency", "TableName", "${SourceTableNameParameter}", "Keyspace", "${SourceKeyspaceNameParameter}", "Operation", "SELECT", { "region": "${SourceAWSRegionParameter}", "label": "SELECT", "color": "#b088f5" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${SourceAWSRegionParameter}",
+                "period": 300,
+                "title": "latency source",
+                "stat": "Average"
+            }
+        },
+        {
+            "height": 6,
+            "width": 9,
+            "y": 0,
+            "x": 14,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "Write capacity", "id": "e1", "region": "${TargetAWSRegionParameter}", "color": "#69ae34" } ],
+                    [ "AWS/Cassandra", "ConsumedWriteCapacityUnits", "TableName", "${TargetTableNameParameter}", "Keyspace", "${TargetKeyspaceNameParameter}", { "region": "${TargetAWSRegionParameter}", "id": "m1", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "consumed capacity target",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 0,
+            "x": 8,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "Read Capacity", "id": "e1", "region": "${TargetAWSRegionParameter}", "color": "#b088f5" } ],
+                    [ { "expression": "m2/PERIOD(m2)", "label": "Write Capacity", "id": "e2", "region": "${TargetAWSRegionParameter}", "color": "#69ae34" } ],
+                    [ "AWS/Cassandra", "ConsumedReadCapacityUnits", "TableName", "${MigrationLedgerTableNameParameter}", "Keyspace", "${MigrationKeyspaceNameParameter}", { "region": "${TargetAWSRegionParameter}", "id": "m1", "visible": false } ],
+                    [ ".", "ConsumedWriteCapacityUnits", ".", ".", ".", ".", { "region": "${TargetAWSRegionParameter}", "id": "m2", "visible": false } ],
+                    [ "...", { "region": "${TargetAWSRegionParameter}", "id": "m3", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "consumed capacity ledger",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 6,
+            "x": 8,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "AWS/Cassandra", "SuccessfulRequestLatency", "TableName", "${MigrationLedgerTableNameParameter}", "Keyspace", "${MigrationKeyspaceNameParameter}", "Operation", "SELECT", { "region": "${TargetAWSRegionParameter}", "color": "#b088f5" } ],
+                    [ "...", "INSERT", { "region": "${TargetAWSRegionParameter}", "stat": "p99", "color": "#69ae34" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "latency ledger",
+                "stat": "Average"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 12,
+            "x": 8,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "SELECT", "id": "e1", "color": "#b088f5", "region": "${TargetAWSRegionParameter}" } ],
+                    [ { "expression": "m2/PERIOD(m2)", "label": "INSERT", "id": "e2", "color": "#69ae34", "region": "${TargetAWSRegionParameter}" } ],
+                    [ { "expression": "m3/PERIOD(m3)", "label": "DELETE", "id": "e3", "color": "#fe6e73", "region": "${TargetAWSRegionParameter}" } ],
+                    [ { "expression": "m4/PERIOD(m4)", "label": "UPDATE", "id": "e4", "color": "#dfb52c", "region": "${TargetAWSRegionParameter}" } ],
+                    [ "AWS/Cassandra", "SuccessfulRequestCount", "TableName", "${MigrationLedgerTableNameParameter}", "Keyspace", "${MigrationKeyspaceNameParameter}", "Operation", "SELECT", { "region": "${TargetAWSRegionParameter}", "color": "#b088f5", "id": "m1", "visible": false } ],
+                    [ "...", "INSERT", { "region": "${TargetAWSRegionParameter}", "color": "#69ae34", "id": "m2", "visible": false } ],
+                    [ "...", "DELETE", { "region": "${TargetAWSRegionParameter}", "id": "m3", "visible": false } ],
+                    [ "...", { "region": "${TargetAWSRegionParameter}", "id": "m4", "label": "UPDATE", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "successful operations ledger",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 9,
+            "y": 12,
+            "x": 14,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "SELECT", "id": "e1", "color": "#b088f5", "region": "${TargetAWSRegionParameter}" } ],
+                    [ { "expression": "m2/PERIOD(m2)", "label": "INSERT", "id": "e2", "color": "#69ae34", "region": "${TargetAWSRegionParameter}" } ],
+                    [ { "expression": "m3/PERIOD(m3)", "label": "DELETE", "id": "e3", "color": "#fe6e73", "region": "${TargetAWSRegionParameter}" } ],
+                    [ { "expression": "m4/PERIOD(m4)", "label": "UPDATE", "id": "e4", "color": "#dfb52c", "region": "${TargetAWSRegionParameter}" } ],
+                    [ "AWS/Cassandra", "SuccessfulRequestCount", "TableName", "${TargetTableNameParameter}", "Keyspace", "${TargetKeyspaceNameParameter}", "Operation", "SELECT", { "region": "${TargetAWSRegionParameter}", "color": "#b088f5", "id": "m1", "visible": false } ],
+                    [ "...", "INSERT", { "region": "${TargetAWSRegionParameter}", "color": "#69ae34", "id": "m2", "visible": false } ],
+                    [ "...", "DELETE", { "region": "${TargetAWSRegionParameter}", "id": "m3", "visible": false } ],
+                    [ "...", { "region": "${TargetAWSRegionParameter}", "id": "m4", "label": "UPDATE", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "successful operations target",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 8,
+            "y": 12,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "SELECT", "id": "e1", "color": "#b088f5", "region": "${SourceAWSRegionParameter}" } ],
+                    [ { "expression": "m2/PERIOD(m2)", "label": "INSERT", "id": "e2", "color": "#69ae34", "region": "${SourceAWSRegionParameter}" } ],
+                    [ { "expression": "m3/PERIOD(m3)", "label": "DELETE", "id": "e3", "color": "#fe6e73", "region": "${SourceAWSRegionParameter}" } ],
+                    [ { "expression": "m4/PERIOD(m4)", "label": "UPDATE", "id": "e4", "color": "#dfb52c", "region": "${SourceAWSRegionParameter}" } ],
+                    [ "AWS/Cassandra", "SuccessfulRequestCount", "TableName", "${SourceTableNameParameter}", "Keyspace", "${SourceKeyspaceNameParameter}", "Operation", "SELECT", { "region": "${SourceAWSRegionParameter}", "color": "#b088f5", "id": "m1", "visible": false } ],
+                    [ "...", "INSERT", { "region": "${SourceAWSRegionParameter}", "color": "#69ae34", "id": "m2", "visible": false } ],
+                    [ "...", "DELETE", { "region": "${SourceAWSRegionParameter}", "id": "m3", "visible": false } ],
+                    [ "...", { "region": "${SourceAWSRegionParameter}", "id": "m4", "label": "UPDATE", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${SourceAWSRegionParameter}",
+                "period": 300,
+                "title": "successful operations source",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 18,
+            "x": 8,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "User Errors", "id": "e1", "region": "${TargetAWSRegionParameter}", "color": "#A76F63" } ],
+                    [ { "expression": "m2/PERIOD(m2)", "label": "System Errors", "id": "e2", "region": "${TargetAWSRegionParameter}", "color": "#fe6e73" } ],
+                    [ "AWS/Cassandra", "UserErrors", "TableName", "${MigrationLedgerTableNameParameter}", "Keyspace", "${MigrationKeyspaceNameParameter}", "Operation", "INSERT", { "region": "${TargetAWSRegionParameter}", "id": "m1", "visible": false } ],
+                    [ ".", "SystemErrors", ".", ".", ".", ".", ".", ".", { "region": "${TargetAWSRegionParameter}", "id": "m2", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "User Errors ledger",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 8,
+            "y": 18,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m1/PERIOD(m1)", "label": "User Errors", "id": "e1", "region": "${SourceAWSRegionParameter}", "color": "#A76F63" } ],
+                    [ { "expression": "m2/PERIOD(m2)", "label": "System Errors", "id": "e2", "region": "${SourceAWSRegionParameter}", "color": "#fe6e73" } ],
+                    [ "AWS/Cassandra", "UserErrors", "TableName", "${SourceTableNameParameter}", "Keyspace", "${SourceKeyspaceNameParameter}", "Operation", "INSERT", { "region": "${SourceAWSRegionParameter}", "id": "m1", "visible": false } ],
+                    [ ".", "SystemErrors", ".", ".", ".", ".", ".", ".", { "region": "${SourceAWSRegionParameter}", "id": "m2", "visible": false } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${SourceAWSRegionParameter}",
+                "period": 300,
+                "title": "User Errors source",
+                "stat": "Sum"
+            }
+        },
+        {
+            "height": 6,
+            "width": 8,
+            "y": 24,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "AWS/Cassandra", "BillableTableSizeInBytes", "TableName", "${SourceTableNameParameter}", "Keyspace", "${SourceKeyspaceNameParameter}", { "region": "${SourceAWSRegionParameter}" } ]
+                ],
+                "view": "singleValue",
+                "stacked": false,
+                "region": "${${SourceAWSRegionParameter}}",
+                "period": 300,
+                "title": "Table size source (6-12hr delay)",
+                "stat": "p99"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 24,
+            "x": 8,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "AWS/Cassandra", "BillableTableSizeInBytes", "TableName", "${MigrationLedgerTableNameParameter}", "Keyspace", "${MigrationKeyspaceNameParameter}", { "region": "${TargetAWSRegionParameter}", "visible": true } ]
+                ],
+                "view": "singleValue",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "Table size ledger (6-12hr delay)",
+                "stat": "p99"
+            }
+        },
+        {
+            "height": 6,
+            "width": 9,
+            "y": 24,
+            "x": 14,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "AWS/Cassandra", "BillableTableSizeInBytes", "TableName", "${TargetTableNameParameter}", "Keyspace", "${TargetKeyspaceNameParameter}", { "region": "${TargetAWSRegionParameter}", "visible": true } ]
+                ],
+                "view": "singleValue",
+                "stacked": false,
+                "region": "${TargetAWSRegionParameter}",
+                "period": 300,
+                "title": "Table size target (6-12hr delay)",
+                "stat": "p99"
+            }
+        }
+    ]
+}'
+Outputs:
+  KeyspacesGlueJobServiceRoleOutput:
+    Description: Glue service role for glue jobs
+    Value: !Ref KeyspacesGlueJobServiceRole
+    Export:
+      Name: !Sub ['KeyspacesGlueJobServiceRoleExport-${STACKNAME}', STACKNAME: !Ref AWS::StackName]
+  CQLReplicatorS3BucketNameOutput:
+    Description: S3 Bucket for glue jobs
+    Value: !Ref CQLReplicatorS3BucketName
+    Export:
+      Name: !Sub ['CQLReplicatorS3BucketNameExport-${STACKNAME}', STACKNAME: !Ref AWS::StackName]

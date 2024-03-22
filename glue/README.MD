@@ -134,7 +134,7 @@ Before running the migration process
 configure [lifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html)
 for the S3 bucket to delete objects after expiration. The xref column should be present in the source and the target
 tables before running the cqlreplicator.
-The payload will be compressed by [LZ4](https://fuchsia.googlesource.com/third_party/lz4/+/refs/tags/v1.7.5/README.md)and stored in Base64 format on the S3 bucket.
+The payload will be compressed by [LZ4](https://fuchsia.googlesource.com/third_party/lz4/+/refs/tags/v1.7.5/README.md) with a leading 4 bytes (Int) and stored in Base64 format on the S3 bucket.
 
 ```shell
 ./cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --src-keyspace ks_test_cql_replicator \

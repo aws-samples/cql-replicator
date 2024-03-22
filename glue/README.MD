@@ -307,7 +307,7 @@ the timestamp to your command line:
 To minimize the size of large columns in the target table, enable the `compressionConfig` in the json mapping.
 All selected columns will be encoded in JSON format and compressed by LZ4 fast compressor.
 
-Note that the CQLReplicator will add a leading Int to the compressed value. In this case, you will know the exact size of 
+Note that the CQLReplicator will add a leading 4 bytes (Int) to the compressed value. In this case, you will know the exact size of 
 a buffer you should use for decompression on the client side.
 
 ```shell

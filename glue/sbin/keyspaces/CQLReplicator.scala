@@ -492,7 +492,7 @@ object GlueApp {
       val compressedOutput = new Array[Byte](maxCompressedLength)
       val compressedLength: Int = compressor.compress(inputBytes, 0, inputBytes.length, compressedOutput, 0, maxCompressedLength)
       val compressedBytes = compressedOutput.slice(0, compressedLength)
-      val sizePrefix = ByteBuffer.allocate(4).putInt(input.length).array()
+      val sizePrefix = ByteBuffer.allocate(4).putInt(inputBytes.length).array()
       // Add leading 4 bytes (Int) in the compressed value byte array. #125
       sizePrefix ++ compressedBytes
     }

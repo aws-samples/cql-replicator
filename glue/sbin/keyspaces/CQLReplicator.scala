@@ -81,10 +81,6 @@ class DlqS3Exception(s: String) extends RuntimeException {
   println(s)
 }
 
-class CompressionException(s: String) extends RuntimeException {
-  println(s)
-}
-
 sealed trait Stats
 
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats

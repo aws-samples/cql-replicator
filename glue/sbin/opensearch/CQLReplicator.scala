@@ -310,7 +310,6 @@ object GlueApp {
     val columnTs = args("WRITETIME_COLUMN")
     val source = s"sourceCluster.$srcKeyspaceName.$srcTableName"
     val ttlColumn = args("TTL_COLUMN")
-    val olo = args("OFFLOAD_LARGE_OBJECTS")
     val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
     val defaultPartitions = scala.math.max(2, (sparkContext.defaultParallelism / 2 - 2))
     val cleanUpRequested: Boolean = args("CLEANUP_REQUESTED") match {

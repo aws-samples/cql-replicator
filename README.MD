@@ -1,4 +1,4 @@
-## NoSQL migration guide for purpose built databases with CQLReplicator
+## NoSQL migration guide for purpose built databases with CQLReplicator.
 
 Welcome to the NoSQL migration guide. This guide is designed to assist you in migration your data from Cassandra to
 purpose-built NoSQL databases on AWS using CQLReplicator.

@@ -51,7 +51,7 @@ import java.time.format.DateTimeFormatter
 import java.time.Duration
 import java.nio.ByteBuffer
 import org.joda.time.LocalDateTime
-import net.jpountz.lz4.{LZ4Compressor, LZ4Factory}
+import net.jpountz.lz4.{LZ4Compressor, LZ4Factory, LZ4CompressorWithLength}
 
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
@@ -485,16 +485,16 @@ object GlueApp {
     }
 
     def compressWithLZ4B(input: String): Array[Byte] = {
-      val lz4Factory = LZ4Factory.fastestInstance()
-      val compressor: LZ4Compressor = lz4Factory.fastCompressor()
-      val inputBytes = input.getBytes("UTF-8")
-      val maxCompressedLength: Int = compressor.maxCompressedLength(inputBytes.length)
-      val compressedOutput = new Array[Byte](maxCompressedLength)
-      val compressedLength: Int = compressor.compress(inputBytes, 0, inputBytes.length, compressedOutput, 0, maxCompressedLength)
-      val compressedBytes = compressedOutput.slice(0, compressedLength)
-      val sizePrefix = ByteBuffer.allocate(4).putInt(input.length).array()
-      // Add leading 4 bytes (Int) in the compressed value byte array. #125
-      sizePrefix ++ compressedBytes
+      Try {
+        val lz4Factory = LZ4Factory.fastestInstance()
+        val compressor: LZ4Compressor = lz4Factory.fastCompressor()
+        val inputBytes = input.getBytes("UTF-8")
+        val compressorWithLength = new LZ4CompressorWithLength(compressor)
+        compressorWithLength.compress(inputBytes)
+      } match {
+        case Failure(e) => throw new CompressionException(s"Unable to compress due to $e")
+        case Success(res) => res
+      }
     }
 
     def stopRequested(bucket: String): Boolean = {

@@ -58,15 +58,15 @@ import org.json4s.jackson.Serialization.write
 import java.util.Base64
 import java.nio.charset.StandardCharsets
 
-// import redis.clients.jedis.Connection
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig
-// import redis.clients.jedis.{JedisCluster, HostAndPort}
-
 import net.jpountz.xxhash.XXHashFactory
 
 import com.mongodb.ConnectionString
 import com.mongodb.client.{MongoClients, MongoDatabase}
 import org.bson.Document
+// import org.mongodb.scala._
+// import org.mongodb.scala.model.Filters._
+// import org.mongodb.scala.model.UpdateOptions
 
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
@@ -80,7 +80,7 @@ class CassandraTypeException(s: String) extends RuntimeException {
   println(s)
 }
 
-class RedisConnectionException(s: String) extends RuntimeException {
+class DocdbConnectionException(s: String) extends RuntimeException {
   println(s)
 }
 
@@ -130,31 +130,10 @@ object GlueApp {
     def getDocdbConnection(docdbConfig: DocdbConfig, clientName: String): MongoDatabase = {
 
       val databaseName = "sateesh"
-      val connectionString = "mongodb://<user>:<password>@mydocdb.cluster-cixmtbbtpjvf.us-east-1.docdb.amazonaws.com:27017/?replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
+      val connectionString = "mongodb://<>:<>@mydocdb.cluster-cixmtbbtpjvf.us-east-1.docdb.amazonaws.com:27017/?replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
       val client = MongoClients.create(new ConnectionString(connectionString))
       client.getDatabase(databaseName)
 
-        
-      // val poolConfig = new GenericObjectPoolConfig[Connection]()
-      // redisConfig.usr match {
-      //   case usr if usr.isEmpty => new JedisCluster(new HostAndPort(redisConfig.clusterDnsName, redisConfig.clusterPort),
-      //     redisConfig.connectionTimeout,
-      //     redisConfig.soTimeout,
-      //     redisConfig.maxAttempts,
-      //     null,
-      //     null,
-      //     poolConfig,
-      //     redisConfig.sslEnabled)
-      //   case _ => new JedisCluster(new HostAndPort(redisConfig.clusterDnsName, redisConfig.clusterPort),
-      //     redisConfig.connectionTimeout,
-      //     redisConfig.soTimeout,
-      //     redisConfig.maxAttempts,
-      //     redisConfig.usr,
-      //     redisConfig.pwd,
-      //     clientName,
-      //     poolConfig,
-      //     redisConfig.sslEnabled)
-      // }
     }
 
     def shuffleDf(df: DataFrame): DataFrame = {
@@ -294,11 +273,10 @@ object GlueApp {
     preFlightCheck(cassandraConn, srcKeyspaceName, srcTableName, "source")
     logger.info("[Cassandra] Preflight check is completed")
     Try {
-      val preFlightCheckRedisConn = getDocdbConnection(docdbConfig, "Preflight check Redis connection")
-      // preFlightCheckRedisConn.close()
+      val preFlightCheckDocdbConn = getDocdbConnection(docdbConfig, "Preflight check DocumentDB connection")
     } match {
-      case Failure(_) => throw new RedisConnectionException("[Redis] Connection issue, please check the RedisConnector.conf and the Glue connector")
-      case Success(_) => logger.info("[Redis] Preflight check is completed")
+      case Failure(_) => throw new DocdbConnectionException("[DocumentDB] Connection issue, please check the DocumentDb.conf and the Glue connector")
+      case Success(_) => logger.info("[DocumentDB] Preflight check is completed")
     }
 
     val selectStmtWithTTL = ttlColumn match {
@@ -451,9 +429,17 @@ object GlueApp {
                       if (ttlColumn.equals("None")) {
                         // redisCluster.set(key, res._2)
                         val collection = docdbCluster.getCollection(s"$trgTableName")
-                        val doc = new Document().append(key,res._2)
-                        // val doc = BsonDocument.parse(jsonRow)
-                        collection.insertOne(doc)
+                        // val doc = new Document().append(key,res._2)
+                        val doc = parse(jsonRow)
+                        val jsonString: String = compact(render(doc))
+                        val bsonDocument: Document = Document.parse(jsonString)
+                        bsonDocument.append("key",key)
+                        collection.insertOne(bsonDocument)
+
+                        // val filter = equal("key", key)
+                        // val update = Document("$set" -> bsonDocument)
+                        // val options = new UpdateOptions().upsert(true)
+                        // collection.updateOne(filter, update, options)
                       } else {
                         val json4sRow = parse(res._2)
                         val jsonValueWithoutTTL = getJsonWithoutTTLColumn(json4sRow)
@@ -477,7 +463,6 @@ object GlueApp {
               }
             }
           )
-          // redisCluster.close()
           xxHash64Seed.close()
         }
       )
@@ -523,7 +508,7 @@ object GlueApp {
       whereStmt.toString
     }
 
-    def persistToRedis(df: DataFrame, op: String, tile: Int): Long = {
+    def persistToDocdb(df: DataFrame, op: String, tile: Int): Long = {
       val cnt = df.isEmpty match {
         case false => {
           persistToTarget(shuffleDfV2(df.drop("ts", "group")), columns, columnsPos, tile, op)
@@ -560,7 +545,7 @@ object GlueApp {
                 val tile = location._2
                 val numPartitions = sourceDf.rdd.getNumPartitions
                 logger.info(s"Number of partitions $numPartitions")
-                val inserted = persistToRedis(sourceDf, "insert", tile)
+                val inserted = persistToDocdb(sourceDf, "insert", tile)
 
                 session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
 
@@ -589,8 +574,8 @@ object GlueApp {
 
               columnTs match {
                 case "None" => {
-                  val inserted = persistToRedis(newInsertsDF, "insert", currentTile)
-                  val deleted = persistToRedis(newDeletesDF, "delete", currentTile)
+                  val inserted = persistToDocdb(newInsertsDF, "insert", currentTile)
+                  val deleted = persistToDocdb(newDeletesDF, "delete", currentTile)
                   val content = ReplicationStats(currentTile, 0, 0, inserted, deleted, LocalDateTime.now().toString)
                   putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
                 }
@@ -600,9 +585,9 @@ object GlueApp {
                     filter($"tail.ts" > $"head.ts").
                     selectExpr(pks.map(x => s"tail.$x"): _*).
                     persist(cachingMode)
-                  val inserted = persistToRedis(newInsertsDF, "insert", currentTile)
-                  val updated = persistToRedis(newUpdatesDF, "update", currentTile)
-                  val deleted = persistToRedis(newDeletesDF, "delete", currentTile)
+                  val inserted = persistToDocdb(newInsertsDF, "insert", currentTile)
+                  val updated = persistToDocdb(newUpdatesDF, "update", currentTile)
+                  val deleted = persistToDocdb(newDeletesDF, "delete", currentTile)
                   val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, LocalDateTime.now().toString)
                   putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
                   newUpdatesDF.unpersist()

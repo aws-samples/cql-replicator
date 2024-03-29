@@ -451,8 +451,8 @@ object GlueApp {
                       if (ttlColumn.equals("None")) {
                         // redisCluster.set(key, res._2)
                         val collection = docdbCluster.getCollection(s"$trgTableName")
-                        // val doc = new Document().append(key,res._2)
-                        val doc = BsonDocument.parse(jsonRow)
+                        val doc = new Document().append(key,res._2)
+                        // val doc = BsonDocument.parse(jsonRow)
                         collection.insertOne(doc)
                       } else {
                         val json4sRow = parse(res._2)

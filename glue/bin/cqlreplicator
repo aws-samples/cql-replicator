@@ -396,9 +396,9 @@ function Init {
 
   if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
       progress 3 5 "Creating Glue artifacts                             "
-      glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
+      glue_conn_name=$(echo cql-replicator-"$(uuidgen)$DEFAULT_ENV" | tr ' [:upper:]' ' [:lower:]')
       aws glue create-connection --connection-input '{
-         "Name":"'$glue_conn_name$DEFAULT_ENV'",
+         "Name":"'$glue_conn_name'",
          "Description":"CQLReplicator connection to the C* cluster",
          "ConnectionType":"NETWORK",
          "ConnectionProperties":{

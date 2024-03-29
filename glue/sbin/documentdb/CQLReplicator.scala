@@ -130,7 +130,7 @@ object GlueApp {
     def getDocdbConnection(docdbConfig: DocdbConfig, clientName: String): MongoDatabase = {
 
       val databaseName = "sateesh"
-      val connectionString = "mongodb://root:samsung123@mydocdb.cluster-cixmtbbtpjvf.us-east-1.docdb.amazonaws.com:27017/?replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
+      val connectionString = "mongodb://<user>:<password>@mydocdb.cluster-cixmtbbtpjvf.us-east-1.docdb.amazonaws.com:27017/?replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
       val client = MongoClients.create(new ConnectionString(connectionString))
       client.getDatabase(databaseName)
 

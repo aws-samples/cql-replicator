@@ -564,10 +564,54 @@ After the init phase is completed you can run the following command to start the
 ```shell
    cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
-                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --writetime-column col2 \
+                 --json-mapping '
+                     {"replication": {
+                      "allColumns": false,
+                      "ttlAddOn": {
+                        "enabled": false,
+                        "predicateOp": "greaterThan",
+                        "predicateVal": 900000
+                      },
+                      "pointInTimeReplicationConfig": {
+                        "predicateOp": "greaterThan"
+                      },
+                      "columns":["pk", "cc", "col1", "col2"],
+                      "useCustomSerializer": false,
+                      "useMaterializedView": {
+                        "enabled": false,
+                        "mvName": "mvName"
+                      }
+                    },
+                      "opensearch": {
+                        "resource": "aos-index-name",
+                        "enableDeletes": false,
+                        "maxFileSizeMb": 32,
+                        "transformation": {
+                          "enabled": true,
+                          "fieldsMapping": [
+                            {"source": "pk", "target": "field1", "sourceType": "string", "targetType":  "string"},
+                            {"source": "cc", "target": "field2", "sourceType": "integer", "targetType":  "integer"},
+                            {"source": "col1", "target": "field3", "sourceType":  "string", "targetType":  "string"},
+                            {"source": "col2", "target": "field4", "sourceType":  "string", "targetType":  "string"}
+                        ]}
+                      }'
 ```
-The CQLReplicator replicates your rows as text, the column name will be mapped to the fields in the index without changes
-and the target index name will be in the following format: `trg-keyspace`-`trg-table`.
+In the below example the CQLReplicator replicates by following the instructions in the json mapping. Source columns
+pk, cc, col1, and col2 will be renamed to field1, field2, field3, and field4 respectively. 
+
+In order to enable deletes set `enableDeletes` to `true` in the json mapping, but deletes are disabled 
+by default in Amazon OpenSearch. To enable this functionality for the CQLReplicator, you
+need to update the configuration by sending the following request: 
+```
+PUT _plugins/_query/settings
+{
+  "transient": {
+    "plugins.sql.delete.enabled": "true"
+  }
+}
+```
 
 ## License
 

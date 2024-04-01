@@ -3,7 +3,7 @@
  * // SPDX-License-Identifier: Apache-2.0
  */
 
-// Target Amazon OpenSearch service - preview
+// Target Amazon OpenSearch service
 
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
@@ -44,6 +44,9 @@ import java.util.Base64
 import java.nio.charset.StandardCharsets
 import java.io.ByteArrayInputStream
 import java.time.format.DateTimeFormatter
+import java.sql.Connection
+import java.sql.DriverManager
+import java.util.Properties
 
 class ProcessTypeException(s: String) extends RuntimeException {
   println(s)
@@ -65,17 +68,25 @@ class OpenSearchException(s: String) extends RuntimeException {
   println(s)
 }
 
-case class MaterialzedViewConfig(enabled: Boolean = false, mvName: String = "")
+case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
+
 case class TtlAddOn(enabled: Boolean = false, predicateOp: String = "greaterThan", predicateVal: Long = 0)
+
 case class PointInTimeReplicationConfig(predicateOp: String = "greaterThan")
+
 case class Replication(allColumns: Boolean = true,
                        ttlAddOn: TtlAddOn = TtlAddOn(),
                        pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig(),
                        columns: List[String] = List(""),
                        useCustomSerializer: Boolean = false,
-                       useMaterializedView: MaterialzedViewConfig = MaterialzedViewConfig())
+                       useMaterializedView: MaterializedViewConfig = MaterializedViewConfig())
+
 case class FieldsTransformation(source: String = "", target: String = "", sourceType: String = "string", targetType: String = "string")
-case class OpenSearchConfig(resource: String = null, enableDeletes: Boolean = false, maxFileSizeMb: Int = 32, fieldsMapping:List[FieldsTransformation] = List(FieldsTransformation()))
+
+case class Transformation(enabled: Boolean = false, fieldsMapping: List[FieldsTransformation] = List(FieldsTransformation()))
+
+case class OpenSearchConfig(resource: String = null, enableDeletes: Boolean = false, maxFileSizeMb: Int = 32, transformation: Transformation = Transformation())
+
 case class JsonMapping(replication: Replication, opensearch: OpenSearchConfig)
 
 sealed trait Stats
@@ -143,9 +154,7 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
     }
   }
 
-  override def deserialize(implicit format: org.json4s.Formats): PartialFunction[(org.json4s.TypeInfo, JValue), com.datastax.oss.driver.api.core.cql.Row] = {
-    ???
-  }
+  override def deserialize(implicit format: org.json4s.Formats): PartialFunction[(org.json4s.TypeInfo, JValue), com.datastax.oss.driver.api.core.cql.Row] = ???
 }
 
 // *******************************Custom JSON Serializer End*********************************************
@@ -261,11 +270,11 @@ object GlueApp {
 
     def readOssConfigFile(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String): OssConfig = {
       val s3Object = s3Client.getObject(bucket, key)
-      val src = Source.fromInputStream(s3Object.getObjectContent())
+      val src = Source.fromInputStream(s3Object.getObjectContent)
       val json = src.getLines.mkString
       src.close()
 
-      implicit val formats = DefaultFormats
+      implicit val formats: DefaultFormats.type = DefaultFormats
       parse(json).extract[OssConfig]
     }
 
@@ -282,6 +291,28 @@ object GlueApp {
       val connectorToClusterSrc = CassandraConnector(sc.getConf.set("spark.cassandra.connection.config.profile.path", "KeyspacesConnector.conf"))
       val connectorToClusterTrg = CassandraConnector(sc.getConf.set("spark.cassandra.connection.config.profile.path", "CassandraConnector.conf"))
       (connectorToClusterSrc, connectorToClusterTrg)
+    }
+
+    def jdbcOssConnectionFactory(url: String): Connection = {
+      Class.forName("org.opensearch.jdbc.Driver")
+      val properties = new Properties()
+      properties.put("auth", "aws_sigv4")
+      Try {
+        DriverManager.getConnection(s"jdbc:opensearch://$url", properties)
+      } match {
+        case Failure(e) => throw new OpenSearchException(s"JDBC connection issue to the OpenSearch service: $e")
+        case Success(conn) => conn
+      }
+    }
+
+    def jdbcOssDelete(whereClause: String, resource: String, conn: Connection): Unit = {
+      Try {
+        val st = conn.createStatement()
+        st.execute(s"DELETE FROM $resource WHERE $whereClause")
+      } match {
+        case Failure(e) => throw new OpenSearchException(s"JDBC delete issue to the OpenSearch service: $e")
+        case Success(_) =>
+      }
     }
 
     def inferKeys(cc: CassandraConnector, keyType: String, ks: String, tbl: String, columnTs: String): Seq[Map[String, String]] = {
@@ -440,6 +471,12 @@ object GlueApp {
 
     val maxFileSizeMb = Option(jsonMapping4s.opensearch.maxFileSizeMb).getOrElse(32)
     val flushingThreshold = 1024 * 1024 * maxFileSizeMb
+    val transformation: List[(String, String, String, String)] = if (jsonMapping4s.opensearch.transformation.enabled) {
+      jsonMapping4s.opensearch.transformation.fieldsMapping.map(
+        mapping =>
+          (mapping.source, mapping.sourceType, mapping.target, mapping.targetType)
+      )
+    } else List(("", "", "", ""))
 
     val selectStmtWithTTL = ttlColumn match {
       case s if s.equals("None") => ""
@@ -544,6 +581,12 @@ object GlueApp {
       rs
     }
 
+    def replaceKeyName(str: String, mappings: Map[String, String]): String = {
+      mappings.foldLeft(str) {
+        case (current, (key, value)) => current.replace(s"$key=", s"$value=")
+      }
+    }
+
     def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String],
                         columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(
@@ -554,6 +597,7 @@ object GlueApp {
           }
           val supportFunctions = new SupportFunctions()
           val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = AmazonS3ClientBuilder.defaultClient()
+          val jdbcConnection = if (jsonMapping4s.opensearch.enableDeletes) jdbcOssConnectionFactory(ossConfig.opensearchNodes) else null
           val fl = FlushingSet[String](flushingThreshold, s3ClientOnPartition, bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
           partition.foreach(
             row => {
@@ -588,9 +632,17 @@ object GlueApp {
                       }
                     }
                   }
-                  if (op == "delete") {
-                    val keyValuePairs = convertToMap(whereClause)
-                    fl.add(s"{$keyValuePairs}")
+                  if (op == "delete" && jsonMapping4s.opensearch.enableDeletes) {
+                    val whereClauseForTarget = rowToStatement(row, columns, columnsPos, "target")
+                    if (!jsonMapping4s.opensearch.transformation.enabled) {
+                      jdbcOssDelete(whereClauseForTarget, jsonMapping4s.opensearch.resource, jdbcConnection)
+                    } else {
+                      val whereClauseMap = jsonMapping4s.opensearch.transformation.fieldsMapping.map(
+                        mapping => (mapping.source, mapping.target)
+                      )
+                      val whereClauseTransformed = replaceKeyName(whereClauseForTarget, whereClauseMap.toMap)
+                      jdbcOssDelete(whereClauseTransformed, jsonMapping4s.opensearch.resource, jdbcConnection)
+                    }
                   }
                 }
                 }
@@ -612,14 +664,15 @@ object GlueApp {
       }
     }
 
-    def rowToStatement(row: Row, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)]): String = {
+    def rowToStatement(row: Row, columns: scala.collection.immutable.Map[String, String],
+                       columnsPos: scala.collection.immutable.SortedSet[(String, Int)], statementType: String = "source"
+                      ): String = {
       val whereStmt = new StringBuilder
       columnsPos.foreach { el =>
         val colName = el._1
         val position = row.fieldIndex(el._1)
         val colType: String = columns.getOrElse(el._1, "none")
         val v = colType match {
-          // inet is string
           case "string" | "text" | "inet" => s"'${row.getString(position)}'"
           case "date" => s"'${row.getDate(position)}'"
           case "timestamp" => s"'${row.getTimestamp(position)}'"
@@ -630,7 +683,8 @@ object GlueApp {
           case "short" => row.getShort(position)
           case "decimal" => row.getDecimal(position)
           case "tinyint" => row.getByte(position)
-          case "uuid" => row.getString(position)
+          case "uuid" if statementType == "source" => row.getString(position)
+          case "uuid" if statementType == "target" => s"'${row.getString(position)}'"
           case "boolean" => row.getBoolean(position)
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
@@ -646,10 +700,11 @@ object GlueApp {
     }
 
     def jsonToOSS(df: DataFrame, op: String, tile: Int): Long = {
-      val cnt = df.isEmpty match {
-        case false => {
-          persistToTarget(shuffleDfV2(df.drop("ts", "group")), columns, columnsPos, tile, op)
-
+      val cnt = if (df.isEmpty) {
+        0
+      } else {
+        persistToTarget(shuffleDfV2(df.drop("ts", "group")), columns, columnsPos, tile, op)
+        if (op != "delete") {
           val path = s"$landingZone/tmp/$trgKeyspaceName/$trgTableName/$tile/$op"
           val dfFromJson = glueContext.getSourceWithFormat(
             connectionType = "s3",
@@ -657,8 +712,12 @@ object GlueApp {
             options = JsonOptions(s"""{"paths": ["$path"]}""")
           ).getDynamicFrame()
 
-          val transformation = jsonMapping4s.opensearch.fieldsMapping.map(mapping => (mapping.source, mapping.sourceType, mapping.target, mapping.targetType))
-          val transformedDf = dfFromJson.applyMapping(transformation, caseSensitive = false, transformationContext = s"transformation for $srcTableName")
+          val transformedDf = if (jsonMapping4s.opensearch.transformation.enabled) {
+            dfFromJson.applyMapping(transformation, caseSensitive = false, transformationContext = s"transformation for $srcTableName")
+          } else {
+            dfFromJson
+          }
+
           val indexName = s"${jsonMapping4s.opensearch.resource}"
           Try {
             glueContext.getSinkWithFormat(
@@ -679,10 +738,8 @@ object GlueApp {
             case Failure(exception) => throw new OpenSearchException(s"Can't write the data to the OpenSearch cluster. $exception")
             case Success(_) => cleanUpJsonObjects(bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
           }
-
-          df.count()
         }
-        case true => 0
+        df.count()
       }
       cnt
     }
@@ -734,30 +791,35 @@ object GlueApp {
               ).getDynamicFrame().toDF().drop("group").persist(cachingMode)
 
               val pathHead = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head"
+              // java.lang.NoClassDefFoundError:Could not initialize class com.amazonaws.services.glue.util.StringToBoolean$
               val dfHead = glueContext.getSourceWithFormat(
                 connectionType = "s3",
                 format = "parquet",
                 options = JsonOptions(s"""{"paths": ["$pathHead"]}""")
               ).getDynamicFrame().toDF().drop("group").persist(cachingMode)
               val newInsertsDF = dfTail.as("tail").join(dfHead.as("head"), cond, "leftanti").persist(cachingMode)
+              val newDeletesDF = dfHead.as("head").join(dfTail.as("tail"), cond, "leftanti").persist(cachingMode)
 
               columnTs match {
                 case "None" => {
                   val inserted = jsonToOSS(newInsertsDF, "insert", currentTile)
-                  val content = ReplicationStats(currentTile, 0, 0, inserted, 0, LocalDateTime.now().toString)
+                  val deleted = jsonToOSS(newDeletesDF, "delete", currentTile)
+                  val content = ReplicationStats(currentTile, 0, 0, inserted, deleted, LocalDateTime.now().toString)
                   putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
                 }
                 case _ => {
                   val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").filter($"tail.ts" > $"head.ts").selectExpr(pks.map(x => s"tail.$x"): _*).persist(cachingMode)
                   val inserted = jsonToOSS(newInsertsDF, "insert", currentTile)
                   val updated = jsonToOSS(newUpdatesDF, "update", currentTile)
-                  val content = ReplicationStats(currentTile, 0, updated, inserted, 0, LocalDateTime.now().toString)
+                  val deleted = jsonToOSS(newDeletesDF, "delete", currentTile)
+                  val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, LocalDateTime.now().toString)
                   putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
                   newUpdatesDF.unpersist()
                 }
               }
 
               newInsertsDF.unpersist()
+              newDeletesDF.unpersist()
               dfTail.unpersist()
               dfHead.unpersist()
 

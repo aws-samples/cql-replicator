@@ -4,10 +4,8 @@ This migration approach ensures zero downtime, no code compilation, predictable 
 
 ## Architecture
 This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue
-jobs of CQLReplicator.
-Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per one data processing unit
-G.025X) to distribute migration
-workload evenly across data processing units.
+jobs of CQLReplicator. Each glue job (tile) is tasked with handling a specific subset of primary keys (1M per one data processing unit
+G.025X) to distribute migration workload evenly across data processing units.
 A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1500 WCUs per second against the target table in
 Amazon Keyspaces. This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
@@ -291,7 +289,7 @@ In order to reduce AWS Glue costs after the historical workload moved to the tar
 2. Restart the migration process with the same number of tiles but lower number of
    DPUs: `cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
    --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
-   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 500000`
+   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 2000000`
 
 ## Point in time replication
 

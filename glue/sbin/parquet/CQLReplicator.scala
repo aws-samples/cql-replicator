@@ -9,9 +9,7 @@ import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
 import com.amazonaws.services.glue.util.JsonOptions
-import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.Row
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.sql.functions._
@@ -54,11 +52,9 @@ class CassandraTypeException(s: String) extends RuntimeException {
 class StatsS3Exception(s: String) extends RuntimeException {
   println(s)
 }
-class PersistToTargetException(s: String) extends RuntimeException {
-  println(s)
-}
 
-case class MaterialzedViewConfig(enabled: Boolean = false, mvName: String = "")
+case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
+case class TokenRanges(enabled: Boolean = false, tokenRanges: List[String] = List(""))
 case class TtlAddOn(enabled: Boolean = false, predicateOp: String = "greaterThan", predicateVal: Long = 0)
 case class PointInTimeReplicationConfig(predicateOp: String = "greaterThan")
 case class Replication(allColumns: Boolean = true,
@@ -66,21 +62,18 @@ case class Replication(allColumns: Boolean = true,
                        pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig(),
                        columns: List[String] = List(""),
                        useCustomSerializer: Boolean = false,
-                       useMaterializedView: MaterialzedViewConfig = MaterialzedViewConfig())
+                       useMaterializedView: MaterializedViewConfig = MaterializedViewConfig(),
+                       filteringByTokenRanges: TokenRanges = TokenRanges())
 case class S3Config(bucket: String = null, prefix: String = null, maxFileSizeMb: Int = 32)
 case class JsonMapping(replication: Replication, s3: S3Config)
-
 sealed trait Stats
-
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
-
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
-
 class CustomSerializationException(s: String) extends RuntimeException {
   println(s)
 }
 
-// **************************Custom JSON Serialzer Start*******************************************
+// **************************Custom JSON Serializer Start*******************************************
 class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.driver.api.core.cql.Row] {
   implicit val formats: DefaultFormats.type = DefaultFormats
 
@@ -117,8 +110,8 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
     dataType match {
       case DataTypes.BOOLEAN => row.getBoolean(i)
       case DataTypes.INT => row.getInt(i)
-      case DataTypes.TEXT => row.getString(i).replace("'", "\\\\u0027")
-      case DataTypes.ASCII => row.getString(i).replace("'", "\\\\u0027")
+      case DataTypes.TEXT => row.getString(i).replace("'", "''")
+      case DataTypes.ASCII => row.getString(i).replace("'", "''")
       case DataTypes.BIGINT => row.getLong(i)
       case DataTypes.BLOB => binToHex(row.getByteBuffer(i).array())
       case DataTypes.COUNTER => row.getLong(i)
@@ -142,7 +135,7 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
 
 // *******************************Custom JSON Serializer End*********************************************
 
-class SupportFunctions {
+class SupportFunctions() {
   def correctEmptyBinJsonValues(cols: List[String], input: String): String = {
     implicit val formats: DefaultFormats.type = DefaultFormats
 
@@ -341,9 +334,10 @@ object GlueApp {
     val currentTile = args("TILE").toInt
     val totalTiles = args("TOTAL_TILES").toInt
     val safeMode = args("SAFE_MODE")
-    // Internal configuration+
+    val replayLog = Try(args("REPLAY_LOG").toBoolean).getOrElse(false)
+    // Internal configuration
     val WAIT_TIME = safeMode match {
-      case "true" => 25000
+      case "true" => 20000
       case _ => 0
     }
     val cachingMode = safeMode match {
@@ -390,6 +384,7 @@ object GlueApp {
       case _ => inferKeys(cassandraConn, "primaryKeysWithTS", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
     }
 
+    val tokenColumn = inferKeys(cassandraConn, "partitionKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.mkString(",")
     val pkFinalWithoutTs = pkFinal.filterNot(_ == s"writetime($columnTs) as ts")
     val pks = pkFinal.filterNot(_ == s"writetime($columnTs) as ts")
     val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
@@ -401,7 +396,7 @@ object GlueApp {
     logger.info(s"Json mapping: $jsonMappingRaw")
     val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\r\\n|\\r|\\n", ""))
     val replicatedColumns = jsonMapping4s match {
-      case JsonMapping(Replication(true, _, _, _, _, _), _) => "*"
+      case JsonMapping(Replication(true, _, _, _, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
     }
 
@@ -494,30 +489,65 @@ object GlueApp {
       }
     }
 
-    def getSourceRow(cls: String, wc: String, session: CqlSession, defaultFormat: org.json4s.Formats): String = {
-      val rs = if (jsonMapping4s.replication.useCustomSerializer) {
-        val row = Option(session.execute(s"SELECT $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
-        if (row.nonEmpty)
-          Serialization.write(row)(defaultFormat)
-        else
-          ""
-      } else {
-        val row = Option(session.execute(s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
-        if (row.nonEmpty)
-          row.get.getString(0).replace("'", "\\\\u0027")
-        else
-          ""
+    def getToken(wc: String, session: CqlSession): String = {
+      Try {
+        val token = session.execute(s"SELECT token($tokenColumn) FROM $srcKeyspaceName.$srcTableName WHERE $wc").one().getLong(0)
+        s"$token"
       }
-      rs
+      match {
+        case Failure(e) => throw new RuntimeException(s"$e <- SELECT token($tokenColumn) FROM $srcKeyspaceName.$srcTableName WHERE $wc")
+        case Success(res) => res
+      }
+    }
+
+    def getSourceRow(cls: String, wc: String, session: CqlSession, defaultFormat: org.json4s.Formats): String = {
+      val emptyResult = ""
+      val isTokenInRanges: Boolean = if (jsonMapping4s.replication.filteringByTokenRanges.enabled) {
+        val currentToken = getToken(wc, session)
+        Try {
+          jsonMapping4s.
+            replication.
+            filteringByTokenRanges.
+            tokenRanges.find(x => BigInt(s"$currentToken") > BigInt(x.split(",")(0)) &&
+              BigInt(s"$currentToken") <= BigInt(x.split(",")(1)))
+          match {
+            case Some(_) => true
+            case _ => false
+          }
+        } match {
+          case Failure(e) => throw new RuntimeException(s"$e <- SELECT token($tokenColumn) FROM $srcKeyspaceName.$srcTableName WHERE $wc")
+          case Success(res) => res
+        }
+      } else false
+
+      if (isTokenInRanges == jsonMapping4s.replication.filteringByTokenRanges.enabled) {
+        val rs: String = if (jsonMapping4s.replication.useCustomSerializer) {
+          val row = Option(session.execute(s"SELECT $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+          Serialization.write(row)(defaultFormat)
+        } else {
+          Try {
+            val row = Option(session.execute(s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+            row.get.getString(0).replace("'", "''")
+          } match {
+            case Failure(e) =>
+              throw new RuntimeException(s"$e <- SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc")
+            case Success(res) => res
+          }
+        }
+        rs
+      } else {
+        emptyResult
+      }
     }
 
     def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String],
                         columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(
         partition => {
-          val customFormat = jsonMapping4s.replication.useCustomSerializer match {
-            case true => DefaultFormats + new CustomResultSetSerializer
-            case _ => DefaultFormats
+          val customFormat = if (jsonMapping4s.replication.useCustomSerializer) {
+            DefaultFormats + new CustomResultSetSerializer
+          } else {
+            DefaultFormats
           }
           val supportFunctions = new SupportFunctions()
           val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = AmazonS3ClientBuilder.defaultClient()
@@ -579,7 +609,7 @@ object GlueApp {
       }
     }
 
-    def rowToStatement(row: Row, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)]): String = {
+    def rowToStatement(row: org.apache.spark.sql.Row, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)]): String = {
       val whereStmt = new StringBuilder
       columnsPos.foreach { el =>
         val colName = el._1
@@ -587,10 +617,20 @@ object GlueApp {
         val colType: String = columns.getOrElse(el._1, "none")
         val v = colType match {
           // inet is string
-          case "string" | "text" | "inet" => s"'${row.getString(position)}'"
+          case "string" | "text" | "inet" | "varchar" | "ascii" | "time" => s"'${row.getString(position).replace("'", "''")}'"
           case "date" => s"'${row.getDate(position)}'"
-          case "timestamp" => s"'${row.getTimestamp(position)}'"
-          case "int" => row.getInt(position)
+          case "timestamp" => {
+            val inputFormatterTs = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+            var originalTs = row.getTimestamp(position).toString
+            val dotIndex = originalTs.indexOf(".")
+            if (dotIndex != -1 && originalTs.length - dotIndex < 4) {
+              originalTs += "0" * (4 - (originalTs.length - dotIndex))
+            }
+            val localDateTime = java.time.LocalDateTime.parse(originalTs, inputFormatterTs)
+            val zonedDateTime = ZonedDateTime.of(localDateTime, ZoneId.of("UTC"))
+            s"${zonedDateTime.toInstant.toEpochMilli}"
+          }
+          case "int" | "varint" => row.getInt(position)
           case "long" | "bigint" => row.getLong(position)
           case "float" => row.getFloat(position)
           case "double" => row.getDouble(position)
@@ -598,6 +638,7 @@ object GlueApp {
           case "decimal" => row.getDecimal(position)
           case "tinyint" => row.getByte(position)
           case "uuid" => row.getString(position)
+          case "timeuuid" => row.getString(position)
           case "boolean" => row.getBoolean(position)
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
@@ -624,7 +665,7 @@ object GlueApp {
           persistToTarget(shuffleDfV2(df.drop("ts", "group")), columns, columnsPos, tile, op)
           val prefix = s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op"
           val isS3NonEmpty = s3prefixExist(s3client, bcktName, prefix)
-          if (isS3NonEmpty == true) {
+          if (isS3NonEmpty) {
             val fingerPrint = LocalDateTime.now()
             val dfFromJson = sparkSession.read.option("inferSchema", "true").json(s"$landingZone/tmp/$trgKeyspaceName/$trgTableName/$tile/$op/*").dropDuplicates()
             val parquetBucket = Option(jsonMapping4s.s3.bucket).getOrElse(bcktName)
@@ -654,7 +695,7 @@ object GlueApp {
 
             if (heads > 0 && tails == 0) {
 
-              logger.info(s"Historical data load. Processing locations: $locations")
+              logger.info(s"Historical data load.Processing locations: $locations")
               locations.foreach(location => {
 
                 val loc = location._1

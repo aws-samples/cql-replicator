@@ -34,7 +34,7 @@ TRG_SG=""
 GLUE_IAM_ROLE=""
 AWS_ACCOUNT=""
 KEYS_PER_TILE=0
-ROWS_PER_WORKER=250000
+ROWS_PER_WORKER=1000000
 TARGET_TYPE=keyspaces
 SKIP_GLUE_CONNECTOR=false
 SKIP_KEYSPACES_LEDGER=false
@@ -53,7 +53,7 @@ REPLAY_LOG="false"
 
 # Progress bar configuration
 PS=40
-PCC="⣿"
+PCC="|"
 PCU="-"
 PPS=2
 
@@ -155,7 +155,7 @@ function check_replication_runs() {
    tile=$1
    rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION" --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`]' | jq '.[] | select(."--TILE"=="'"$tile"'" and ."--SOURCE_TBL"=="'"$SOURCE_TBL"'" and ."--SOURCE_KS"=="'"$SOURCE_KS"'")')
    if [[ -n "${rs}" ]]; then
-     log "ERROR: Replication job is already running per tile $tile for" $SOURCE_KS.$SOURCE_TBL
+     log "ERROR: Replication job is already running per tile $tile for $SOURCE_KS.$SOURCE_TBL"
      log "$rs"
      return 1
   fi
@@ -672,7 +672,7 @@ function Delete_Stop_Event_D {
 }
 
 function Delete_Stop_Event_R {
-  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/"$1"/stopRequested" --region "$AWS_REGION"
+  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested" --region "$AWS_REGION"
   # Debug
   # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested"
 }

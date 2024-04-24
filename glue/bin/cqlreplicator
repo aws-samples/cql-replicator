@@ -8,6 +8,7 @@ MIGRATOR_VERSION=0.3
 DESCRIPTION="Toolbox for Amazon Keyspaces"
 JOB_NAME=CQLReplicator
 TILES=2
+WORKER_TYPE=G.025X
 TILE=""
 PROCESS_TYPE_DISCOVERY=discovery
 PROCESS_TYPE_REPLICATION=replication
@@ -523,6 +524,7 @@ function Start_Discovery {
   log "ROWS PER DPU:" $ROWS_PER_WORKER
   log "START REPLICATING FROM: $REPLICATION_POINT_IN_TIME (0 is disabled)"
   log "SAFE MODE: $SAFE_MODE"
+  log "WORKER_TYPE: $WORKER_TYPE"
   local workers=$((1 + TILES / 2))
   log "Checking if the discovery job is already running..."
   if [[ $CLEANUP_REQUESTED == "true" ]]; then
@@ -571,7 +573,7 @@ function Start_Replication {
   do
     if check_replication_runs $cnt; then
       Delete_Stop_Event_R $cnt
-      rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type G.025X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
+      rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "$WORKER_TYPE" --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
           "--TILE":"'$cnt'",
           "--TOTAL_TILES":"'$TILES'",
           "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
@@ -610,7 +612,7 @@ function Start_Single_Replication {
   fi
   if check_replication_runs "$cnt"; then
     Delete_Stop_Event_R "$cnt"
-    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type G.025X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
+    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "$WORKER_TYPE" --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
           "--TILE":"'$cnt'",
           "--TOTAL_TILES":"'$TILES'",
           "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
@@ -712,6 +714,10 @@ while (( "$#" )); do
       ;;
     --tile|-tl)
       TILE="$2"
+      shift 2
+      ;;
+    --worker-type|-wt)
+      WORKER_TYPE="$2"
       shift 2
       ;;
     --landing-zone|--lz)

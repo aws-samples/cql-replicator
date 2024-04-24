@@ -411,7 +411,7 @@ Resources:
                 ],
                 "view": "singleValue",
                 "stacked": false,
-                "region": "${${SourceAWSRegionParameter}}",
+                "region": "${SourceAWSRegionParameter}",
                 "period": 300,
                 "title": "Table size source (6-12hr delay)",
                 "stat": "p99"
@@ -453,8 +453,7 @@ Resources:
                 "stat": "p99"
             }
         }
-    ]
-}'
+    ]}'
 Outputs:
   KeyspacesGlueJobServiceRoleOutput:
     Description: Glue service role for glue jobs

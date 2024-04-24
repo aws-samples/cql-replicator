@@ -54,8 +54,7 @@ REPLAY_LOG="false"
 
 # Progress bar configuration
 PS=40
-#PCC="▓"
-PCC="|"
+PCC="⣿"
 PCU="-"
 PPS=2
 
@@ -208,7 +207,7 @@ function uploader_helper() {
       if ls "$path_to_conf/$artifact_name" > /dev/null
         then
           progress $next_pos $final_pos "Uploading $artifact_name                   "
-          aws s3 cp "$path_to_conf"/"$artifact_name" "$S3_LANDING_ZONE"/artifacts/"$artifact_name" > /dev/null
+          aws s3 cp "$path_to_conf"/"$artifact_name" "$S3_LANDING_ZONE"/artifacts/"$artifact_name" --region "$AWS_REGION" > /dev/null
         else
           log "ERROR: $path_to_conf/$artifact_name not found"
           exit 1
@@ -224,7 +223,7 @@ function uploader_jars() {
     file=$(basename "$link")
     progress "$cnt" "$total_artifacts" "Uploading jar artifacts"
     curl -s -O "$MAVEN_REPO""$link"
-    aws s3 cp "$file" "$S3_LANDING_ZONE"/artifacts/"$file" > /dev/null
+    aws s3 cp "$file" "$S3_LANDING_ZONE"/artifacts/"$file" --region "$AWS_REGION" > /dev/null
     rm "$file"
     ((cnt++))
   done
@@ -242,7 +241,7 @@ function barrier() {
     cnt=0
     for (( tile=0; tile<"$TILES"; tile++ ))
     do
-      if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$tile"/ > /dev/null
+      if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$tile"/ --region "$AWS_REGION" > /dev/null
       then
         ((cnt++))
       fi
@@ -273,8 +272,8 @@ function Usage_Exit {
 function Clean_Up {
   check_input "$S3_LANDING_ZONE" "ERROR:landing zone parameter is empty, must be provided"
   check_input "$AWS_REGION" "ERROR: AWS Region is empty, must be provided"
-  aws s3 rm "$S3_LANDING_ZONE" --recursive
-  aws s3 rb "$S3_LANDING_ZONE"
+  aws s3 rm "$S3_LANDING_ZONE" --recursive --region "$AWS_REGION"
+  aws s3 rb "$S3_LANDING_ZONE" --region "$AWS_REGION"
   local connection_name
   connection_name=$(aws glue get-job --job-name "CQLReplicator$DEFAULT_ENV" --query 'Job.Connections.Connections[0]' --output text)
   aws glue delete-connection --connection-name "$connection_name" --region "$AWS_REGION" > /dev/null 2>&1
@@ -298,7 +297,7 @@ function Init {
   check_input "$AWS_REGION" "ERROR:region is empty, must be provided"
   log "TARGET TYPE: $TARGET_TYPE"
 
-  AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+  AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --region "$AWS_REGION" --output text)
   log "Starting initialization process for AWS account:$AWS_ACCOUNT"
   # Create S3 bucket
   if [[ -z $S3_LANDING_ZONE ]]; then
@@ -319,11 +318,11 @@ function Init {
   ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
-  ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar")
+  ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar" "/org/opensearch/driver/opensearch-sql-jdbc/1.4.0.1/opensearch-sql-jdbc-1.4.0.1.jar")
   S3_PATH_BASE=("$S3_LANDING_ZONE/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "$S3_LANDING_ZONE/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-retry-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-core-1.7.1.jar")
   S3_PATH_MEMORYDB=("$S3_LANDING_ZONE/artifacts/jedis-4.4.6.jar")
-  S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar")
+  S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "$S3_LANDING_ZONE/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
 
   uploader_jars "${ARTIFACTS_BASE[@]}"
   join_array "${S3_PATH_BASE[@]}"
@@ -372,16 +371,16 @@ function Init {
   uploader_helper "CassandraConnector.conf" 1 2 5
 
   local glue_bucket_artifacts=s3://aws-glue-assets-"$AWS_ACCOUNT"-"$AWS_REGION"
-  if aws s3 ls "$glue_bucket_artifacts"/scripts/ > /dev/null
+  if aws s3 ls "$glue_bucket_artifacts"/scripts/ --region "$AWS_REGION" > /dev/null --region "$AWS_REGION"
   then
-    aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator$DEFAULT_ENV.scala > /dev/null
+    aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator$DEFAULT_ENV.scala --region "$AWS_REGION" > /dev/null
   else
     aws s3 mb "$glue_bucket_artifacts" --region "$AWS_REGION" > /dev/null 2>&1
     sleep 25
     if ls "$path_to_scala"/CQLReplicator.scala
     then
       progress 3 5 "Uploading CQLReplicator.scala                  "
-      aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator$DEFAULT_ENV.scala > /dev/null
+      aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator$DEFAULT_ENV.scala --region "$AWS_REGION" > /dev/null
     else
       log "ERROR: $path_to_scala/CQLReplicator.scala not found"
       exit 1
@@ -416,7 +415,7 @@ function Init {
          check_input "$TRG_SG" "ERROR: sg for $TARGET_TYPE is empty, must be provided"
          check_input "$TRG_AZ" "ERROR: az for $TARGET_TYPE is empty, must be provided"
          glue_conn_name_oss="cql-replicator-$TARGET_TYPE-integration"
-         glue_conn_name+=",$glue_conn_name_oss"
+         glue_conn_name="$glue_conn_name$DEFAULT_ENV,$glue_conn_name_oss"
 
          aws glue create-connection --connection-input '{
           "Name":"'$glue_conn_name_oss$DEFAULT_ENV'",
@@ -532,7 +531,7 @@ function Start_Discovery {
     log "The ledger is going to be cleaned up"
     confirm "<=== Do you want to continue? ===> "
     log "Deleting objects in $S3_LANDING_ZONE/$SOURCE_KS/$SOURCE_TBL..."
-    aws s3 rm "$S3_LANDING_ZONE/$SOURCE_KS/$SOURCE_TBL" --recursive > /dev/null 2>&1
+    aws s3 rm "$S3_LANDING_ZONE/$SOURCE_KS/$SOURCE_TBL" --recursive --region "$AWS_REGION" > /dev/null 2>&1
   fi
   if check_discovery_runs "true"; then
     Delete_Stop_Event_D
@@ -558,7 +557,7 @@ function Start_Discovery {
 
 function Start_Replication {
   cnt=0
-  KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json - | head | jq '.primaryKeys')
+  KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys')
   log "Sampled primary keys per tile is $KEYS_PER_TILE"
   local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
   if [[ workers -gt 299 ]]; then
@@ -599,7 +598,7 @@ function Start_Replication {
 
 function Start_Single_Replication {
   cnt=$TILE
-  KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json - | head | jq '.primaryKeys')
+  KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys')
   log "Sampled primary keys per tile is $KEYS_PER_TILE"
   local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
   if [[ workers -gt 299 ]]; then
@@ -669,13 +668,13 @@ function validate_json() {
 }
 
 function Delete_Stop_Event_D {
-  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested"
+  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested" --region "$AWS_REGION"
   # Debug
   # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested"
 }
 
 function Delete_Stop_Event_R {
-  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/"$1"/stopRequested"
+  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/"$1"/stopRequested" --region "$AWS_REGION"
   # Debug
   # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested"
 }
@@ -684,12 +683,12 @@ function Request_Stop {
   tile=0
   log "Requested a stop for the discovery job"
 
-  if aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested" >/dev/null
+  if aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested" --region "$AWS_REGION" >/dev/null
   then
     while [ $tile -lt $TILES ]
     do
       log "Requested a stop for the replication tile: $tile"
-      aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested" >/dev/null
+      aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested" --region "$AWS_REGION" >/dev/null
       ((tile++))
     done
   fi
@@ -698,7 +697,7 @@ function Request_Stop {
 function Request_Single_Stop {
   tile=$TILE
   log "Requested a stop for the replication tile: $tile"
-  aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested" >/dev/null
+  aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested" --region "$AWS_REGION" >/dev/null
 }
 
 (( $#<1 )) && Usage_Exit
@@ -908,27 +907,27 @@ function Gather_Stats() {
    tile=$1
    process_type=$2
    local total_per_tile=0
-   if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/ > /dev/null
+   if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/ --region "$AWS_REGION" > /dev/null
    then
      if [[ $process_type == "discovery" ]]; then
-       total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.primaryKeys') && DISCOVERED_TOTAL=$(( DISCOVERED_TOTAL + total_per_tile ))
+       total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys') && DISCOVERED_TOTAL=$(( DISCOVERED_TOTAL + total_per_tile ))
      fi
      if [[ $process_type == "replication" ]]; then
-       if  aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/ > /dev/null
+       if  aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/ --region "$AWS_REGION" > /dev/null
          then
-         total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.primaryKeys') && REPLICATED_TOTAL=$(( REPLICATED_TOTAL + total_per_tile ))
+         total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys') && REPLICATED_TOTAL=$(( REPLICATED_TOTAL + total_per_tile ))
       fi
       if [[ $REPLICATION_STATS_ENABLED == true ]]; then
-        if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile" > /dev/null
+        if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile" --region "$AWS_REGION" > /dev/null
         then
           local inserted=0
-          inserted=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.insertedPrimaryKeys')
+          inserted=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.insertedPrimaryKeys')
           local updated=0
-          updated=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.updatedPrimaryKeys')
+          updated=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.updatedPrimaryKeys')
           local deleted=0
-          deleted=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.deletedPrimaryKeys')
+          deleted=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.deletedPrimaryKeys')
           local timestamp=""
-          timestamp=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json - | head | jq '.updatedTimestamp')
+          timestamp=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.updatedTimestamp')
           local header=true
           if [[ $tile != 0 ]]; then
             header=false

@@ -3,64 +3,50 @@
  * // SPDX-License-Identifier: Apache-2.0
  */
 
-// Target Amazon OpenSearch service - preview
+// Target Amazon OpenSearch service
 
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
 import com.amazonaws.services.glue.util.JsonOptions
-import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.SparkSession
-import scala.collection.JavaConverters._
 import org.apache.spark.sql.cassandra._
-import scala.collection.mutable.ListBuffer
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.sql.expressions.Window
-import org.apache.spark.sql.functions
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.DataFrame
-
-import java.time.Duration
-import java.util.Optional
-import org.joda.time.LocalDateTime
-
-import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.encoders.RowEncoder
-
-import com.amazonaws.services.s3.{AmazonS3Client, AmazonS3, AmazonS3ClientBuilder}
-import com.amazonaws.services.s3.model.{ObjectMetadata, DeleteObjectsRequest, ObjectListing, S3ObjectSummary}
-import com.amazonaws.services.s3.model.S3Object
-import com.amazonaws.services.s3.model.S3ObjectInputStream
+import com.amazonaws.services.s3.AmazonS3ClientBuilder
+import com.amazonaws.services.s3.model.{DeleteObjectsRequest, ObjectListing, ObjectMetadata}
 import com.amazonaws.ClientConfiguration
 import com.amazonaws.retry.RetryPolicy
-
+import com.datastax.oss.driver.api.core.CqlSession
 import com.datastax.spark.connector.cql._
-import com.datastax.spark.connector._
-import com.datastax.oss.driver.api.core.NoNodeAvailableException
-import com.datastax.oss.driver.api.core.AllNodesFailedException
-import com.datastax.oss.driver.api.core.servererrors._
+import com.datastax.oss.driver.api.core.uuid.Uuids
+import com.datastax.oss.driver.api.core.`type`.DataType
+import com.datastax.oss.driver.api.core.`type`.DataTypes
+import org.apache.spark.sql.catalyst.encoders.RowEncoder
 
-import scala.util.{Try, Success, Failure}
+import scala.util.{Failure, Success, Try}
 import scala.util.matching.Regex
 import scala.io.Source
-import scala.collection.mutable.StringBuilder
-
+import scala.collection.parallel.immutable.ParSet
+import scala.collection.JavaConverters._
+import scala.annotation.tailrec
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 import org.json4s.jackson.Serialization
 import org.json4s.jackson.Serialization.write
+import org.joda.time.LocalDateTime
 
 import java.util.Base64
 import java.nio.charset.StandardCharsets
-
-import java.io.{ByteArrayInputStream}
-import com.datastax.oss.driver.api.core.uuid.Uuids
-import scala.collection.parallel.immutable.ParSet
+import java.io.ByteArrayInputStream
+import java.time.format.DateTimeFormatter
+import java.sql.Connection
+import java.sql.DriverManager
+import java.util.Properties
 
 class ProcessTypeException(s: String) extends RuntimeException {
   println(s)
@@ -78,11 +64,128 @@ class StatsS3Exception(s: String) extends RuntimeException {
   println(s)
 }
 
+class OpenSearchException(s: String) extends RuntimeException {
+  println(s)
+}
+
+case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
+
+case class TtlAddOn(enabled: Boolean = false, predicateOp: String = "greaterThan", predicateVal: Long = 0)
+
+case class PointInTimeReplicationConfig(predicateOp: String = "greaterThan")
+
+case class Replication(allColumns: Boolean = true,
+                       ttlAddOn: TtlAddOn = TtlAddOn(),
+                       pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig(),
+                       columns: List[String] = List(""),
+                       useCustomSerializer: Boolean = false,
+                       useMaterializedView: MaterializedViewConfig = MaterializedViewConfig())
+
+case class FieldsTransformation(source: String = "", target: String = "", sourceType: String = "string", targetType: String = "string")
+
+case class Transformation(enabled: Boolean = false, fieldsMapping: List[FieldsTransformation] = List(FieldsTransformation()))
+
+case class OpenSearchConfig(resource: String = null, enableDeletes: Boolean = false, maxFileSizeMb: Int = 32, transformation: Transformation = Transformation())
+
+case class JsonMapping(replication: Replication, opensearch: OpenSearchConfig)
+
 sealed trait Stats
 
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
 
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
+
+class CustomSerializationException(s: String) extends RuntimeException {
+  println(s)
+}
+
+// **************************Custom JSON Serializer Start*******************************************
+class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.driver.api.core.cql.Row] {
+  implicit val formats: DefaultFormats.type = DefaultFormats
+
+  def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
+    sep match {
+      case None => {
+        val output = bytes.map("%02x".format(_)).mkString
+        s"0x$output"
+      }
+      case _ => {
+        val output = bytes.map("%02x".format(_)).mkString(sep.get)
+        s"0x$output"
+      }
+    }
+  }
+
+  override def serialize(implicit format: org.json4s.Formats): PartialFunction[Any, JValue] = {
+    case row: com.datastax.oss.driver.api.core.cql.Row =>
+      val names = row.getColumnDefinitions.asScala.map(_.getName.asCql(true)).toList
+      val values = (0 until row.getColumnDefinitions.asScala.size).map { i =>
+        val name = names(i)
+        val dataType = row.getColumnDefinitions.get(i).getType
+        if (row.isNull(i)) {
+          name -> null
+        } else {
+          val value = getValue(row, i, dataType)
+          name -> value
+        }
+      }.toMap
+      Extraction.decompose(values)
+  }
+
+  private def getValue(row: com.datastax.oss.driver.api.core.cql.Row, i: Int, dataType: DataType): Any = {
+    dataType match {
+      case DataTypes.BOOLEAN => row.getBoolean(i)
+      case DataTypes.INT => row.getInt(i)
+      case DataTypes.TEXT => row.getString(i).replace("'", "\\\\u0027")
+      case DataTypes.ASCII => row.getString(i).replace("'", "\\\\u0027")
+      case DataTypes.BIGINT => row.getLong(i)
+      case DataTypes.BLOB => binToHex(row.getByteBuffer(i).array())
+      case DataTypes.COUNTER => row.getLong(i)
+      case DataTypes.DATE => row.getLocalDate(i).format(DateTimeFormatter.ISO_LOCAL_DATE)
+      case DataTypes.DECIMAL => row.getBigDecimal(i)
+      case DataTypes.DOUBLE => row.getDouble(i)
+      case DataTypes.FLOAT => row.getFloat(i)
+      case DataTypes.TIMESTAMP => row.getInstant(i).toString.replace("T", " ")
+      case DataTypes.SMALLINT => row.getInt(i)
+      case DataTypes.TIMEUUID => row.getUuid(i).toString
+      case DataTypes.UUID => row.getUuid(i).toString
+      case DataTypes.TINYINT => row.getByte(i)
+      case _ => throw new CustomSerializationException(s"Unsupported data type: $dataType")
+    }
+  }
+
+  override def deserialize(implicit format: org.json4s.Formats): PartialFunction[(org.json4s.TypeInfo, JValue), com.datastax.oss.driver.api.core.cql.Row] = ???
+}
+
+// *******************************Custom JSON Serializer End*********************************************
+
+class SupportFunctions {
+  def correctEmptyBinJsonValues(cols: List[String], input: String): String = {
+    implicit val formats: DefaultFormats.type = DefaultFormats
+
+    if (cols.isEmpty) {
+      input
+    } else {
+      val json = parse(input)
+
+      @tailrec
+      def replace(json: JValue, cols: Seq[String]): JValue = cols match {
+        case Nil => json
+        case col :: tail =>
+          val updatedJson = (json \ col) match {
+            case JString("") => json transformField {
+              case JField(`col`, _) => JField(col, JString("0x"))
+            }
+            case _ => json
+          }
+          replace(updatedJson, tail)
+      }
+
+      val finalJson = replace(json, cols)
+      compact(render(finalJson))
+    }
+  }
+}
 
 case class OssConfig(opensearchNodes: String,
                      opensearchPort: String,
@@ -111,7 +214,7 @@ case class FlushingSet[T](maxSize: Int, flushingClient: com.amazonaws.services.s
   }
 
   def flush(): Unit = this.synchronized {
-    if (!set.isEmpty) {
+    if (set.nonEmpty) {
       val fileName = Uuids.timeBased
       val data = set.mkString("\n")
       val inputStream = new ByteArrayInputStream(data.getBytes)
@@ -123,13 +226,13 @@ case class FlushingSet[T](maxSize: Int, flushingClient: com.amazonaws.services.s
     }
   }
 
-  def getSize(): Int = this.synchronized {
+  def getSize: Int = this.synchronized {
     size
   }
 }
 
 object GlueApp {
-  def main(sysArgs: Array[String]) {
+  def main(sysArgs: Array[String]): Unit = {
 
     def cleanupLedger(cc: CassandraConnector,
                       logger: GlueLogger,
@@ -150,7 +253,7 @@ object GlueApp {
     def readReplicationStatsObject(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String): ReplicationStats = {
       Try {
         val s3Object = s3Client.getObject(bucket, key)
-        val src = Source.fromInputStream(s3Object.getObjectContent())
+        val src = Source.fromInputStream(s3Object.getObjectContent)
         val json = src.getLines.mkString
         src.close()
         json
@@ -159,7 +262,7 @@ object GlueApp {
           ReplicationStats(0, 0, 0, 0, 0, LocalDateTime.now().toString)
         }
         case Success(json) => {
-          implicit val formats = DefaultFormats
+          implicit val formats: DefaultFormats.type = DefaultFormats
           parse(json).extract[ReplicationStats]
         }
       }
@@ -167,11 +270,11 @@ object GlueApp {
 
     def readOssConfigFile(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String): OssConfig = {
       val s3Object = s3Client.getObject(bucket, key)
-      val src = Source.fromInputStream(s3Object.getObjectContent())
+      val src = Source.fromInputStream(s3Object.getObjectContent)
       val json = src.getLines.mkString
       src.close()
 
-      implicit val formats = DefaultFormats
+      implicit val formats: DefaultFormats.type = DefaultFormats
       parse(json).extract[OssConfig]
     }
 
@@ -190,32 +293,59 @@ object GlueApp {
       (connectorToClusterSrc, connectorToClusterTrg)
     }
 
-    def inferKeys(cc: CassandraConnector, keyType: String, ks: String, tbl: String, columnTs: String): Seq[Map[String, String]] = {
-      val meta = cc.openSession.getMetadata.getKeyspace(ks).get.getTable(tbl).get
-      keyType match {
-        case "partitionKeys" => {
-          meta.getPartitionKey.asScala.map(x => Map(x.getName().toString -> x.getType().toString.toLowerCase))
-        }
-        case "primaryKeys" => {
-          meta.getPrimaryKey.asScala.map(x => Map(x.getName().toString -> x.getType().toString.toLowerCase))
-        }
-        case "primaryKeysWithTS" => {
-          meta.getPrimaryKey.asScala.map(x => Map(x.getName().toString -> x.getType().toString.toLowerCase)) :+ Map(s"writetime($columnTs) as ts" -> "bigint")
-        }
-        case _ => {
-          meta.getPrimaryKey.asScala.map(x => Map(x.getName().toString -> x.getType().toString.toLowerCase))
-        }
+    def jdbcOssConnectionFactory(url: String): Connection = {
+      Class.forName("org.opensearch.jdbc.Driver")
+      val properties = new Properties()
+      properties.put("auth", "aws_sigv4")
+      Try {
+        DriverManager.getConnection(s"jdbc:opensearch://$url", properties)
+      } match {
+        case Failure(e) => throw new OpenSearchException(s"JDBC connection issue to the OpenSearch service: $e")
+        case Success(conn) => conn
       }
     }
 
-    def parseJSONConfig(i: String): org.json4s.JValue = i match {
-      case "None" => JObject(List(("None", JString("None"))))
-      case str =>
-        try {
-          parse(str)
-        } catch {
-          case _: Throwable => JObject(List(("None", JString("None"))))
-        }
+    def jdbcOssDelete(whereClause: String, resource: String, conn: Connection): Unit = {
+      Try {
+        val st = conn.createStatement()
+        st.execute(s"DELETE FROM $resource WHERE $whereClause")
+      } match {
+        case Failure(e) => throw new OpenSearchException(s"JDBC delete issue to the OpenSearch service: $e")
+        case Success(_) =>
+      }
+    }
+
+    def inferKeys(cc: CassandraConnector, keyType: String, ks: String, tbl: String, columnTs: String): Seq[Map[String, String]] = {
+      val meta = cc.openSession.getMetadata.getKeyspace(ks).get.getTable(tbl).get
+      keyType match {
+        case "partitionKeys" =>
+          meta.getPartitionKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase))
+        case "primaryKeys" =>
+          meta.getPrimaryKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase))
+        case "primaryKeysWithTS" =>
+          meta.getPrimaryKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase)) :+ Map(s"writetime($columnTs) as ts" -> "bigint")
+        case _ =>
+          meta.getPrimaryKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase))
+      }
+    }
+
+    def getAllColumns(cc: CassandraConnector, ks: String, tbl: String): Seq[scala.collection.immutable.Map[String, String]] = {
+      cc.withSessionDo {
+        session =>
+          session.getMetadata.getKeyspace(ks).get().
+            getTable(tbl).get().
+            getColumns.entrySet.asScala.
+            map(x => Map(x.getKey.toString -> x.getValue.getType.toString)).toSeq
+      }
+    }
+
+    def parseJSONMapping(s: String): JsonMapping = {
+      Option(s) match {
+        case Some("None") => JsonMapping(Replication(), OpenSearchConfig())
+        case _ =>
+          implicit val formats: DefaultFormats.type = DefaultFormats
+          parse(s).extract[JsonMapping]
+      }
     }
 
     def preFlightCheck(connection: CassandraConnector, keyspace: String, table: String, dir: String): Unit = {
@@ -251,9 +381,9 @@ object GlueApp {
           }
         }
       } match {
-        case Failure(_) => {
+        case Failure(r) => {
           val err = s"ERROR: Detected connectivity issue. Check the reference conf file/Glue connection for the $dir, the job is aborted"
-          logger.error(err)
+          logger.error(s"$err ${r.toString}")
           sys.exit(-1)
         }
         case Success(_) => {
@@ -265,7 +395,6 @@ object GlueApp {
     val sparkContext: SparkContext = new SparkContext()
     val glueContext: GlueContext = new GlueContext(sparkContext)
     val sparkSession: SparkSession = glueContext.getSparkSession
-    val sparkConf: SparkConf = sparkContext.getConf
     val logger = new GlueLogger
     import sparkSession.implicits._
 
@@ -284,18 +413,11 @@ object GlueApp {
       case "true" => StorageLevel.DISK_ONLY
       case _ => StorageLevel.MEMORY_AND_DISK_SER
     }
-    sparkSession.conf.set(s"spark.sql.catalog.ledgerCatalog", "com.datastax.spark.connector.datasource.CassandraCatalog")
-    sparkSession.conf.set(s"spark.sql.catalog.sourceCluster", "com.datastax.spark.connector.datasource.CassandraCatalog")
-    sparkSession.conf.set(s"spark.sql.catalog.ledgerCatalog.spark.cassandra.connection.config.profile.path", "KeyspacesConnector.conf")
-    sparkSession.conf.set(s"spark.sql.catalog.sourceCluster.spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
 
-    val ledgerTable = "ledger"
-    val ledgerKeyspaces = "migration"
     val processType = args("PROCESS_TYPE") // discovery or replication
-    val interanlLedger = s"ledgerCatalog.$ledgerKeyspaces.$ledgerTable"
     val patternForSingleQuotes = "(.*text.*)|(.*date.*)|(.*timestamp.*)|(.*inet.*)".r
-    val flushingThreshold = 1024 * 1024 * 32
     val patternWhereClauseToMap: Regex = """(\w+)=['"]?(.*?)['"]?(?: and |$)""".r
+    sparkSession.conf.set(s"spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
 
     // Business configuration
     val srcTableName = args("SOURCE_TBL")
@@ -308,9 +430,8 @@ object GlueApp {
     val landingZone = args("S3_LANDING_ZONE")
     val bcktName = landingZone.replaceAll("s3://", "")
     val columnTs = args("WRITETIME_COLUMN")
-    val source = s"sourceCluster.$srcKeyspaceName.$srcTableName"
     val ttlColumn = args("TTL_COLUMN")
-    val olo = args("OFFLOAD_LARGE_OBJECTS")
+    val jsonMapping = args("JSON_MAPPING")
     val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
     val defaultPartitions = scala.math.max(2, (sparkContext.defaultParallelism / 2 - 2))
     val cleanUpRequested: Boolean = args("CLEANUP_REQUESTED") match {
@@ -318,7 +439,7 @@ object GlueApp {
       case _ => true
     }
 
-    //AmazonS3Client to check if a stop requested issued
+    //AmazonS3Client to check if a stop request was issued
     val s3ClientConf = new ClientConfiguration().withRetryPolicy(RetryPolicy.builder().withMaxErrorRetry(5).build())
     val s3client = AmazonS3ClientBuilder.standard().withClientConfiguration(s3ClientConf).build()
     val ossConfig = readOssConfigFile(s3client, bcktName, "artifacts/OpenSearchConnector.conf")
@@ -327,15 +448,6 @@ object GlueApp {
     logger.info("Preflight check started")
     preFlightCheck(cassandraConn, srcKeyspaceName, srcTableName, "source")
     logger.info("Preflight check completed")
-
-    val selectStmtWithTTL = ttlColumn match {
-      case "None" => ""
-      case _ => {
-        val tmpMeta = cassandraConn.openSession.getMetadata.getKeyspace(srcKeyspaceName).get.getTable(srcTableName).get
-        val lstColumns = tmpMeta.getColumns.asScala.map(x => x._1.toString).toSeq :+ s"ttl($ttlColumn)"
-        lstColumns.mkString(",")
-      }
-    }
 
     val pkFinal = columnTs match {
       case "None" => inferKeys(cassandraConn, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
@@ -347,6 +459,36 @@ object GlueApp {
     val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
     val columns = inferKeys(cassandraConn, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap
     val columnsPos = scala.collection.immutable.TreeSet(columns.keys.toArray: _*).zipWithIndex
+    val allColumnsFromSource = getAllColumns(cassandraConn, srcKeyspaceName, srcTableName)
+    val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
+    val jsonMappingRaw = new String(Base64.getDecoder.decode(jsonMapping.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
+    logger.info(s"Json mapping: $jsonMappingRaw")
+    val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\r\\n|\\r|\\n", ""))
+    val replicatedColumns = jsonMapping4s match {
+      case JsonMapping(Replication(true, _, _, _, _, _), _) => "*"
+      case rep => rep.replication.columns.mkString(",")
+    }
+
+    val maxFileSizeMb = Option(jsonMapping4s.opensearch.maxFileSizeMb).getOrElse(32)
+    val flushingThreshold = 1024 * 1024 * maxFileSizeMb
+    val transformation: List[(String, String, String, String)] = if (jsonMapping4s.opensearch.transformation.enabled) {
+      jsonMapping4s.opensearch.transformation.fieldsMapping.map(
+        mapping =>
+          (mapping.source, mapping.sourceType, mapping.target, mapping.targetType)
+      )
+    } else List(("", "", "", ""))
+
+    val selectStmtWithTTL = ttlColumn match {
+      case s if s.equals("None") => ""
+      case s if (!s.equals("None") && replicatedColumns.equals("*")) => {
+        val lstColumns = allColumnsFromSource.flatMap(_.keys).toSeq :+ s"ttl($ttlColumn)"
+        lstColumns.mkString(",")
+      }
+      case s if !(s.equals("None") || replicatedColumns.equals("*")) => {
+        val lstColumns = s"$replicatedColumns,ttl($ttlColumn)"
+        lstColumns
+      }
+    }
 
     def convertToMap(input: String): String = {
       patternWhereClauseToMap.findAllIn(input).matchData.map { m => s"'${m.group(1)}':'${m.group(2)}'" }.mkString(", ")
@@ -359,7 +501,7 @@ object GlueApp {
         case _ => throw new ProcessTypeException("Unrecognizable process type")
       }
       Try {
-        val s3Object: S3Object = s3client.getObject(bucket, key)
+        s3client.getObject(bucket, key)
         s3client.deleteObject(bucket, key)
         logger.info(s"Requested a stop for $key process")
       } match {
@@ -369,10 +511,11 @@ object GlueApp {
     }
 
     def cleanUpJsonObjects(bucket: String, key: String): Unit = {
+      @tailrec
       def deleteObjects(objectListing: ObjectListing): Unit = {
         val summaries = objectListing.getObjectSummaries.asScala.toList
 
-        if (!summaries.isEmpty) {
+        if (summaries.nonEmpty) {
           val deleteRequest = new DeleteObjectsRequest(bucket)
           deleteRequest.withKeys(summaries.map(_.getKey): _*)
           s3client.deleteObjects(deleteRequest)
@@ -386,7 +529,7 @@ object GlueApp {
     }
 
     def putStats(bucket: String, key: String, objectName: String, stats: Stats): Unit = {
-      implicit val formats = DefaultFormats
+      implicit val formats: DefaultFormats.type = DefaultFormats
       val (newContent, message) = stats match {
         case ds: DiscoveryStats =>
           (write(ds), s"Flushing the discovery stats: $key/$objectName")
@@ -421,33 +564,85 @@ object GlueApp {
       }
     }
 
-    def backToCQLStatementWithoutTTL(jvalue: org.json4s.JValue): String = {
-      val res = jvalue filterField (p => (p._1 != s"ttl($ttlColumn)"))
-      val jsonNew = JObject(res)
-      compact(render(jsonNew))
+    def getSourceRow(cls: String, wc: String, session: CqlSession, defaultFormat: org.json4s.Formats): String = {
+      val rs = if (jsonMapping4s.replication.useCustomSerializer) {
+        val row = Option(session.execute(s"SELECT $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+        if (row.nonEmpty)
+          Serialization.write(row)(defaultFormat)
+        else
+          ""
+      } else {
+        val row = Option(session.execute(s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
+        if (row.nonEmpty)
+          row.get.getString(0).replace("'", "\\\\u0027")
+        else
+          ""
+      }
+      rs
+    }
+
+    def replaceKeyName(str: String, mappings: Map[String, String]): String = {
+      mappings.foldLeft(str) {
+        case (current, (key, value)) => current.replace(s"$key=", s"$value=")
+      }
     }
 
     def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String],
                         columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(
         partition => {
+          val customFormat = jsonMapping4s.replication.useCustomSerializer match {
+            case true => DefaultFormats + new CustomResultSetSerializer
+            case _ => DefaultFormats
+          }
+          val supportFunctions = new SupportFunctions()
           val s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3 = AmazonS3ClientBuilder.defaultClient()
+          val jdbcConnection = if (jsonMapping4s.opensearch.enableDeletes) jdbcOssConnectionFactory(ossConfig.opensearchNodes) else null
           val fl = FlushingSet[String](flushingThreshold, s3ClientOnPartition, bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
           partition.foreach(
             row => {
               val whereClause = rowToStatement(row, columns, columnsPos)
-              if (!whereClause.isEmpty) {
+              if (whereClause.nonEmpty) {
                 cassandraConn.withSessionDo { session => {
                   if (op == "insert" || op == "update") {
-                    val rs = Option(session.execute(s"SELECT json * FROM $srcKeyspaceName.$srcTableName WHERE $whereClause").one())
-                    if (!rs.isEmpty) {
-                      val jsonRow = rs.get.getString(0).replace("'", "\\\\u0027")
-                      fl.add(jsonRow)
+                    val rs = ttlColumn match {
+                      case "None" => getSourceRow(replicatedColumns, whereClause, session, customFormat)
+                      case _ => getSourceRow(selectStmtWithTTL, whereClause, session, customFormat)
+                    }
+
+                    rs.isEmpty match {
+                      case true => logger.info(s"$whereClause not found in the source, the row might be already deleted or expired")
+                      case false if ttlColumn == "None" => {
+                        val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
+                        fl.add(jsonRow)
+                      }
+                      case false if ttlColumn != "None" => {
+                        if (jsonMapping4s.replication.ttlAddOn.enabled) {
+                          val jsonRow = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
+                          val json4sRow = parse(jsonRow)
+                          val ttlVal = getTTLvalue(json4sRow)
+                          val ttlValConst = jsonMapping4s.replication.ttlAddOn.predicateVal
+                          jsonMapping4s.replication.ttlAddOn.predicateOp match {
+                            case "equal" if ttlVal == ttlValConst => fl.add(jsonRow)
+                            case "greaterThan" if ttlVal > ttlValConst => fl.add(jsonRow)
+                            case "lessThan" if ttlVal < ttlValConst => fl.add(jsonRow)
+                            case _ =>
+                          }
+                        }
+                      }
                     }
                   }
-                  if (op == "delete") {
-                    val keyValuePairs = convertToMap(whereClause)
-                    fl.add(s"{$keyValuePairs}")
+                  if (op == "delete" && jsonMapping4s.opensearch.enableDeletes) {
+                    val whereClauseForTarget = rowToStatement(row, columns, columnsPos, "target")
+                    if (!jsonMapping4s.opensearch.transformation.enabled) {
+                      jdbcOssDelete(whereClauseForTarget, jsonMapping4s.opensearch.resource, jdbcConnection)
+                    } else {
+                      val whereClauseMap = jsonMapping4s.opensearch.transformation.fieldsMapping.map(
+                        mapping => (mapping.source, mapping.target)
+                      )
+                      val whereClauseTransformed = replaceKeyName(whereClauseForTarget, whereClauseMap.toMap)
+                      jdbcOssDelete(whereClauseTransformed, jsonMapping4s.opensearch.resource, jdbcConnection)
+                    }
                   }
                 }
                 }
@@ -455,7 +650,7 @@ object GlueApp {
             }
           )
           fl.getSize match {
-            case s if s > 0 => fl.flush
+            case s if s > 0 => fl.flush()
             case _ =>
           }
         }
@@ -469,14 +664,15 @@ object GlueApp {
       }
     }
 
-    def rowToStatement(row: Row, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)]): String = {
+    def rowToStatement(row: Row, columns: scala.collection.immutable.Map[String, String],
+                       columnsPos: scala.collection.immutable.SortedSet[(String, Int)], statementType: String = "source"
+                      ): String = {
       val whereStmt = new StringBuilder
       columnsPos.foreach { el =>
         val colName = el._1
         val position = row.fieldIndex(el._1)
         val colType: String = columns.getOrElse(el._1, "none")
         val v = colType match {
-          // inet is string
           case "string" | "text" | "inet" => s"'${row.getString(position)}'"
           case "date" => s"'${row.getDate(position)}'"
           case "timestamp" => s"'${row.getTimestamp(position)}'"
@@ -487,7 +683,8 @@ object GlueApp {
           case "short" => row.getShort(position)
           case "decimal" => row.getDecimal(position)
           case "tinyint" => row.getByte(position)
-          case "uuid" => row.getString(position)
+          case "uuid" if statementType == "source" => row.getString(position)
+          case "uuid" if statementType == "target" => s"'${row.getString(position)}'"
           case "boolean" => row.getBoolean(position)
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
@@ -503,11 +700,11 @@ object GlueApp {
     }
 
     def jsonToOSS(df: DataFrame, op: String, tile: Int): Long = {
-      val cnt = df.isEmpty match {
-        case false => {
-          val fingerPrint = LocalDateTime.now()
-          persistToTarget(shuffleDfV2(df.drop("ts", "group")), columns, columnsPos, tile, op)
-
+      val cnt = if (df.isEmpty) {
+        0
+      } else {
+        persistToTarget(shuffleDfV2(df.drop("ts", "group")), columns, columnsPos, tile, op)
+        if (op != "delete") {
           val path = s"$landingZone/tmp/$trgKeyspaceName/$trgTableName/$tile/$op"
           val dfFromJson = glueContext.getSourceWithFormat(
             connectionType = "s3",
@@ -515,31 +712,39 @@ object GlueApp {
             options = JsonOptions(s"""{"paths": ["$path"]}""")
           ).getDynamicFrame()
 
-          val indexName = s"$trgKeyspaceName-$trgTableName"
-          val datasink = glueContext.getSinkWithFormat(
-            connectionType = "opensearch",
-            options = JsonOptions(Map(
-              "opensearch.nodes.client.only" -> ossConfig.opensearchNodesClientOnly,
-              "opensearch.nodes" -> ossConfig.opensearchNodes,
-              "opensearch.port" -> ossConfig.opensearchPort,
-              "opensearch.nodes.wan.only" -> ossConfig.opensearchNodesWanOnly,
-              "opensearch.net.ssl" -> ossConfig.opensearchNetSsl,
-              "opensearch.aws.sigv4.enabled" -> ossConfig.opensearchAwsSigv4Enabled,
-              "opensearch.aws.sigv4.region" -> ossConfig.opensearchAwsSigv4Region,
-              "opensearch.nodes.resolve.hostname" -> ossConfig.opensearchNodesResolveHostname,
-              "connectionName" -> "cql-replicator-opensearch-integration",
-              "opensearch.resource" -> indexName,
-              "pushdown" -> "true")), transformationContext = "datasink").writeDynamicFrame(dfFromJson)
+          val transformedDf = if (jsonMapping4s.opensearch.transformation.enabled) {
+            dfFromJson.applyMapping(transformation, caseSensitive = false, transformationContext = s"transformation for $srcTableName")
+          } else {
+            dfFromJson
+          }
 
-          cleanUpJsonObjects(bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
-          df.count()
+          val indexName = s"${jsonMapping4s.opensearch.resource}"
+          Try {
+            glueContext.getSinkWithFormat(
+              connectionType = "opensearch",
+              options = JsonOptions(Map(
+                "opensearch.nodes.client.only" -> ossConfig.opensearchNodesClientOnly,
+                "opensearch.nodes" -> ossConfig.opensearchNodes,
+                "opensearch.port" -> ossConfig.opensearchPort,
+                "opensearch.nodes.wan.only" -> ossConfig.opensearchNodesWanOnly,
+                "opensearch.net.ssl" -> ossConfig.opensearchNetSsl,
+                "opensearch.aws.sigv4.enabled" -> ossConfig.opensearchAwsSigv4Enabled,
+                "opensearch.aws.sigv4.region" -> ossConfig.opensearchAwsSigv4Region,
+                "opensearch.nodes.resolve.hostname" -> ossConfig.opensearchNodesResolveHostname,
+                "connectionName" -> "cql-replicator-opensearch-integration",
+                "opensearch.resource" -> indexName,
+                "pushdown" -> "true")), transformationContext = "datasink").writeDynamicFrame(transformedDf)
+          } match {
+            case Failure(exception) => throw new OpenSearchException(s"Can't write the data to the OpenSearch cluster. $exception")
+            case Success(_) => cleanUpJsonObjects(bcktName, s"tmp/$trgKeyspaceName/$trgTableName/$tile/$op")
+          }
         }
-        case true => 0
+        df.count()
       }
       cnt
     }
 
-    def dataReplicationProcess() {
+    def dataReplicationProcess(): Unit = {
       keyspacesConn.withSessionDo {
         session => {
           val ledger = session.execute(s"SELECT location,tile,ver FROM migration.ledger WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$currentTile and load_status='' and offload_status='SUCCESS' ALLOW FILTERING").all().asScala
@@ -586,30 +791,35 @@ object GlueApp {
               ).getDynamicFrame().toDF().drop("group").persist(cachingMode)
 
               val pathHead = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head"
+              // java.lang.NoClassDefFoundError:Could not initialize class com.amazonaws.services.glue.util.StringToBoolean$
               val dfHead = glueContext.getSourceWithFormat(
                 connectionType = "s3",
                 format = "parquet",
                 options = JsonOptions(s"""{"paths": ["$pathHead"]}""")
               ).getDynamicFrame().toDF().drop("group").persist(cachingMode)
               val newInsertsDF = dfTail.as("tail").join(dfHead.as("head"), cond, "leftanti").persist(cachingMode)
+              val newDeletesDF = dfHead.as("head").join(dfTail.as("tail"), cond, "leftanti").persist(cachingMode)
 
               columnTs match {
                 case "None" => {
                   val inserted = jsonToOSS(newInsertsDF, "insert", currentTile)
-                  val content = ReplicationStats(currentTile, 0, 0, inserted, 0, LocalDateTime.now().toString)
+                  val deleted = jsonToOSS(newDeletesDF, "delete", currentTile)
+                  val content = ReplicationStats(currentTile, 0, 0, inserted, deleted, LocalDateTime.now().toString)
                   putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
                 }
                 case _ => {
                   val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").filter($"tail.ts" > $"head.ts").selectExpr(pks.map(x => s"tail.$x"): _*).persist(cachingMode)
                   val inserted = jsonToOSS(newInsertsDF, "insert", currentTile)
                   val updated = jsonToOSS(newUpdatesDF, "update", currentTile)
-                  val content = ReplicationStats(currentTile, 0, updated, inserted, 0, LocalDateTime.now().toString)
+                  val deleted = jsonToOSS(newDeletesDF, "delete", currentTile)
+                  val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, LocalDateTime.now().toString)
                   putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
                   newUpdatesDF.unpersist()
                 }
               }
 
               newInsertsDF.unpersist()
+              newDeletesDF.unpersist()
               dfTail.unpersist()
               dfHead.unpersist()
 
@@ -625,29 +835,42 @@ object GlueApp {
       }
     }
 
-    def keysDiscoveryProcess() {
+    def keysDiscoveryProcess(): Unit = {
+      val srcTableForDiscovery = if (jsonMapping4s.replication.useMaterializedView.enabled) {
+        jsonMapping4s.replication.useMaterializedView.mvName
+      } else {
+        srcTableName
+      }
       val primaryKeysDf = columnTs match {
         case "None" =>
-          sparkSession.read.option("inferSchema", "true").
-            table(source).
+          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+            load().
             selectExpr(pkFinal.map(c => c): _*).
+            withColumn("ts", lit(0)).
             persist(cachingMode)
         case ts if ts != "None" && replicationPointInTime == 0 =>
-          sparkSession.read.option("inferSchema", "true").
-            table(source).
+          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+            load().
             selectExpr(pkFinal.map(c => c): _*).
             persist(cachingMode)
-        case ts if ts != "None" && replicationPointInTime > 0 =>
-          sparkSession.read.option("inferSchema", "true").
-            table(source).
+        case ts if ts != "None" && replicationPointInTime > 0 => {
+          val filterCon = jsonMapping4s.replication.pointInTimeReplicationConfig.predicateOp match {
+            case "greaterThan" => col("ts") > replicationPointInTime && col("ts").isNotNull
+            case "lessThan" => col("ts") < replicationPointInTime && col("ts").isNotNull
+            case "equal" => col("ts") === replicationPointInTime && col("ts").isNotNull
+            case _ => col("ts") > replicationPointInTime && col("ts").isNotNull
+          }
+          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+            load().
             selectExpr(pkFinal.map(c => c): _*).
-            filter(($"ts" > replicationPointInTime) && ($"ts".isNotNull)).
+            filter(filterCon).
             persist(cachingMode)
+        }
       }
 
       val groupedPkDF = primaryKeysDf.withColumn("group", abs(xxhash64(pkFinalWithoutTs.map(c => col(c)): _*)) % totalTiles).
         repartition(col("group")).persist(cachingMode)
-      val tiles = (0 to totalTiles - 1).toList.par
+      val tiles = (0 until totalTiles).toList.par
       tiles.foreach(tile => {
         keyspacesConn.withSessionDo {
           session => {
@@ -721,17 +944,17 @@ object GlueApp {
       _ => {
         processType match {
           case "discovery" => {
-            keysDiscoveryProcess
+            keysDiscoveryProcess()
           }
           case "replication" => {
-            dataReplicationProcess
+            dataReplicationProcess()
           }
           case _ => {
             logger.info(s"Unrecognizable process type - $processType")
             sys.exit()
           }
         }
-        logger.info(s"Cooldown period $WAIT_TIME ms")
+        logger.info(s"Cool down period $WAIT_TIME ms")
         Thread.sleep(WAIT_TIME)
       }
     }

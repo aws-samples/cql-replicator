@@ -134,7 +134,11 @@ Before running the migration process
 configure [lifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html)
 for the S3 bucket to delete objects after expiration. The xref column should be present in the source and the target
 tables before running the cqlreplicator.
-The payload will be compressed by [LZ4](https://fuchsia.googlesource.com/third_party/lz4/+/refs/tags/v1.7.5/README.md) with a leading 4 bytes (Int) and stored in Base64 format on the S3 bucket.
+
+The payload will be compressed by [LZ4](https://fuchsia.googlesource.com/third_party/lz4/+/refs/tags/v1.7.5/README.md) and stored in the S3 bucket. The compressed payload includes the length of the original 
+decompressed data, so that you don't need to save the length at anywhere else. The compressed data must be decompressed by 
+LZ4DecompressorWithLength and is NOT compatible with any other decompressors in lz4-java or any other lz4 tools. 
+This class deliberately does not extend LZ4Compressor because they are not interchangeable.
 
 ```shell
 ./cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --src-keyspace ks_test_cql_replicator \
@@ -305,10 +309,12 @@ the timestamp to your command line:
 ## Compress selected columns
 
 To minimize the size of large columns in the target table, enable the `compressionConfig` in the json mapping.
-All selected columns will be encoded in JSON format and compressed by LZ4 fast compressor.
+All selected columns will be encoded in JSON format and compressed by the LZ4 fast compressor.
 
-Note that the CQLReplicator will add a leading 4 bytes (Int) to the compressed value. In this case, you will know the exact size of 
-a buffer you should use for decompression on the client side.
+Note that the compressed payload includes the length of the original decompressed data, so that you don't need to save 
+the length at anywhere else. The compressed data must be decompressed by [LZ4DecompressorWithLength](https://javadoc.io/doc/org.lz4/lz4-java/latest/net/jpountz/lz4/LZ4DecompressorWithLength.html) 
+and is NOT compatible with any other decompressors in lz4-java or any other lz4 tools. This class deliberately does not extend 
+LZ4Compressor because they are not interchangeable.
 
 ```shell
 ./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
@@ -558,10 +564,54 @@ After the init phase is completed you can run the following command to start the
 ```shell
    cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
-                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --writetime-column col2 \
+                 --json-mapping '
+                     {"replication": {
+                      "allColumns": false,
+                      "ttlAddOn": {
+                        "enabled": false,
+                        "predicateOp": "greaterThan",
+                        "predicateVal": 900000
+                      },
+                      "pointInTimeReplicationConfig": {
+                        "predicateOp": "greaterThan"
+                      },
+                      "columns":["pk", "cc", "col1", "col2"],
+                      "useCustomSerializer": false,
+                      "useMaterializedView": {
+                        "enabled": false,
+                        "mvName": "mvName"
+                      }
+                    },
+                      "opensearch": {
+                        "resource": "aos-index-name",
+                        "enableDeletes": false,
+                        "maxFileSizeMb": 32,
+                        "transformation": {
+                          "enabled": true,
+                          "fieldsMapping": [
+                            {"source": "pk", "target": "field1", "sourceType": "string", "targetType":  "string"},
+                            {"source": "cc", "target": "field2", "sourceType": "integer", "targetType":  "integer"},
+                            {"source": "col1", "target": "field3", "sourceType":  "string", "targetType":  "string"},
+                            {"source": "col2", "target": "field4", "sourceType":  "string", "targetType":  "string"}
+                        ]}
+                      }'
 ```
-The CQLReplicator replicates your rows as text, the column name will be mapped to the fields in the index without changes
-and the target index name will be in the following format: `trg-keyspace`-`trg-table`.
+In the below example the CQLReplicator replicates by following the instructions in the json mapping. Source columns
+pk, cc, col1, and col2 will be renamed to field1, field2, field3, and field4 respectively. 
+
+In order to enable deletes set `enableDeletes` to `true` in the json mapping, but deletes are disabled 
+by default in Amazon OpenSearch. To enable this functionality for the CQLReplicator, you
+need to update the configuration by sending the following request: 
+```
+PUT _plugins/_query/settings
+{
+  "transient": {
+    "plugins.sql.delete.enabled": "true"
+  }
+}
+```
 
 ## License
 

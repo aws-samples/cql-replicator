@@ -31,6 +31,7 @@ import com.datastax.oss.driver.api.core.uuid.Uuids
 import com.datastax.oss.driver.api.core.DriverException
 import io.github.resilience4j.retry.{Retry, RetryConfig}
 import io.github.resilience4j.core.IntervalFunction
+import org.apache.spark.sql.types.{MapType, StringType}
 
 import scala.util.{Failure, Success, Try}
 import scala.io.Source
@@ -45,9 +46,7 @@ import org.json4s.jackson.Serialization.write
 import java.util.Base64
 import java.nio.charset.StandardCharsets
 import java.time.format.DateTimeFormatter
-import java.time.{Duration, ZoneId, ZonedDateTime, LocalDateTime}
-import java.time.format.DateTimeFormatter
-import org.joda.time.LocalDateTime
+import java.time.{Duration, ZoneId, ZonedDateTime}
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
 
 class LargeObjectException(s: String) extends RuntimeException {
@@ -89,7 +88,8 @@ case class TokenRanges(enabled: Boolean = false, tokenRanges: List[String] = Lis
 case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterialzedViewConfig = MaterialzedViewConfig(), filteringByTokenRanges: TokenRanges = TokenRanges())
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
-case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig)
+case class Transformation(enabled: Boolean = false, filterExpression: String = "")
+case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation)
 case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
 
 // **************************Custom JSON Serializer Start*******************************************
@@ -194,8 +194,9 @@ object GlueApp {
                            tblName: String,
                            bucketName: String,
                            s3Client: com.amazonaws.services.s3.AmazonS3,
-                           tile: Int, op: String): Option[String] = {
-      val prefix = s"$ksName/$tblName/dlq/$tile/$op"
+                           tile: Int, op: String = ""): Option[String] = {
+      val prefix = if (op.nonEmpty) s"$ksName/$tblName/dlq/$tile/$op" else
+        s"$ksName/$tblName/cdc/pointers/$tile"
       val listObjectsRequest = new ListObjectsV2Request().withBucketName(bucketName).withPrefix(prefix)
       val objectListing = s3Client.listObjectsV2(listObjectsRequest)
       val firstObjectKeyOption = objectListing.getObjectSummaries.asScala.headOption.map(_.getKey)
@@ -237,13 +238,18 @@ object GlueApp {
                       logger: GlueLogger,
                       ks: String, tbl: String,
                       cleanUpRequested: Boolean,
-                      pt: String): Unit = {
+                      pt: String, tt: Int): Unit = {
       if (pt.equals("discovery") && cleanUpRequested) {
         cc.withSessionDo {
           session => {
             session.execute(s"DELETE FROM migration.ledger WHERE ks='$ks' and tbl='$tbl'")
           }
             logger.info("Cleaned up the migration.ledger")
+            for (i <- 0 until tt) {
+              session.execute(s"DELETE FROM migration.cdc_ledger WHERE key='$ks.$tbl' and tile=$i")
+            }
+            logger.info("Cleaned up the migration.cdc_ledger")
+
             session.close()
         }
       }
@@ -308,7 +314,7 @@ object GlueApp {
 
     def parseJSONMapping(s: String): JsonMapping = {
       Option(s) match {
-        case Some("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig()))
+        case Some("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig(), Transformation()))
         case _ =>
           implicit val formats: DefaultFormats.type = DefaultFormats
           parse(s).extract[JsonMapping]
@@ -372,6 +378,7 @@ object GlueApp {
     val totalTiles = args("TOTAL_TILES").toInt
     val safeMode = args("SAFE_MODE")
     val replayLog = Try(args("REPLAY_LOG").toBoolean).getOrElse(false)
+    val commitLogSupplier: Boolean = true
     // Internal configuration
     val WAIT_TIME = safeMode match {
       case "true" => 20000
@@ -672,7 +679,10 @@ object GlueApp {
         } else {
           Try {
             val row = Option(session.execute(s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc").one())
-            row.get.getString(0).replace("'", "''")
+            if (row.nonEmpty)
+              row.get.getString(0).replace("'", "''")
+            else
+              emptyResult
           } match {
             case Failure(e) =>
               throw new RuntimeException(s"$e <- SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc")
@@ -802,17 +812,37 @@ object GlueApp {
         val v = colType match {
           // inet is string
           case "string" | "text" | "inet" | "varchar" | "ascii" | "time" => s"'${row.getString(position).replace("'", "''")}'"
-          case "date" => s"'${row.getDate(position)}'"
-          case "timestamp" => {
-            val inputFormatterTs = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
-            var originalTs = row.getTimestamp(position).toString
-            val dotIndex = originalTs.indexOf(".")
-            if (dotIndex != -1 && originalTs.length - dotIndex < 4) {
-              originalTs += "0" * (4 - (originalTs.length - dotIndex))
+          case "date" => {
+            row.get(position).getClass.getName match {
+              case "java.sql.Date" => {
+                s"'${row.getDate(position)}'"
+              }
+              case "java.lang.String" => {
+                s"'${row.getString(position)}'"
+              }
             }
-            val localDateTime = java.time.LocalDateTime.parse(originalTs, inputFormatterTs)
-            val zonedDateTime = ZonedDateTime.of(localDateTime, ZoneId.of("UTC"))
-            s"${zonedDateTime.toInstant.toEpochMilli}"
+          }
+          case "timestamp" => {
+            val res = row.get(position).getClass.getName match {
+              case "java.sql.Timestamp" => {
+                val inputFormatterTs = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+                var originalTs = row.getTimestamp(position).toString
+                val dotIndex = originalTs.indexOf(".")
+                if (dotIndex != -1 && originalTs.length - dotIndex < 4) {
+                  originalTs += "0" * (4 - (originalTs.length - dotIndex))
+                }
+                val localDateTime = java.time.LocalDateTime.parse(originalTs, inputFormatterTs)
+                val zonedDateTime = ZonedDateTime.of(localDateTime, ZoneId.of("UTC"))
+                s"${zonedDateTime.toInstant.toEpochMilli}"
+              }
+              case "java.lang.String" => {
+                val inputFormatterTs = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ")
+                val originalTs = row.getString(position).replace("Z","+0000")
+                val localDateTime = ZonedDateTime.parse(originalTs, inputFormatterTs)
+                s"${localDateTime.toInstant.toEpochMilli}"
+              }
+            }
+            res
           }
           case "int" | "varint" => row.getInt(position)
           case "long" | "bigint" => row.getLong(position)
@@ -873,6 +903,11 @@ object GlueApp {
 
               }
               )
+              if (commitLogSupplier) {
+                keyspacesConn.withSessionDo {
+                  session => session.execute(s"INSERT INTO migration.cdc_ledger(key, tile, backfill_completed, backfill_ts) VALUES('$srcKeyspaceName.$srcTableName', $currentTile, true, ${java.time.Instant.now().toEpochMilli})")
+                }
+              }
             }
 
             if ((heads > 0 && tails > 0) || (heads == 0 && tails > 0)) {
@@ -946,34 +981,169 @@ object GlueApp {
       }
     }
 
+    def isBackfillingCompleted(tile: Int): Boolean = {
+      val rs = keyspacesConn.withSessionDo {
+        session => {
+          Option(session.execute(s"SELECT backfill_completed FROM migration.cdc_ledger where key='$srcKeyspaceName.$srcTableName' and tile=$tile").one())
+        }
+      }
+      if (rs.nonEmpty) {
+        rs.get.getBoolean(0)
+      } else {
+        false
+      }
+    }
+
+    def setCdcPath(path: String): (String, String) = {
+      val pathParts = path.split("/")
+      val t1 = pathParts.takeWhile(part => !part.startsWith("dt") ).mkString("/").replace("pointers","primaryKeys")
+      val t2 = t1.split("/").last
+      (t1, t2)
+    }
+
+    def cdc(ksName: String, tblName: String, bucketName: String, s3Client: com.amazonaws.services.s3.AmazonS3, tile: Int): Unit = {
+      val payload = isLogObjectPresent(ksName,tblName,bucketName,s3Client,tile)
+
+      if (payload.isDefined) {
+        Try {
+          var inserted: Long = 0
+          var deleted: Long = 0
+          var updated: Long = 0
+          val mappingSchema = MapType(StringType, StringType)
+          val payloadObj = setCdcPath(payload.get)._1
+          val df = glueContext.getSourceWithFormat(
+              connectionType = "s3",
+              format = "parquet",
+              options = JsonOptions(s"""{"paths": ["$landingZone/$payloadObj"]}""")
+            ).getDynamicFrame().toDF().
+            withColumnRenamed("op", "_op").
+            withColumnRenamed("pk", "_pk").
+            withColumnRenamed("ts", "_ts")
+
+          df.show(false)
+          if (!df.isEmpty) {
+            val dfWithJson = df.withColumn("jsonPk", from_json($"_pk", mappingSchema)).drop("_pk")
+            val finalDf = dfWithJson.select($"*" +: pks.map(name => $"jsonPk.$name".alias(name)): _*).drop("jsonPk").sort(col("_ts").asc).persist(StorageLevel.MEMORY_AND_DISK_SER)
+            val finalDFInserts = finalDf.where("_op='INSERT'").drop("_op", "_ts")
+            persistToTarget(shuffleDfV2(finalDFInserts), columns, columnsPos, tile, "insert")
+            inserted = finalDFInserts.count()
+
+            val finalDFUpdates = finalDf.where("_op='UPDATE'").drop("_op", "_ts")
+            persistToTarget(shuffleDfV2(finalDFUpdates), columns, columnsPos, tile, "update")
+            updated = finalDFUpdates.count()
+
+            val finalDFDeletes = finalDf.where("_op='DELETE'").drop("_op", "_ts")
+            persistToTarget(shuffleDfV2(finalDFDeletes), columns, columnsPos, tile, "delete")
+            deleted = finalDFDeletes.count()
+
+            val content = ReplicationStats(tile, 0, updated, inserted, deleted, org.joda.time.LocalDateTime.now().toString)
+            putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$tile", "count.json", content)
+          }
+        } match {
+          case Failure(e) => throw new RuntimeException(s"Exception during processing CDC: $e")
+          case Success(_) => {
+            val key = setCdcPath(payload.get)._2
+            println(s"CDC processed: $key")
+            s3Client.deleteObject(bucketName, s"$srcKeyspaceName/$srcTableName/cdc/pointers/$tile/$key")
+            keyspacesConn.withSessionDo {
+              session => session.execute(s"UPDATE migration.cdc_ledger SET last_processed_snapshot='${key}' WHERE key='$srcKeyspaceName.$srcTableName' and tile=$tile")
+            }
+          }
+        }
+      }
+    }
+
+    def bfCompleted(tt: Int): Boolean = {
+      val rs = keyspacesConn.withSessionDo {
+        session => {
+          Option(session.execute(s"SELECT tile FROM migration.cdc_ledger where key='$srcKeyspaceName.$srcTableName' and backfill_completed=true ALLOW FILTERING").all())
+        }
+      }
+      rs.get.size() == tt
+    }
+
+    def keysDiscoveryCdcProcess(tile: Int): Unit = {
+      // Read cdc_ledger
+      val cdcPath = s"$landingZone/$srcKeyspaceName/$srcTableName/cdc/primaryKeys/$tile"
+      val rs = keyspacesConn.withSessionDo {
+        session => {
+          Option(session.execute(s"SELECT backfill_completed,max_ts FROM migration.cdc_ledger where key='$srcKeyspaceName.$srcTableName' and tile=$tile").one())
+        }
+      }
+      if (rs.isEmpty || (rs.nonEmpty && rs.get.getInstant(1) == null))  {
+        // No cdc_ledger record, start from the beginning
+        val currentEpoch = java.time.Instant.now().toEpochMilli
+        val cdcTableFiltered = sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").option("inferSchema", "true").load().where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile").drop("key", "tile")
+        println(s"$tile = ${cdcTableFiltered.count()}")
+        if (!cdcTableFiltered.isEmpty) {
+          cdcTableFiltered.write.partitionBy("dt", "seq").parquet(s"$cdcPath/$currentEpoch")
+          //  what if maxTS is empty due to no records in cdc_support_table_v2
+          val maxTs = cdcTableFiltered.agg(max("ts")).first.getTimestamp(0).toInstant.toEpochMilli
+          keyspacesConn.withSessionDo {
+            session => session.execute(s"INSERT INTO migration.cdc_ledger(key, tile, max_ts) VALUES('$srcKeyspaceName.$srcTableName', $tile, '$maxTs')")
+          }
+          s3client.putObject(bcktName, s"$srcKeyspaceName/$srcTableName/cdc/pointers/$tile/$currentEpoch", "")
+        }
+      } else if (rs.nonEmpty && rs.get.getInstant(1) !=null) {
+        // CDC backfill completed, start from the last cdc_ledger record
+        val maxTs = rs.get.getInstant(1)
+        val currentTs = maxTs
+        val currentEpoch = currentTs.toEpochMilli
+        val currentSeq = currentTs.atZone(java.time.ZoneOffset.UTC).getHour
+        val currentDt = currentTs.atOffset(java.time.ZoneOffset.UTC).toLocalDate
+        val cdcTableFiltered = sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").
+          option("inferSchema", "true").load().
+          where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDt' and seq>=$currentSeq and ts>'$maxTs'").
+          drop("key", "tile")
+        if (!cdcTableFiltered.isEmpty) {
+          cdcTableFiltered.write.partitionBy("dt", "seq").parquet(s"$cdcPath/$currentEpoch")
+          val ts = cdcTableFiltered.agg(max("ts")).first.getTimestamp(0).toInstant.toEpochMilli
+          keyspacesConn.withSessionDo {
+            session => session.execute(s"INSERT INTO migration.cdc_ledger(key, tile, max_ts) VALUES('$srcKeyspaceName.$srcTableName', $tile, '$ts')")
+          }
+          s3client.putObject(bcktName, s"$srcKeyspaceName/$srcTableName/cdc/pointers/$tile/$currentEpoch", "")
+        }
+      }
+    }
+
     def keysDiscoveryProcess(): Unit = {
       val srcTableForDiscovery = if (jsonMapping4s.replication.useMaterializedView.enabled) {
         jsonMapping4s.replication.useMaterializedView.mvName
       } else {
         srcTableName
       }
-      val primaryKeysDf = columnTs match {
-        case "None" =>
-          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
-            load().
-            selectExpr(pkFinal.map(c => c): _*).
-            withColumn("ts", lit(0)).
-            persist(cachingMode)
-        case ts if ts != "None" && replicationPointInTime == 0 =>
-          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
-            load().
-            selectExpr(pkFinal.map(c => c): _*).
-            persist(cachingMode)
-        case ts if ts != "None" && replicationPointInTime > 0 =>
-          sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
-            load().
-            selectExpr(pkFinal.map(c => c): _*).
-            filter(($"ts" > replicationPointInTime) && ($"ts".isNotNull)).
-            persist(cachingMode)
-      }
+      val backFillStatus: Boolean = if (commitLogSupplier) bfCompleted(totalTiles) else false
+      val primaryKeysDf = if (!backFillStatus) {
+        columnTs match {
+          case "None" =>
+            sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+              load().
+              selectExpr(pkFinal.map(c => c): _*).
+              withColumn("ts", lit(0)).
+              persist(cachingMode)
+          case ts if ts != "None" && replicationPointInTime == 0 =>
+            sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+              load().
+              selectExpr(pkFinal.map(c => c): _*).
+              persist(cachingMode)
+          case ts if ts != "None" && replicationPointInTime > 0 =>
+            sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
+              load().
+              selectExpr(pkFinal.map(c => c): _*).
+              filter(($"ts" > replicationPointInTime) && ($"ts".isNotNull)).
+              persist(cachingMode)
+        }
+      } else sparkSession.emptyDataFrame
+
       // the init seed for xxhash64 is 42
-      val groupedPkDF = primaryKeysDf.withColumn("group", abs(xxhash64(pkFinalWithoutTs.map(c => col(c)): _*)) % totalTiles).
+      val groupedPkDF = if (!primaryKeysDf.isEmpty) primaryKeysDf.withColumn("group", abs(xxhash64(concat(pkFinalWithoutTs.map(c => col(c)): _*))) % totalTiles).
         repartition(col("group")).persist(cachingMode)
+      else
+      {
+        logger.info("Skipping reading the base source due to CDC is enabled")
+        sparkSession.emptyDataFrame
+      }
+
       val tiles = (0 until totalTiles).toList.par
       tiles.foreach(tile => {
         keyspacesConn.withSessionDo {
@@ -995,7 +1165,11 @@ object GlueApp {
             logger.info(s"Processing $tile, head is $head, tail is $tail, head status is $headLoadStatus, tail status is $tailLoadStatus")
 
             // Swap tail and head
-            if ((!tail.isEmpty && tailLoadStatus == "SUCCESS") && (!head.isEmpty && headLoadStatus == "SUCCESS")) {
+            if ((!tail.isEmpty && tailLoadStatus == "SUCCESS") &&
+              (!head.isEmpty && headLoadStatus == "SUCCESS") &&
+              !commitLogSupplier
+            )
+            {
               logger.info("Swapping the tail and the head")
 
               val staged = groupedPkDF.where(col("group") === tile).repartition(defaultPartitions, pks.map(c => col(c)): _*)
@@ -1017,8 +1191,14 @@ object GlueApp {
               )
             }
 
+            // CommitLog Supplier is enabled after the back filling phase is completed
+            if (commitLogSupplier) {
+              logger.info("Retrieving changes from the cdc support table")
+              keysDiscoveryCdcProcess(tile)
+            }
+
             // The second round (tail and head)
-            if (tail.isEmpty && (!head.isEmpty && headLoadStatus == "SUCCESS")) {
+            if (tail.isEmpty && (!head.isEmpty && headLoadStatus == "SUCCESS") && !commitLogSupplier) {
               logger.info("Loading a tail but keeping the head")
               val staged = groupedPkDF.where(col("group") === tile).repartition(defaultPartitions, pks.map(c => col(c)): _*)
               staged.write.mode("overwrite").save(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail")
@@ -1028,11 +1208,22 @@ object GlueApp {
             // Historical upload, the first round (head)
             if (tail.isEmpty && head.isEmpty) {
               logger.info("Loading a head")
-              val staged = groupedPkDF.where(col("group") === tile).repartition(defaultPartitions, pks.map(c => col(c)): _*)
-              staged.write.mode("overwrite").save(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
-              session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
-              val content = DiscoveryStats(tile, staged.count(), org.joda.time.LocalDateTime.now().toString)
-              putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
+              if (!groupedPkDF.isEmpty) {
+                val staged = groupedPkDF.where(col("group") === tile).repartition(defaultPartitions, pks.map(c => col(c)): _*)
+                val finalDf: DataFrame = if (jsonMapping4s.keyspaces.transformation.enabled) {
+                  val filterExpr = jsonMapping4s.keyspaces.transformation.filterExpression
+                  staged.filter(filterExpr)
+                }
+                  else
+                    staged
+                finalDf.write.mode("overwrite").save(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
+                session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
+                val content = DiscoveryStats(tile, finalDf.count(), org.joda.time.LocalDateTime.now().toString)
+                putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
+              } else {
+                val content = DiscoveryStats(tile, 0, org.joda.time.LocalDateTime.now().toString)
+                putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
+              }
             }
           }
             session.close()
@@ -1042,7 +1233,7 @@ object GlueApp {
       primaryKeysDf.unpersist()
     }
 
-    cleanupLedger(keyspacesConn, logger, srcKeyspaceName, srcTableName, cleanUpRequested, processType)
+    cleanupLedger(keyspacesConn, logger, srcKeyspaceName, srcTableName, cleanUpRequested, processType, totalTiles)
 
     Iterator.continually(stopRequested(bcktName)).takeWhile(_ == false).foreach {
       _ => {
@@ -1060,6 +1251,7 @@ object GlueApp {
               replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "delete", keyspacesConn)
             }
             dataReplicationProcess()
+            cdc(srcKeyspaceName, srcTableName, bcktName, s3client, currentTile)
           }
           case _ => {
             logger.info(s"Unrecognizable process type - $processType")

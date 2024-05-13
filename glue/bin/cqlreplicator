@@ -167,7 +167,7 @@ function check_num_tiles() {
   if [[ $TILES -lt 1 ]]; then
         log "Total number of tiles should be => 1"
         exit 1
-    fi
+  fi
     return 0
 }
 
@@ -559,7 +559,7 @@ function Start_Replication {
   cnt=0
   KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys')
   log "Sampled primary keys per tile is $KEYS_PER_TILE"
-  local workers=$(( 1 + KEYS_PER_TILE/ROWS_PER_WORKER ))
+  local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
   if [[ workers -gt 299 ]]; then
     log "=== The total number of Glue workers are over 299 per each tile (glue job), you have two options:                  ==="
     log "=== [1] Increase the number of tiles. In order to rerun with the higher number of tiles                            ==="

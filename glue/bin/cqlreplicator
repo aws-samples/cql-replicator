@@ -9,6 +9,7 @@ DESCRIPTION="Toolbox for Amazon Keyspaces"
 JOB_NAME=CQLReplicator
 TILES=1
 WORKER_TYPE=G.025X
+DISCOVERY_WORKER_TYPE=G.1X
 TILE=""
 PROCESS_TYPE_DISCOVERY=discovery
 PROCESS_TYPE_REPLICATION=replication
@@ -536,7 +537,7 @@ function Start_Discovery {
   if check_discovery_runs "true"; then
     Delete_Stop_Event_D
     log "Starting the discovery job..."
-    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type G.1X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
+    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "$DISCOVERY_WORKER_TYPE" --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
         "--TILE":"0",
         "--TOTAL_TILES":"'$TILES'",
         "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
@@ -718,6 +719,10 @@ while (( "$#" )); do
       ;;
     --worker-type|-wt)
       WORKER_TYPE="$2"
+      shift 2
+      ;;
+    --discovery-worker-type|-dwt)
+      DISCOVERY_WORKER_TYPE="$2"
       shift 2
       ;;
     --landing-zone|--lz)

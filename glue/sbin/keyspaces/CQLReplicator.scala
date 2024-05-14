@@ -844,16 +844,53 @@ object GlueApp {
             }
             res
           }
-          case "int" | "varint" => row.getInt(position)
-          case "long" | "bigint" => row.getLong(position)
+          case "int" => {
+            row.get(position).getClass.getName match {
+              case "java.lang.Integer" => row.getInt(position)
+              case "java.lang.String" => row.getString(position)
+            }
+          }
+          case "varint" => {
+            row.get(position).getClass.getName match {
+              case "java.math.BigDecimal" => row.getAs[java.math.BigDecimal](position)
+              case "java.lang.String" => row.getString(position)
+            }
+          }
+          case "long" => {
+            row.get(position).getClass.getName match {
+              case "java.lang.Long" => row.getLong(position)
+              case "java.lang.String" => row.getString(position)
+            }
+          }
+          case "bigint" => {
+            row.get(position).getClass.getName match {
+              case "java.lang.Long" => row.getLong(position)
+              case "java.lang.String" => row.getString(position)
+            }
+          }
           case "float" => row.getFloat(position)
           case "double" => row.getDouble(position)
-          case "short" => row.getShort(position)
+          case "smallint" => {
+            row.get(position).getClass.getName match {
+              case "java.lang.Short" => row.getShort(position)
+              case "java.lang.String" => row.getString(position)
+            }
+          }
           case "decimal" => row.getDecimal(position)
-          case "tinyint" => row.getByte(position)
+          case "tinyint" => {
+            row.get(position).getClass.getName match {
+              case "java.lang.Byte" => row.getByte(position)
+              case "java.lang.String" => row.getString(position)
+            }
+          }
           case "uuid" => row.getString(position)
           case "timeuuid" => row.getString(position)
-          case "boolean" => row.getBoolean(position)
+          case "boolean" => {
+            row.get(position).getClass.getName match {
+              case "java.lang.Boolean" => row.getBoolean(position)
+              case "java.lang.String" => row.getString(position)
+            }
+          }
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
           case _ => throw new CassandraTypeException(s"Unrecognized data type $colType")

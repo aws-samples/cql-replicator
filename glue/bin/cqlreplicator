@@ -142,7 +142,8 @@ function check_discovery_runs() {
    # mode = true, if discovery job is not running return 0
    # mode = false, if discovery job is not running return 1
    mode=$1
-   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION" --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`]' | jq '.[0]["--SOURCE_TBL"] == "'"$SOURCE_TBL"'" and .[0]["--SOURCE_KS"] == "'"$SOURCE_KS"'"')
+   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION"  \
+    --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"$SOURCE_KS"'`] | [?"--SOURCE_TBL"==`'"$SOURCE_TBL"'`]' | jq 'length != 0')
 
    if [[ $rs == "$mode" ]]; then
        log "ERROR: The discovery job has failed, check AWS Glue logs"
@@ -155,8 +156,10 @@ function check_replication_runs() {
    local tile
    local rs
    tile=$1
-   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION" --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`]' | jq '.[] | select(."--TILE"=="'"$tile"'" and ."--SOURCE_TBL"=="'"$SOURCE_TBL"'" and ."--SOURCE_KS"=="'"$SOURCE_KS"'")')
-   if [[ -n "${rs}" ]]; then
+   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION" \
+    --query 'length(JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`] | [?"--SOURCE_KS"==`'"$SOURCE_KS"'`] | [?"--SOURCE_TBL"==`'"$SOURCE_TBL"'`] | [?"--TILE"==`"'"$tile"'"`])')
+
+   if [ "${rs}" -ne 0 ]; then
      log "ERROR: Replication job is already running per tile $tile for $SOURCE_KS.$SOURCE_TBL"
      log "$rs"
      return 1

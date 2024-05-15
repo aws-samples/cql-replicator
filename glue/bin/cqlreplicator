@@ -25,6 +25,7 @@ INCR_TRAFFIC=240
 JOBS=()
 DISCOVERED_TOTAL=0
 REPLICATED_TOTAL=0
+OVERRIDE_DISCOVERY_WORKERS=0
 BASE_FOLDER=$(pwd -L)
 AWS_REGION=""
 SUBNET=""
@@ -105,6 +106,14 @@ function check_input() {
       exit 1
   fi
   return 0
+}
+
+function max_value() {
+  if [[ $1 -gt $2 ]]; then
+    return "$1"
+  else
+    return "$2"
+  fi
 }
 
 function confirm() {
@@ -529,7 +538,11 @@ function Start_Discovery {
   log "START REPLICATING FROM: $REPLICATION_POINT_IN_TIME (0 is disabled)"
   log "SAFE MODE: $SAFE_MODE"
   log "WORKER_TYPE: $WORKER_TYPE"
-  local workers=$((1 + TILES / 2))
+  if [[ $OVERRIDE_DISCOVERY_WORKERS == 0 ]]; then
+     local workers=max_value $((1 + TILES / 2)) 2
+  else
+     local workers=$OVERRIDE_DISCOVERY_WORKERS
+  fi
   log "Checking if the discovery job is already running..."
   if [[ $CLEANUP_REQUESTED == "true" ]]; then
     log "The ledger is going to be cleaned up"
@@ -726,6 +739,10 @@ while (( "$#" )); do
       ;;
     --discovery-worker-type|-dwt)
       DISCOVERY_WORKER_TYPE="$2"
+      shift 2
+      ;;
+    --override-discovery-workers|-odw)
+      OVERRIDE_DISCOVERY_WORKERS="$2"
       shift 2
       ;;
     --landing-zone|--lz)

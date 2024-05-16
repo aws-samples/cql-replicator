@@ -7,8 +7,9 @@
 MIGRATOR_VERSION=0.3
 DESCRIPTION="Toolbox for Amazon Keyspaces"
 JOB_NAME=CQLReplicator
-TILES=2
+TILES=1
 WORKER_TYPE=G.025X
+DISCOVERY_WORKER_TYPE=G.1X
 TILE=""
 PROCESS_TYPE_DISCOVERY=discovery
 PROCESS_TYPE_REPLICATION=replication
@@ -24,6 +25,7 @@ INCR_TRAFFIC=240
 JOBS=()
 DISCOVERED_TOTAL=0
 REPLICATED_TOTAL=0
+OVERRIDE_DISCOVERY_WORKERS=0
 BASE_FOLDER=$(pwd -L)
 AWS_REGION=""
 SUBNET=""
@@ -35,7 +37,7 @@ TRG_SG=""
 GLUE_IAM_ROLE=""
 AWS_ACCOUNT=""
 KEYS_PER_TILE=0
-ROWS_PER_WORKER=250000
+ROWS_PER_WORKER=1000000
 TARGET_TYPE=keyspaces
 SKIP_GLUE_CONNECTOR=false
 SKIP_KEYSPACES_LEDGER=false
@@ -54,7 +56,7 @@ REPLAY_LOG="false"
 
 # Progress bar configuration
 PS=40
-PCC="⣿"
+PCC="|"
 PCU="-"
 PPS=2
 
@@ -106,6 +108,16 @@ function check_input() {
   return 0
 }
 
+function max_value() {
+  local rs=0
+  if [[ $1 -gt $2 ]]; then
+    rs="$1"
+  else
+    rs="$2"
+  fi
+  echo $rs
+}
+
 function confirm() {
   local msg=$1
   read -r -p "$msg" choice
@@ -141,7 +153,8 @@ function check_discovery_runs() {
    # mode = true, if discovery job is not running return 0
    # mode = false, if discovery job is not running return 1
    mode=$1
-   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION" --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`]' | jq '.[0]["--SOURCE_TBL"] == "'"$SOURCE_TBL"'" and .[0]["--SOURCE_KS"] == "'"$SOURCE_KS"'"')
+   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION"  \
+    --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"$SOURCE_KS"'`] | [?"--SOURCE_TBL"==`'"$SOURCE_TBL"'`]' | jq 'length != 0')
 
    if [[ $rs == "$mode" ]]; then
        log "ERROR: The discovery job has failed, check AWS Glue logs"
@@ -154,9 +167,11 @@ function check_replication_runs() {
    local tile
    local rs
    tile=$1
-   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION" --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`]' | jq '.[] | select(."--TILE"=="'"$tile"'" and ."--SOURCE_TBL"=="'"$SOURCE_TBL"'" and ."--SOURCE_KS"=="'"$SOURCE_KS"'")')
-   if [[ -n "${rs}" ]]; then
-     log "ERROR: Replication job is already running per tile $tile for" $SOURCE_KS.$SOURCE_TBL
+   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION" \
+    --query 'length(JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`] | [?"--SOURCE_KS"==`'"$SOURCE_KS"'`] | [?"--SOURCE_TBL"==`'"$SOURCE_TBL"'`] | [?"--TILE"==`"'"$tile"'"`])')
+
+   if [ "${rs}" -ne 0 ]; then
+     log "ERROR: Replication job is already running per tile $tile for $SOURCE_KS.$SOURCE_TBL"
      log "$rs"
      return 1
   fi
@@ -164,10 +179,10 @@ function check_replication_runs() {
 }
 
 function check_num_tiles() {
-  if [[ $TILES -lt 2 ]]; then
-        log "Total number of tiles should be => 2"
+  if [[ $TILES -lt 1 ]]; then
+        log "Total number of tiles should be => 1"
         exit 1
-    fi
+  fi
     return 0
 }
 
@@ -525,7 +540,14 @@ function Start_Discovery {
   log "START REPLICATING FROM: $REPLICATION_POINT_IN_TIME (0 is disabled)"
   log "SAFE MODE: $SAFE_MODE"
   log "WORKER_TYPE: $WORKER_TYPE"
-  local workers=$((1 + TILES / 2))
+  local workers=0
+  if [[ $OVERRIDE_DISCOVERY_WORKERS == 0 ]]; then
+    max_value2=2
+    max_value1=$((1 + TILES / 2))
+    workers=$(max_value $max_value1 $max_value2)
+  else
+    workers=$OVERRIDE_DISCOVERY_WORKERS
+  fi
   log "Checking if the discovery job is already running..."
   if [[ $CLEANUP_REQUESTED == "true" ]]; then
     log "The ledger is going to be cleaned up"
@@ -536,7 +558,7 @@ function Start_Discovery {
   if check_discovery_runs "true"; then
     Delete_Stop_Event_D
     log "Starting the discovery job..."
-    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type G.1X --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
+    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "$DISCOVERY_WORKER_TYPE" --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
         "--TILE":"0",
         "--TOTAL_TILES":"'$TILES'",
         "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
@@ -674,7 +696,7 @@ function Delete_Stop_Event_D {
 }
 
 function Delete_Stop_Event_R {
-  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/"$1"/stopRequested" --region "$AWS_REGION"
+  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested" --region "$AWS_REGION"
   # Debug
   # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested"
 }
@@ -718,6 +740,14 @@ while (( "$#" )); do
       ;;
     --worker-type|-wt)
       WORKER_TYPE="$2"
+      shift 2
+      ;;
+    --discovery-worker-type|-dwt)
+      DISCOVERY_WORKER_TYPE="$2"
+      shift 2
+      ;;
+    --override-discovery-workers|-odw)
+      OVERRIDE_DISCOVERY_WORKERS="$2"
       shift 2
       ;;
     --landing-zone|--lz)

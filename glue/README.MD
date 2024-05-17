@@ -5,10 +5,10 @@ This migration approach ensures zero downtime, no code compilation, predictable 
 ## Architecture
 This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue
 jobs of CQLReplicator.
-Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per one data processing unit
+Each glue job (tile) is tasked with handling a specific subset of primary keys (1M per one data processing unit
 G.025X) to distribute migration
 workload evenly across data processing units.
-A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1500 WCUs per second against the target table in
+A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1000 WCUs (io size 1KB) per second against the target table in
 Amazon Keyspaces. This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
 ![](architecture-glue.png "CQLReplicator on Glue")
@@ -65,10 +65,11 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
   If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
   files
 - `--target-type` - this is an optional parameter, the default value is `keyspaces`, available options: `parquet`
-  , `memorydb`, `opensearch` (preview)
+  , `memorydb`,and `opensearch`
 - `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
-  Keyspaces migration.ledger) 
+  Keyspaces migration.ledger)
+- `--main-script-landing` - use this flag if you want to store the main script in the `s3://your-landing-zone/script/CQLReplicator.scala`
 
 ```shell
     cqlreplicator --state init --region us-west-2 \ 
@@ -382,7 +383,7 @@ in the json mapping during the `run`, for example,
                                         }'
 ```
 ## Filtering primary keys
-There use-cases when you need to filter out certain keys during the migration phase 
+There are use-cases when you need to filter out some certain keys during the migration phase, for example: 
 
 ```shell
 ./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
@@ -397,7 +398,7 @@ There use-cases when you need to filter out certain keys during the migration ph
                                           }
                                         }'
 ```
-Note: You can use only primary key columns in the `filterExpression` a the `filterExpression` should be defined as the Spark SQL Expression.  
+Note: You can use only primary key columns in the `filterExpression` a the `filterExpression` should be defined as [the Spark SQL Expression](https://spark.apache.org/docs/3.3.0/api/sql/index.html).  
 
 ## Enable the custom JSON Serializer
 

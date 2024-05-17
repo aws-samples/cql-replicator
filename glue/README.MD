@@ -5,10 +5,10 @@ This migration approach ensures zero downtime, no code compilation, predictable 
 ## Architecture
 This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue
 jobs of CQLReplicator.
-Each glue job (tile) is tasked with handling a specific subset of primary keys (250K per one data processing unit
+Each glue job (tile) is tasked with handling a specific subset of primary keys (1M per one data processing unit
 G.025X) to distribute migration
 workload evenly across data processing units.
-A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1500 WCUs per second against the target table in
+A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1000 WCUs (io size 1KB) per second against the target table in
 Amazon Keyspaces. This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
 ![](architecture-glue.png "CQLReplicator on Glue")
@@ -65,10 +65,11 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
   If you don't supply it, init process will try to create a new bucket to store config, JAR artifacts, and intermediate
   files
 - `--target-type` - this is an optional parameter, the default value is `keyspaces`, available options: `parquet`
-  , `memorydb`, `opensearch` (preview)
+  , `memorydb`,and `opensearch`
 - `--skip-glue-connector` - this is an optional parameter allows you to skip the glue connector creation step
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
-  Keyspaces migration.ledger) 
+  Keyspaces migration.ledger)
+- `--main-script-landing` - use this flag if you want to store the main script in the `s3://your-landing-zone/script/CQLReplicator.scala`
 
 ```shell
     cqlreplicator --state init --region us-west-2 \ 
@@ -238,8 +239,8 @@ To obtain the number of replicated rows after the back filling phase, run the fo
 
 ```shell
 cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-west-2 \
---src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
---region us-west-2 --replication-stats-enabled
+              --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+              --region us-west-2 --replication-stats-enabled
 ```
 
 ```
@@ -381,6 +382,23 @@ in the json mapping during the `run`, for example,
                                           }}
                                         }'
 ```
+## Filtering primary keys
+There are use-cases when you need to filter out some certain keys during the migration phase, for example: 
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns \
+                                      --json-mapping '{
+                                          "keyspaces": {
+                                            "transformation": {        
+                                            "enabled": true,        
+                                            "filterExpression": "client_id NOT like \"ACME%\"" 
+                                            }
+                                          }
+                                        }'
+```
+Note: You can use only primary key columns in the `filterExpression` a the `filterExpression` should be defined as [the Spark SQL Expression](https://spark.apache.org/docs/3.3.0/api/sql/index.html).  
 
 ## Enable the custom JSON Serializer
 
@@ -415,20 +433,20 @@ and `useCustomSerializer`:`true`.
 ### Limitations
 
 The custom JSON serializer supports the following data types: boolean, int, text, ascii, bigint, blob, counter, date,
-decimal,
-double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
+decimal, double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
 
 ## Know issues
 
 | Error Message/Issue                                                                                                           | CW Discovery logs | CW Replication logs | Work around                                                                                                                                                                                                     | Requires the ledger cleanup |
 |-------------------------------------------------------------------------------------------------------------------------------|-------------------|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------|
 | 1. No space left on device                                                                                                    | Yes               | No                  | Scale out the replication process by increasing the number of tiles                                                                                                                                             | Yes                         |
-| 2. No space left on device                                                                                                    | Yes               | No                  | Scale up the the DPU for the discovery glue job by replacing 1.X to 2.X in `cqlreplicator.sh`                                                                                                                   | No                          |
+| 2. No space left on device                                                                                                    | Yes               | No                  | Add the following parameter `--discovery-worker-type G.2X` to scale up the the DPU for the discovery glue job by replacing 1.X to 2.X                                                                           | No                          |
 | 3. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Create a new Glue connection with the new subnet and attach the CQLReplicator Glue Job                                                                                                                          | No                          |
-| 4. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Add the following param `--override-rows-per-worker 500000` to reduce the number of DPUs/IPs                                                                                                                    | No                          |
+| 4. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Add the following parameter `--override-rows-per-worker 500000` to reduce the number of DPUs/IPs                                                                                                                | No                          |
 | 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    | No                          |
 | 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> | No                          |
 | 7. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       | No                          |
+| 8. java.lang.OutOfMemoryError: GC overhead limit exceeded                                                                     | Yes               | No                  | Increase the number of DPUs for the discovery job by using the parameter, e.g. `--override-discovery-workers 12`                                                                                                |                             |
 
 ### Work around for `Cassandra timeout during read query at consistency ONE` with Cassandra materialized view
 

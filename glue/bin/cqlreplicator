@@ -5,7 +5,7 @@
 #
 # Migration parameters
 MIGRATOR_VERSION=0.3
-DESCRIPTION="Toolbox for Amazon Keyspaces"
+DESCRIPTION="Migration Toolbox"
 JOB_NAME=CQLReplicator
 TILES=1
 WORKER_TYPE=G.025X
@@ -53,6 +53,7 @@ DEFAULT_ENV=""
 MAVEN_REPO=https://repo1.maven.org/maven2
 CLEANUP_REQUESTED="false"
 REPLAY_LOG="false"
+MAIN_SCRIPT_LANDING="false"
 
 # Progress bar configuration
 PS=40
@@ -109,11 +110,13 @@ function check_input() {
 }
 
 function max_value() {
+  local rs=0
   if [[ $1 -gt $2 ]]; then
-    return "$1"
+    rs="$1"
   else
-    return "$2"
+    rs="$2"
   fi
+  echo $rs
 }
 
 function confirm() {
@@ -383,7 +386,13 @@ function Init {
   # Source C*/K*
   uploader_helper "CassandraConnector.conf" 1 2 5
 
-  local glue_bucket_artifacts=s3://aws-glue-assets-"$AWS_ACCOUNT"-"$AWS_REGION"
+  local glue_bucket_artifacts
+  if [[ "$MAIN_SCRIPT_LANDING" = false ]]; then
+    glue_bucket_artifacts=s3://aws-glue-assets-"$AWS_ACCOUNT"-"$AWS_REGION"
+  else
+    glue_bucket_artifacts="$S3_LANDING_ZONE"
+  fi
+
   if aws s3 ls "$glue_bucket_artifacts"/scripts/ --region "$AWS_REGION" > /dev/null --region "$AWS_REGION"
   then
     aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator$DEFAULT_ENV.scala --region "$AWS_REGION" > /dev/null
@@ -448,7 +457,7 @@ function Init {
        aws glue create-job \
            --name "CQLReplicator$DEFAULT_ENV" \
            --role "$GLUE_IAM_ROLE" \
-           --description "$DESCRIPTION -> $TARGET_TYPE" \
+           --description "$DESCRIPTION for $TARGET_TYPE" \
            --glue-version "4.0" \
            --number-of-workers 2 \
            --worker-type "G.1X" \
@@ -538,10 +547,13 @@ function Start_Discovery {
   log "START REPLICATING FROM: $REPLICATION_POINT_IN_TIME (0 is disabled)"
   log "SAFE MODE: $SAFE_MODE"
   log "WORKER_TYPE: $WORKER_TYPE"
+  local workers=0
   if [[ $OVERRIDE_DISCOVERY_WORKERS == 0 ]]; then
-     local workers=max_value $((1 + TILES / 2)) 2
+    max_value2=2
+    max_value1=$((1 + TILES / 2))
+    workers=$(max_value $max_value1 $max_value2)
   else
-     local workers=$OVERRIDE_DISCOVERY_WORKERS
+    workers=$OVERRIDE_DISCOVERY_WORKERS
   fi
   log "Checking if the discovery job is already running..."
   if [[ $CLEANUP_REQUESTED == "true" ]]; then
@@ -748,6 +760,10 @@ while (( "$#" )); do
     --landing-zone|--lz)
       S3_LANDING_ZONE="$2"
       shift 2
+      ;;
+    --main-script-landing|--msl)
+      MAIN_SCRIPT_LANDING="true"
+      shift 1
       ;;
     --writetime-column|--wc)
       WRITETIME_COLUMN="$2"

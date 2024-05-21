@@ -573,12 +573,22 @@ object GlueApp {
           case (key, _) =>
             compressColumns.contains(key)
         }
-        val updatedJson = excludedJson.isEmpty match {
-          case false => {
-            val compressedPayload: Array[Byte] = compressWithLZ4B(compact(render(JObject(excludedJson))))
-            filteredJson merge JObject(jsonMapping4s.keyspaces.compressionConfig.targetNameColumn -> JString(binToHex(compressedPayload)))
+        val updatedJson = if (excludedJson.isEmpty) {
+          throw new CompressionException("Compressed payload is empty")
+        } else {
+          val compressedPayload: Array[Byte] = if (compressColumns.size == 1) {
+            val uncompressedData = excludedJson.map {
+              case (_, v) => parse(v.values.toString)
+            }
+            val compressed = compressWithLZ4B(compact(render(uncompressedData.head)))
+            compressed
+          } else {
+            val uncompressedData = JObject(excludedJson)
+            val compressed = compressWithLZ4B(compact(render(uncompressedData)))
+            compressed
           }
-          case _ => throw new CompressionException("Compressed payload is empty")
+          filteredJson merge JObject(jsonMapping4s.keyspaces.compressionConfig.targetNameColumn ->
+            JString(binToHex(compressedPayload)))
         }
         compact(render(updatedJson))
       } else {

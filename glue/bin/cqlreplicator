@@ -8,7 +8,7 @@ MIGRATOR_VERSION=0.3
 DESCRIPTION="Migration Toolbox"
 JOB_NAME=CQLReplicator
 TILES=1
-WORKER_TYPE=G.025X
+WORKER_TYPE=G.2X
 DISCOVERY_WORKER_TYPE=G.1X
 TILE=""
 PROCESS_TYPE_DISCOVERY=discovery
@@ -460,7 +460,7 @@ function Init {
            --description "$DESCRIPTION for $TARGET_TYPE" \
            --glue-version "4.0" \
            --number-of-workers 2 \
-           --worker-type "G.1X" \
+           --worker-type "$WORKER_TYPE" \
            --connections "Connections=$glue_conn_name$DEFAULT_ENV" \
            --command "Name=gluestreaming,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator$DEFAULT_ENV.scala" \
            --execution-property '{"MaxConcurrentRuns": 32}' \
@@ -483,7 +483,7 @@ function Init {
           --description "$DESCRIPTION -> $TARGET_TYPE" \
           --glue-version "4.0" \
           --number-of-workers 2 \
-          --worker-type "G.1X" \
+          --worker-type "$WORKER_TYPE" \
           --command "Name=gluestreaming,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator$DEFAULT_ENV.scala" \
           --execution-property '{"MaxConcurrentRuns": 32}' \
           --max-retries 1 \

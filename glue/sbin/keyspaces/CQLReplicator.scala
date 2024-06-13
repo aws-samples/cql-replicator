@@ -1121,27 +1121,41 @@ object GlueApp {
           }
           s3client.putObject(bcktName, s"$srcKeyspaceName/$srcTableName/cdc/pointers/$tile/$currentEpoch", "")
         }
-      } else if (rs.nonEmpty && rs.get.getInstant(1) !=null) {
-        // CDC backfill completed, start from the last cdc_ledger record
-        val maxTs = rs.get.getInstant(1)
-        val currentTs = maxTs
-        val currentEpoch = currentTs.toEpochMilli
-        val currentSeq = currentTs.atZone(java.time.ZoneOffset.UTC).getHour
-        val currentDt = currentTs.atOffset(java.time.ZoneOffset.UTC).toLocalDate
-        val cdcTableFiltered = sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").
-          option("inferSchema", "true").load().
-          where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDt' and seq>=$currentSeq and ts>'$maxTs'").
-          drop("key", "tile")
-        if (!cdcTableFiltered.isEmpty) {
-          cdcTableFiltered.write.partitionBy("dt", "seq").parquet(s"$cdcPath/$currentEpoch")
-          val ts = cdcTableFiltered.agg(max("ts")).first.getTimestamp(0).toInstant.toEpochMilli
-          keyspacesConn.withSessionDo {
-            session => session.execute(s"INSERT INTO migration.cdc_ledger(key, tile, max_ts) VALUES('$srcKeyspaceName.$srcTableName', $tile, '$ts')")
+        else if (rs.nonEmpty && rs.get.getInstant(1) !=null) {
+          // CDC backfill completed, start from the last cdc_ledger record
+          val maxTs = rs.get.getInstant(1)
+          val currentTs = maxTs
+          val currentEpoch = currentTs.toEpochMilli
+          val currentSeq = currentTs.atZone(java.time.ZoneOffset.UTC).getHour
+          val currentDt = currentTs.atOffset(java.time.ZoneOffset.UTC).toLocalDate
+          val currentTsT0 = currentEpoch - (1 * 60 * 60 * 1000)
+          val currentSeqT0 = java.time.Instant.ofEpochMilli(currentTsT0).atZone(java.time.ZoneOffset.UTC).getHour
+          val currentDtT0 = java.time.Instant.ofEpochMilli(currentTsT0).atOffset(java.time.ZoneOffset.UTC).toLocalDate
+          val cdcTableFiltered = if (currentDt == currentDtT0) sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").
+            option("inferSchema", "true").load().
+            where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDt' and seq=$currentSeq and ts>'$maxTs'").
+            drop("key", "tile")
+          else {
+            val dfT1 = sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").
+              option("inferSchema", "true").load().
+              where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDt' and seq=$currentSeq and ts>'$maxTs'").
+              drop("key", "tile")
+            val dfT0 = sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").
+              option("inferSchema", "true").load().
+              where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDtT0' and seq=$currentSeqT0 and ts>'$maxTs'").
+              drop("key", "tile")
+            dfT1.union(dfT0)
           }
-          s3client.putObject(bcktName, s"$srcKeyspaceName/$srcTableName/cdc/pointers/$tile/$currentEpoch", "")
+          if (!cdcTableFiltered.isEmpty) {
+            cdcTableFiltered.write.partitionBy("dt", "seq").parquet(s"$cdcPath/$currentEpoch")
+            val ts = cdcTableFiltered.agg(max("ts")).first.getTimestamp(0).toInstant.toEpochMilli
+            keyspacesConn.withSessionDo {
+              session => session.execute(s"INSERT INTO migration.cdc_ledger(key, tile, max_ts) VALUES('$srcKeyspaceName.$srcTableName', $tile, '$ts')")
+            }
+            s3client.putObject(bcktName, s"$srcKeyspaceName/$srcTableName/cdc/pointers/$tile/$currentEpoch", "")
+          }
         }
       }
-    }
 
     def keysDiscoveryProcess(): Unit = {
       val srcTableForDiscovery = if (jsonMapping4s.replication.useMaterializedView.enabled) {

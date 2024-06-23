@@ -9,7 +9,7 @@ import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
 import com.amazonaws.services.glue.util.JsonOptions
-import org.apache.spark.SparkContext
+import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.cassandra._
 import org.apache.spark.storage.StorageLevel
@@ -21,6 +21,7 @@ import com.amazonaws.services.s3.model.{GetObjectRequest, ListObjectsV2Request}
 import com.amazonaws.ClientConfiguration
 import com.amazonaws.retry.RetryPolicy
 import com.datastax.spark.connector.cql._
+import com.datastax.spark.connector._
 import com.datastax.oss.driver.api.core.NoNodeAvailableException
 import com.datastax.oss.driver.api.core.AllNodesFailedException
 import com.datastax.oss.driver.api.core.servererrors._
@@ -365,7 +366,13 @@ object GlueApp {
       }
     }
 
-    val sparkContext: SparkContext = new SparkContext()
+    val conf = new SparkConf()
+      .setAll(
+        Seq(
+          ("spark.cassandra.connection.config.profile.path",  "CassandraConnector.conf"),
+        ))
+
+    val sparkContext: SparkContext = new SparkContext(conf)
     val glueContext: GlueContext = new GlueContext(sparkContext)
     val sparkSession: SparkSession = glueContext.getSparkSession
     val logger = new GlueLogger
@@ -1100,6 +1107,8 @@ object GlueApp {
     }
 
     def keysDiscoveryCdcProcess(tile: Int): Unit = {
+      sparkSession.conf.set(s"spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
+
       // Read cdc_ledger
       val cdcPath = s"$landingZone/$srcKeyspaceName/$srcTableName/cdc/primaryKeys/$tile"
       val rs = keyspacesConn.withSessionDo {
@@ -1128,8 +1137,15 @@ object GlueApp {
         val currentEpoch = currentTs.toEpochMilli
         val currentSeq = currentTs.atZone(java.time.ZoneOffset.UTC).getHour
         val currentDt = currentTs.atOffset(java.time.ZoneOffset.UTC).toLocalDate
-        val cdcTableFiltered = sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").
-          option("inferSchema", "true").load().
+        //val cdcTableFiltered = sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").
+        //  option("inferSchema", "true").load().
+        //  where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDt' and seq>=$currentSeq and ts>'$maxTs'").
+        //  drop("key", "tile")
+        val dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd")
+        val cdcTableFiltered = sparkContext.cassandraTable("cql_replicator", "cdc_support_table_v2").
+          perPartitionLimit(10000).
+          keyBy(row => (row.getString("key"), row.getInt("tile"), new java.sql.Date(dateFormat.parse(row.getString("dt")).getTime), row.getInt("seq"), row.getString("op"), row.getString("pk"), new java.sql.Timestamp(row.getLong("ts")))).
+          map(x => x._1).toDF("key", "tile", "dt", "seq", "op", "pk", "ts").
           where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDt' and seq>=$currentSeq and ts>'$maxTs'").
           drop("key", "tile")
         if (!cdcTableFiltered.isEmpty) {
@@ -1251,8 +1267,8 @@ object GlueApp {
                   val filterExpr = jsonMapping4s.keyspaces.transformation.filterExpression
                   staged.filter(filterExpr)
                 }
-                  else
-                    staged
+                else
+                  staged
                 finalDf.write.mode("overwrite").save(s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
                 session.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
                 val content = DiscoveryStats(tile, finalDf.count(), org.joda.time.LocalDateTime.now().toString)

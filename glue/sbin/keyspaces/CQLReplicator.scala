@@ -10,11 +10,10 @@ import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
 import com.amazonaws.services.glue.util.JsonOptions
 import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.cassandra._
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import com.amazonaws.services.s3.AmazonS3ClientBuilder
 import com.amazonaws.services.s3.model.{GetObjectRequest, ListObjectsV2Request}
@@ -399,6 +398,7 @@ object GlueApp {
     val MAX_RETRY_ATTEMPTS = 64
     // Unit ms
     val EXP_BACKOFF = 25
+    val PER_PARTITION_LIMIT = 20000
     sparkSession.conf.set(s"spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
     sparkSession.conf.set("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
 
@@ -1135,21 +1135,55 @@ object GlueApp {
         val maxTs = rs.get.getInstant(1)
         val currentTs = maxTs
         val currentEpoch = currentTs.toEpochMilli
-        val currentSeq = currentTs.atZone(java.time.ZoneOffset.UTC).getHour
+        val currentSeq = currentTs.atOffset(java.time.ZoneOffset.UTC).getHour
         val currentDt = currentTs.atOffset(java.time.ZoneOffset.UTC).toLocalDate
-        //val cdcTableFiltered = sparkSession.read.cassandraFormat("cdc_support_table_v2", "cql_replicator").
-        //  option("inferSchema", "true").load().
-        //  where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDt' and seq>=$currentSeq and ts>'$maxTs'").
-        //  drop("key", "tile")
         val dateFormat = new java.text.SimpleDateFormat("yyyy-MM-dd")
-        val cdcTableFiltered = sparkContext.cassandraTable("cql_replicator", "cdc_support_table_v2").
-          perPartitionLimit(10000).
-          keyBy(row => (row.getString("key"), row.getInt("tile"), new java.sql.Date(dateFormat.parse(row.getString("dt")).getTime), row.getInt("seq"), row.getString("op"), row.getString("pk"), new java.sql.Timestamp(row.getLong("ts")))).
-          map(x => x._1).toDF("key", "tile", "dt", "seq", "op", "pk", "ts").
-          where(s"key='$srcKeyspaceName.$srcTableName' and tile=$tile and dt='$currentDt' and seq>=$currentSeq and ts>'$maxTs'").
-          drop("key", "tile")
+        val nowTs = java.time.Instant.now()
+        val nowDt = nowTs.atOffset(java.time.ZoneOffset.UTC).toLocalDate
+        val nowSeq = nowTs.atOffset(java.time.ZoneOffset.UTC).getHour
+        val minSeq = Math.min(nowSeq, currentSeq)
+
+        /*
+        println(s"parameters: currentDt=$currentDt, nowDt=$nowDt, currentSeq=$currentSeq, nowSeq=$nowSeq, maxTs=$maxTs, minSeq=$minSeq")
+
+        if (currentDt.compareTo(nowDt) == 0 && currentSeq == nowSeq) {
+          println(s"key='$srcKeyspaceName.$srcTableName' and op in ('INSERT', 'UPDATE', 'DELETE') and tile=$tile and dt='$currentDt' and seq=$currentSeq and ts>'$maxTs'")
+        } else if (currentDt.compareTo(nowDt) == 0 && nowSeq > currentSeq) {
+          println(s"key='$srcKeyspaceName.$srcTableName' and op in ('INSERT', 'UPDATE', 'DELETE') and tile=$tile and dt='$currentDt' and seq>=$currentSeq and ts>'$maxTs'")
+        } else if (currentDt.compareTo(nowDt) != 0) {
+          println(s"key='$srcKeyspaceName.$srcTableName' and op in ('INSERT', 'UPDATE', 'DELETE') and tile=$tile and dt>='$currentDt' and seq>=$minSeq")
+        } else {
+          println("Do nothing")
+        }
+         */
+
+        val cdcTableFiltered = if (currentDt.compareTo(nowDt) == 0 && currentSeq == nowSeq) {
+          sparkContext.cassandraTable("cql_replicator", "cdc_support_table_v2").
+            perPartitionLimit(PER_PARTITION_LIMIT).
+            keyBy(row => (row.getString("key"), row.getInt("tile"), new java.sql.Date(dateFormat.parse(row.getString("dt")).getTime), row.getInt("seq"), row.getString("op"), row.getString("pk"), new java.sql.Timestamp(row.getLong("ts")))).
+            map(x => x._1).toDF("key", "tile", "dt", "seq", "op", "pk", "ts").
+            where(s"key='$srcKeyspaceName.$srcTableName' and op in ('INSERT', 'UPDATE', 'DELETE') and tile=$tile and dt='$currentDt' and seq=$currentSeq and ts>'$maxTs'").
+            drop("key", "tile")
+        } else if (currentDt.compareTo(nowDt) == 0 && nowSeq != currentSeq) {
+          sparkContext.cassandraTable("cql_replicator", "cdc_support_table_v2").
+            perPartitionLimit(PER_PARTITION_LIMIT).
+            keyBy(row => (row.getString("key"), row.getInt("tile"), new java.sql.Date(dateFormat.parse(row.getString("dt")).getTime), row.getInt("seq"), row.getString("op"), row.getString("pk"), new java.sql.Timestamp(row.getLong("ts")))).
+            map(x => x._1).toDF("key", "tile", "dt", "seq", "op", "pk", "ts").
+            where(s"key='$srcKeyspaceName.$srcTableName' and op in ('INSERT', 'UPDATE', 'DELETE') and tile=$tile and dt='$currentDt' and seq>=$currentSeq and ts>'$maxTs'").
+            drop("key", "tile")
+        } else if (currentDt.compareTo(nowDt) != 0) {
+          sparkContext.cassandraTable("cql_replicator", "cdc_support_table_v2").
+            perPartitionLimit(PER_PARTITION_LIMIT).
+            keyBy(row => (row.getString("key"), row.getInt("tile"), new java.sql.Date(dateFormat.parse(row.getString("dt")).getTime), row.getInt("seq"), row.getString("op"), row.getString("pk"), new java.sql.Timestamp(row.getLong("ts")))).
+            map(x => x._1).toDF("key", "tile", "dt", "seq", "op", "pk", "ts").
+            where(s"key='$srcKeyspaceName.$srcTableName' and op in ('INSERT', 'UPDATE', 'DELETE') and tile=$tile and dt>='$currentDt' and seq>=$minSeq").
+            drop("key", "tile")
+        } else {
+          sparkSession.emptyDataFrame
+        }
+
         if (!cdcTableFiltered.isEmpty) {
-          cdcTableFiltered.write.partitionBy("dt", "seq").parquet(s"$cdcPath/$currentEpoch")
+          cdcTableFiltered.dropDuplicates("op","pk","dt","seq").write.mode(SaveMode.Overwrite).partitionBy("dt", "seq").parquet(s"$cdcPath/$currentEpoch")
           val ts = cdcTableFiltered.agg(max("ts")).first.getTimestamp(0).toInstant.toEpochMilli
           keyspacesConn.withSessionDo {
             session => session.execute(s"INSERT INTO migration.cdc_ledger(key, tile, max_ts) VALUES('$srcKeyspaceName.$srcTableName', $tile, '$ts')")

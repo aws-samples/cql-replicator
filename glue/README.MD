@@ -6,9 +6,8 @@ This migration approach ensures zero downtime, no code compilation, predictable 
 This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue
 jobs of CQLReplicator.
 Each glue job (tile) is tasked with handling a specific subset of primary keys (1M per one data processing unit
-G.025X) to distribute migration
-workload evenly across data processing units.
-A single replication glue job (AWS Glue DPU - 0.25X) can push up to 1000 WCUs (io size 1KB) per second against the target table in
+G.2X) to distribute migration workload evenly across data processing units.
+A single replication glue job (AWS Glue DPU - G.2X) can push up to 8000 WCUs (io size 1KB) per second against the target table in
 Amazon Keyspaces. This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
 ![](architecture-glue.png "CQLReplicator on Glue")
@@ -399,6 +398,20 @@ There are use-cases when you need to filter out some certain keys during the mig
                                         }'
 ```
 Note: You can use only primary key columns in the `filterExpression` a the `filterExpression` should be defined as [the Spark SQL Expression](https://spark.apache.org/docs/3.3.0/api/sql/index.html).  
+
+## Not overwriting existing records in Amazon Keyspces
+
+In order to preserve existing records during the bulk migration phase set `readBeforeWrite` to `true` in the `json-mapping`, for example:
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns \
+                                      --json-mapping '{
+                                          "keyspaces": {
+                                              readBeforeWrite: true
+                                          }
+                                        }'
+```
 
 ## Enable the custom JSON Serializer
 

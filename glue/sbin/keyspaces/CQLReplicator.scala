@@ -79,17 +79,13 @@ class DlqS3Exception(s: String) extends RuntimeException {
 sealed trait Stats
 
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
-
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
-
 case class MaterialzedViewConfig(enabled: Boolean = false, mvName: String = "")
-
 case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterialzedViewConfig = MaterialzedViewConfig())
-
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
 case class Transformation(enabled: Boolean = false, filterExpression: String = "")
-case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation)
+case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation, readBeforeWrite: Boolean = false)
 case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
 
 // **************************Custom JSON Serializer Start*******************************************
@@ -444,6 +440,11 @@ object GlueApp {
       case rep => rep.replication.columns.mkString(",")
     }
 
+    val cas: String = if (jsonMapping4s.keyspaces.readBeforeWrite) {
+      " IF NOT EXISTS"
+    } else
+      ""
+
     val selectStmtWithTTL = ttlColumn match {
       case s if s.equals("None") => ""
       case s if (!s.equals("None") && replicatedColumns.equals("*")) => {
@@ -685,7 +686,7 @@ object GlueApp {
                           session => {
                             jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
                               case false => {
-                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'"
+                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'$cas"
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                                 resTry match {
                                   case Success(_) =>
@@ -695,7 +696,7 @@ object GlueApp {
                               case _ => {
                                 val json4sRow = parse(jsonRow)
                                 val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition, whereClause)))
-                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'"
+                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'$cas"
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                                 resTry match {
                                   case Success(_) =>
@@ -719,14 +720,14 @@ object GlueApp {
                               case false => {
                                 val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
                                 val ttlVal = getTTLvalue(json4sRow)
-                                Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
+                                Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas")).get()
                               }
                               case _ => {
                                 val json4sRow = parse(jsonRow)
                                 val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
                                 val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
                                 val ttlVal = getTTLvalue(json4sRow)
-                                Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal")).get()
+                                Retry.decorateSupplier(retry, () => session.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas")).get()
                               }
                             }
                           }

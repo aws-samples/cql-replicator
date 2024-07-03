@@ -96,6 +96,78 @@ Resources:
     Type: AWS::S3::Bucket
     Properties: 
       BucketName: !Sub '${CQLReplicatorS3BucketName}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+       ServerSideEncryptionConfiguration:
+         - ServerSideEncryptionByDefault:
+             SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: access-logs/
+  
+  LoggingBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties: 
+      BucketName: !Sub '${CQLReplicatorS3BucketName}-logging'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+       ServerSideEncryptionConfiguration:
+         - ServerSideEncryptionByDefault:
+             SSEAlgorithm: AES256
+
+  LoggingBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref LoggingBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 's3:PutObject'
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref LoggingBucket
+                - /*
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !GetAtt 
+                  - KeyspacesGlueBucket
+                  - Arn
+              StringEquals:
+                'aws:SourceAccount': !Sub '${AWS::AccountId}'
+
+  MyS3BucketPolicy:
+     Type: 'AWS::S3::BucketPolicy'
+     Properties:
+      Bucket: !Ref KeyspacesGlueBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+            Effect: Allow
+            Action:
+                - 's3:PutObject'
+                - 's3:GetObject'
+                - 's3:ListBucket'
+                - 's3:DeleteObject'
+            Principal:
+              Service: glue.amazonaws.com
+            Resource: 
+              - !Join ['', ['arn:aws:s3:::', !Ref KeyspacesGlueBucket]]
+              - !Join ['', ['arn:aws:s3:::', !Ref KeyspacesGlueBucket, '/*']]
+            
+            
   #Type: AWS::Glue::Connection
   #Properties:
   #  CatalogId: SparkCassandraConnector

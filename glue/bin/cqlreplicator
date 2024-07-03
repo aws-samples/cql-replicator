@@ -245,9 +245,19 @@ function uploader_jars() {
   done
 }
 
+#function join_array() {
+ # local IFS=","
+ # S3_PATH_LIBS+="$*"
+#}
+
 function join_array() {
-  local IFS=","
-  S3_PATH_LIBS+="$*"
+    local joined_array=""
+
+    for item in "$@"; do
+        joined_array+="${joined_array:+,}$item"
+    done
+
+    S3_PATH_LIBS+="$joined_array"
 }
 
 function barrier() {

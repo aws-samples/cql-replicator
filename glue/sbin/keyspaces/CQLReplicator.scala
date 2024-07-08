@@ -80,12 +80,13 @@ sealed trait Stats
 
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
-case class MaterialzedViewConfig(enabled: Boolean = false, mvName: String = "")
-case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterialzedViewConfig = MaterialzedViewConfig())
+case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
+case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterializedViewConfig = MaterializedViewConfig())
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
 case class Transformation(enabled: Boolean = false, filterExpression: String = "")
-case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation, readBeforeWrite: Boolean = false)
+case class UdtConversion(enabled: Boolean = false, columns: List[String] = List(""))
+case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation, readBeforeWrite: Boolean = false, udtConversion: UdtConversion)
 case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
 
 // **************************Custom JSON Serializer Start*******************************************
@@ -150,31 +151,43 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
 
 // *******************************Custom JSON Serializer End*********************************************
 
-class SupportFunctions() {
-  def correctEmptyBinJsonValues(cols: List[String], input: String): String = {
+class SupportFunctions {
+  def correctValues(binColumns: List[String] = List(), utdColumns: List[String] = List(), input: String): String = {
     implicit val formats: DefaultFormats.type = DefaultFormats
 
-    if (cols.isEmpty) {
+    @tailrec
+    def correctEmptyBin(json: JValue, cols: Seq[String]): JValue = cols match {
+      case Nil => json
+      case col :: tail =>
+        val updatedJson = (json \ col) match {
+          case JString("") => json transformField {
+            case JField(`col`, _) => JField(col, JString("0x"))
+          }
+          case _ => json
+        }
+        correctEmptyBin(updatedJson, tail)
+    }
+
+    @tailrec
+    def convertUDTtoText(json: JValue, cols: Seq[String]): JValue = cols match {
+      case Nil => json
+      case col :: tail =>
+        val updatedJson = json transformField {
+          case JField(`col`, v) => JField(col, JString(s"""${compact(render(v))}"""))
+          case other => other
+        }
+        convertUDTtoText(updatedJson, tail)
+    }
+
+    val transformedResult = if (binColumns.isEmpty && utdColumns.isEmpty) {
       input
     } else {
       val json = parse(input)
-
-      @tailrec
-      def replace(json: JValue, cols: Seq[String]): JValue = cols match {
-        case Nil => json
-        case col :: tail =>
-          val updatedJson = (json \ col) match {
-            case JString("") => json transformField {
-              case JField(`col`, _) => JField(col, JString("0x"))
-            }
-            case _ => json
-          }
-          replace(updatedJson, tail)
-      }
-
-      val finalJson = replace(json, cols)
-      compact(render(finalJson))
+      val correctedBins = if (binColumns.nonEmpty) correctEmptyBin(json, binColumns) else json
+      val convertedUdt = if (utdColumns.nonEmpty) convertUDTtoText(correctedBins, utdColumns) else correctedBins
+      compact(render(convertedUdt))
     }
+    transformedResult
   }
 }
 
@@ -304,7 +317,7 @@ object GlueApp {
 
     def parseJSONMapping(s: String): JsonMapping = {
       Option(s) match {
-        case Some("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig(), Transformation()))
+        case Some("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig(), Transformation(), readBeforeWrite = false, UdtConversion()))
         case _ =>
           implicit val formats: DefaultFormats.type = DefaultFormats
           parse(s).extract[JsonMapping]
@@ -439,6 +452,10 @@ object GlueApp {
       case JsonMapping(Replication(true, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
     }
+
+    val udtColumns: List[String] = if (jsonMapping4s.keyspaces.udtConversion.enabled) {
+      jsonMapping4s.keyspaces.udtConversion.columns
+    } else List.empty
 
     val cas: String = if (jsonMapping4s.keyspaces.readBeforeWrite) {
       " IF NOT EXISTS"
@@ -680,7 +697,7 @@ object GlueApp {
                     if (ttlColumn.equals("None")) {
                       val rs = getSourceRow(replicatedColumns, whereClause, session, customFormat)
                       if (rs.nonEmpty) {
-                        val jsonRowEscaped = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
+                        val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
                         val jsonRow = compressValues(jsonRowEscaped)
                         keyspacesConn.withSessionDo {
                           session => {
@@ -711,7 +728,7 @@ object GlueApp {
                     else {
                       val rs = getSourceRow(selectStmtWithTTL, whereClause, session, customFormat)
                       if (rs.nonEmpty) {
-                        val jsonRowEscaped = supportFunctions.correctEmptyBinJsonValues(blobColumns, rs)
+                        val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns,  rs)
                         val jsonRow = compressValues(jsonRowEscaped)
                         val json4sRow = parse(jsonRow)
                         keyspacesConn.withSessionDo {

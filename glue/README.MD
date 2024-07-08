@@ -69,6 +69,7 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
   Keyspaces migration.ledger)
 - `--main-script-landing` - use this flag if you want to store the main script in the `s3://your-landing-zone/script/CQLReplicator.scala`
+- `--env` - use to create multiple environment, e.g. dev/test/prod 
 
 ```shell
     cqlreplicator --state init --region us-west-2 \ 
@@ -399,7 +400,7 @@ There are use-cases when you need to filter out some certain keys during the mig
 ```
 Note: You can use only primary key columns in the `filterExpression` a the `filterExpression` should be defined as [the Spark SQL Expression](https://spark.apache.org/docs/3.3.0/api/sql/index.html).  
 
-## Not overwriting existing records in Amazon Keyspces
+## Not overwriting existing records in Amazon Keyspaces
 
 In order to preserve existing records during the bulk migration phase set `readBeforeWrite` to `true` in the `json-mapping`, for example:
 ```shell
@@ -411,6 +412,20 @@ In order to preserve existing records during the bulk migration phase set `readB
                                               readBeforeWrite: true
                                           }
                                         }'
+```
+## Converting UTDs to JSON
+This feature allows the CQLReplicator tool to automatically convert UDTs in C* to plain JSON strings. 
+This enhancement provides a seamless way to transform UDTs into a more universal compatible JSON format, 
+facilitating easier integration with other NoSQL databases.
+
+```shell
+./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-east-1-dev" --writetime-column col2 \
+                                      --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                                      --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns \
+                                      --json-mapping '{
+                                          "keyspaces": {
+                                            "udtConversion": { "enabled": true,"columns": ["device", "user"] }
+                                            }}'
 ```
 
 ## Enable the custom JSON Serializer

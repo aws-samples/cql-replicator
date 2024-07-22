@@ -245,11 +245,6 @@ function uploader_jars() {
   done
 }
 
-#function join_array() {
- # local IFS=","
- # S3_PATH_LIBS+="$*"
-#}
-
 function join_array() {
     local joined_array=""
 
@@ -312,7 +307,6 @@ function Clean_Up {
 }
 
 function Init {
-
   if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
       check_input "$AZ" "ERROR:availability zone is, must be provided"
       check_input "$SUBNET" "ERROR:subnet is empty, must be provided"
@@ -370,11 +364,6 @@ function Init {
     S3_PATH_LIBS+=","
     join_array "${S3_PATH_OSS[@]}"
   fi
-
-  # Nothing to load in order to support parquet files, only for the vanilla Spark
-  #if [[ $TARGET_TYPE == "parquet" ]]; then
-  #      uploader_jars "$ARTIFACTS_PARQUET" "Uploading the target libraries for Parquet"
-  #fi
 
   # Uploading the config files
   local path_to_conf
@@ -854,11 +843,11 @@ while (( "$#" )); do
       JSON_MAPPING="$2"
       echo "$JSON_MAPPING" | jq empty
       log "Provided a json mapping configuration $JSON_MAPPING"
-            # Should work for AWS CloudShell, use 0 to disable line wrapping
+      # Should work for AWS CloudShell, use 0 to disable line wrapping
       if [[ $OS == Linux ]]; then
         JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64 -w 0)
       fi
-            # Use base64 without params for MacOS instead
+      # Use base64 without params for MacOS instead
       if [[ $OS == Darwin ]]; then
         JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64)
       fi

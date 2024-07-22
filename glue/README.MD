@@ -1,8 +1,10 @@
 # CQLReplicator with AWS Glue
+
 The objective of this project is to support customers in seamlessly migrating from self-managed Cassandra clusters to Amazon Keyspaces.
 This migration approach ensures zero downtime, no code compilation, predictable incremental traffic, and reduced migration costs.
 
 ## Architecture
+
 This solution offers customers the flexibility to scale the migration workload up and out by deploying multiple Glue
 jobs of CQLReplicator.
 Each glue job (tile) is tasked with handling a specific subset of primary keys (1M per one data processing unit
@@ -13,6 +15,7 @@ Amazon Keyspaces. This allows for easy estimation of the final traffic against A
 ![](architecture-glue.png "CQLReplicator on Glue")
 
 ## Prerequisites
+
 List of prerequisites needed to run CQLReplicator with AWS Glue, such as:
 
 - AWS account
@@ -24,6 +27,7 @@ List of prerequisites needed to run CQLReplicator with AWS Glue, such as:
 files for Amazon Keyspaces and Cassandra Cluster
 
 ## Getting Started
+
 To enable AWS Glue components to communicate, you must set up access to your Cassandra cluster in Amazon VPC.
 To enable AWS Glue to communicate between its components, specify a security group with a self-referencing inbound rule
 for all TCP ports. By creating a self-referencing rule, you can restrict the source to the same security group in the VPC,
@@ -38,6 +42,7 @@ for ALL Traffic.
 3. ```cd cql-replicator/glue/bin```
 
 ## Init migration process
+
 The following command initializes the CQLReplicator environment, which involves the copying JAR artifacts, creation a Glue connector, 
 a S3 bucket, a Glue job, migration keyspace, and ledger table. 
 
@@ -114,6 +119,7 @@ minutes. At peak traffic, it can reach up to 6,300 WCUs per second.
 ![](incremental-traffic.png "Incremental traffic")
 
 ### Replicate near-real time updates, inserts, and deletes
+
 ```shell
    cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
@@ -121,6 +127,7 @@ minutes. At peak traffic, it can reach up to 6,300 WCUs per second.
 ```
 
 ### Replicate with TTL
+
 the TTL feature should be [enabled](https://docs.aws.amazon.com/keyspaces/latest/devguide/TTL-how-it-works.html#ttl-howitworks_enabling) 
 on the target table before running the following command
 ```shell
@@ -383,6 +390,7 @@ in the json mapping during the `run`, for example,
                                         }'
 ```
 ## Filtering primary keys
+
 There are use-cases when you need to filter out some certain keys during the migration phase, for example: 
 
 ```shell
@@ -414,6 +422,7 @@ In order to preserve existing records during the bulk migration phase set `readB
                                         }'
 ```
 ## Converting UTDs to JSON
+
 This feature allows the CQLReplicator tool to automatically convert UDTs in C* to plain JSON strings. 
 This enhancement provides a seamless way to transform UDTs into a more universal compatible JSON format, 
 facilitating easier integration with other NoSQL databases.
@@ -431,8 +440,7 @@ facilitating easier integration with other NoSQL databases.
 ## Enable the custom JSON Serializer
 
 The CQLReplicator relies on Cassandra JSON encoding/decoding that has been introduced in Cassandra 2.2, but if you use
-older
-Cassandra version you must enable the custom JSON Serialization on the client side:
+older Cassandra version you must enable the custom JSON Serialization on the client side:
 
 ```shell
 ./cqlreplicator --state run --tiles 4 --landing-zone "s3://cql-replicator-1234567890-us-west-2" --writetime-column col2 \

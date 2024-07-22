@@ -74,7 +74,7 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
 - `--skip-keyspaces-ledger` - in case if you don't want to create/delete the ledger (the internal table in Amazon
   Keyspaces migration.ledger)
 - `--main-script-landing` - use this flag if you want to store the main script in the `s3://your-landing-zone/script/CQLReplicator.scala`
-- `--env` - use to create multiple environment, e.g. dev/test/prod 
+- `--env` - use to create multiple environments, e.g. dev/test/prod 
 
 ```shell
     cqlreplicator --state init --region us-west-2 \ 

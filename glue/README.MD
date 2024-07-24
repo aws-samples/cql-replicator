@@ -136,6 +136,20 @@ on the target table before running the following command
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
 ```
 
+### Replicate with original timestamp
+
+the Client-Side Timestamps feature should be [enabled](https://docs.aws.amazon.com/keyspaces/latest/devguide/client-side-timestamps.html) 
+on the target table before running the following command
+```shell
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --json-mapping '
+                {
+                 "replication": {
+                   "replicateWithTimestamp": true
+                }'
+```
+
 ### Offload large objects
 
 Before running the migration process
@@ -313,6 +327,18 @@ the timestamp to your command line:
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
                  --start-replication-from 1706408365278858
 ```
+
+if you want to change the default point in time replication behavior and replicate data *before* timestamp then specify predicate in json mapping:
+```json
+{
+  "replication": {
+    "pointInTimeReplicationConfig": {
+      "predicateOp": "lessThanOrEqual"
+    }
+  }
+}
+```
+
 
 ## Compress selected columns
 

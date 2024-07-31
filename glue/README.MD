@@ -147,6 +147,7 @@ on the target table before running the following command
                 {
                  "replication": {
                    "replicateWithTimestamp": true
+                 }
                 }'
 ```
 

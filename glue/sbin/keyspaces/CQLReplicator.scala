@@ -10,11 +10,10 @@ import com.amazonaws.services.glue.util.GlueArgParser
 import com.amazonaws.services.glue.util.Job
 import com.amazonaws.services.glue.util.JsonOptions
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{ColumnName, DataFrame, SparkSession}
 import org.apache.spark.sql.cassandra._
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import com.amazonaws.services.s3.AmazonS3ClientBuilder
 import com.amazonaws.services.s3.model.{GetObjectRequest, ListObjectsV2Request}
@@ -81,7 +80,9 @@ sealed trait Stats
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
 case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
-case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterializedViewConfig = MaterializedViewConfig())
+case class PointInTimeReplicationConfig(predicateOp: String = "greaterThan")
+case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterializedViewConfig = MaterializedViewConfig(),
+                       replicateWithTimestamp: Boolean = false, pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig())
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
 case class Transformation(enabled: Boolean = false, filterExpression: String = "")
@@ -449,7 +450,7 @@ object GlueApp {
 
     val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\r\\n|\\r|\\n", ""))
     val replicatedColumns = jsonMapping4s match {
-      case JsonMapping(Replication(true, _, _, _), _) => "*"
+      case JsonMapping(Replication(true, _, _, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
     }
 
@@ -472,6 +473,20 @@ object GlueApp {
         val lstColumns = s"$replicatedColumns,ttl($ttlColumn)"
         lstColumns
       }
+    }
+
+    val selectStmtWithTs = columnTs match {
+      case s if s.equals("None")
+        || !jsonMapping4s.replication.replicateWithTimestamp =>
+        replicatedColumns
+      case s if !s.equals("None")
+        && jsonMapping4s.replication.replicateWithTimestamp
+        && replicatedColumns.equals("*") =>
+        allColumnsFromSource.flatMap(_.keys) :+ s"writetime($columnTs) as ts" mkString ", "
+      case s if !s.equals("None")
+        && jsonMapping4s.replication.replicateWithTimestamp
+        && !replicatedColumns.equals("*") =>
+        s"$replicatedColumns, writetime($columnTs) as ts"
     }
 
     def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
@@ -645,8 +660,22 @@ object GlueApp {
       }
     }
 
+    def getTsValue(jValue: org.json4s.JValue): BigInt = {
+      val tsJValue = jValue \ "ts"
+      tsJValue match {
+        case JInt(value) => value
+        case _ => -1
+      }
+    }
+
     def backToCQLStatementWithoutTTL(jvalue: org.json4s.JValue): String = {
       val res = jvalue filterField (p => (p._1 != s"ttl($ttlColumn)"))
+      val jsonNew = JObject(res)
+      compact(render(jsonNew))
+    }
+
+    def backToCQLStatementWithoutTs(jvalue: org.json4s.JValue): String = {
+      val res = jvalue filterField (p => p._1 != "ts")
       val jsonNew = JObject(res)
       compact(render(jsonNew))
     }
@@ -695,15 +724,19 @@ object GlueApp {
                 if (op == "insert" || op == "update") {
                   cassandraConn.withSessionDo { session => {
                     if (ttlColumn.equals("None")) {
-                      val rs = getSourceRow(replicatedColumns, whereClause, session, customFormat)
+                      val rs = getSourceRow(selectStmtWithTs, whereClause, session, customFormat)
                       if (rs.nonEmpty) {
                         val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
                         val jsonRow = compressValues(jsonRowEscaped)
+                        val json4sRow = parse(jsonRow)
+                        val tsValue = getTsValue(json4sRow)
+                        val tsSuffix = if (tsValue > 0) s"USING TIMESTAMP $tsValue" else ""
+                        val backToJsonRow = backToCQLStatementWithoutTs(json4sRow)
                         keyspacesConn.withSessionDo {
                           session => {
                             jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
                               case false => {
-                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$jsonRow'$cas"
+                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' $tsSuffix$cas"
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                                 resTry match {
                                   case Success(_) =>
@@ -711,9 +744,8 @@ object GlueApp {
                                 }
                               }
                               case _ => {
-                                val json4sRow = parse(jsonRow)
-                                val updatedJsonRow = compact(render(offloadToS3(json4sRow, s3ClientOnPartition, whereClause)))
-                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow'$cas"
+                                val updatedJsonRow = compact(render(offloadToS3(parse(backToJsonRow), s3ClientOnPartition, whereClause)))
+                                val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow' $tsSuffix$cas"
                                 val resTry = Try(Retry.decorateSupplier(retry, () => session.execute(cqlStatement)).get())
                                 resTry match {
                                   case Success(_) =>
@@ -951,6 +983,11 @@ object GlueApp {
       } else {
         srcTableName
       }
+      val pointInTimePredicate = (c: ColumnName) => jsonMapping4s.replication.pointInTimeReplicationConfig.predicateOp match {
+        case "greaterThan" => c > replicationPointInTime
+        case "lessThanOrEqual" => c <= replicationPointInTime
+        case _ => true
+      }
       val primaryKeysDf = columnTs match {
         case "None" =>
           sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
@@ -967,7 +1004,7 @@ object GlueApp {
           sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
             load().
             selectExpr(pkFinal.map(c => c): _*).
-            filter(($"ts" > replicationPointInTime) && ($"ts".isNotNull)).
+            filter($"ts".isNotNull && pointInTimePredicate($"ts")).
             persist(cachingMode)
       }
 

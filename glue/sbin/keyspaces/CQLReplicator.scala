@@ -3,6 +3,7 @@
  * // SPDX-License-Identifier: Apache-2.0
  */
 // Target Amazon Keyspaces
+
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.GlueArgParser
@@ -49,6 +50,8 @@ import java.time.{Duration, ZoneId, ZonedDateTime}
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
 import com.amazonaws.services.cloudwatch.AmazonCloudWatchAsyncClientBuilder
 
+sealed trait Stats
+
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
 }
@@ -77,37 +80,32 @@ class DlqS3Exception(s: String) extends RuntimeException {
   println(s)
 }
 
-sealed trait Stats
-
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
+
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
+
 case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
+
 case class PointInTimeReplicationConfig(predicateOp: String = "greaterThan")
+
 case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterializedViewConfig = MaterializedViewConfig(),
                        replicateWithTimestamp: Boolean = false, pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig())
+
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
+
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
+
 case class Transformation(enabled: Boolean = false, filterExpression: String = "")
+
 case class UdtConversion(enabled: Boolean = false, columns: List[String] = List(""))
-case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation, readBeforeWrite: Boolean = false, udtConversion: UdtConversion)
+
+case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig, transformation: Transformation, readBeforeWrite: Boolean = false, udtConversion: UdtConversion)
+
 case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
 
 // **************************Custom JSON Serializer Start*******************************************
 class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.driver.api.core.cql.Row] {
   implicit val formats: DefaultFormats.type = DefaultFormats
-
-  def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
-    sep match {
-      case None => {
-        val output = bytes.map("%02x".format(_)).mkString
-        s"0x$output"
-      }
-      case _ => {
-        val output = bytes.map("%02x".format(_)).mkString(sep.get)
-        s"0x$output"
-      }
-    }
-  }
 
   override def serialize(implicit format: org.json4s.Formats): PartialFunction[Any, JValue] = {
     case row: com.datastax.oss.driver.api.core.cql.Row =>
@@ -144,6 +142,19 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
       case DataTypes.UUID => row.getUuid(i).toString
       case DataTypes.TINYINT => row.getByte(i)
       case _ => throw new CustomSerializationException(s"Unsupported data type: $dataType")
+    }
+  }
+
+  def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
+    sep match {
+      case None => {
+        val output = bytes.map("%02x".format(_)).mkString
+        s"0x$output"
+      }
+      case _ => {
+        val output = bytes.map("%02x".format(_)).mkString(sep.get)
+        s"0x$output"
+      }
     }
   }
 
@@ -222,7 +233,7 @@ object GlueApp {
                    s3Client: com.amazonaws.services.s3.AmazonS3,
                    tile: Int,
                    op: String,
-                   cc: CqlSession ): Unit = {
+                   cc: CqlSession): Unit = {
       val session = cc
       Iterator.continually(isLogObjectPresent(ksName, tblName, bucketName, s3Client, tile, op)).takeWhile(_.nonEmpty).foreach {
         key => {
@@ -284,7 +295,7 @@ object GlueApp {
 
     def getDBConnection(connectionConfName: String, bucketName: String, s3client: AmazonS3, cwRegistry: CloudWatchMeterRegistry = null): CqlSession = {
       val connectorConf = s3client.getObjectAsString(bucketName, s"artifacts/$connectionConfName")
-      val metricsEnabled : Boolean = connectorConf.contains("MicrometerMetricsFactory")
+      val metricsEnabled: Boolean = connectorConf.contains("MicrometerMetricsFactory")
       val connection = if (cwRegistry != null && metricsEnabled)
         CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
           .withMetricRegistry(cwRegistry)
@@ -706,6 +717,7 @@ object GlueApp {
         partition => {
           val cloudWatchSourceConfig = new CloudWatchConfig() {
             override def get(s: String): String = null
+
             override def namespace = s"CQLReplicator-$srcKeyspaceName-$srcTableName"
           }
           val customFormat = if (jsonMapping4s.replication.useCustomSerializer) {
@@ -762,7 +774,7 @@ object GlueApp {
                     else {
                       val rs = getSourceRow(selectStmtWithTTL, whereClause, cassandraConnPerPar, customFormat)
                       if (rs.nonEmpty) {
-                        val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns,  rs)
+                        val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
                         val jsonRow = compressValues(jsonRowEscaped)
                         val json4sRow = parse(jsonRow)
                         jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
@@ -832,7 +844,7 @@ object GlueApp {
               }
               case "java.lang.String" => {
                 val inputFormatterTs = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ")
-                val originalTs = row.getString(position).replace("Z","+0000")
+                val originalTs = row.getString(position).replace("Z", "+0000")
                 val localDateTime = ZonedDateTime.parse(originalTs, inputFormatterTs)
                 s"${localDateTime.toInstant.toEpochMilli}"
               }
@@ -1000,7 +1012,7 @@ object GlueApp {
       }
 
       // the init seed for xxhash64 is 42
-      val groupedPkDF: DataFrame =  if (!jsonMapping4s.keyspaces.transformation.enabled) {
+      val groupedPkDF: DataFrame = if (!jsonMapping4s.keyspaces.transformation.enabled) {
         primaryKeysDf.withColumn("group", abs(xxhash64(concat(pkFinalWithoutTs.map(c => col(c)): _*))) % totalTiles).repartition(col("group")).persist(cachingMode)
       } else {
         val filterExpr = jsonMapping4s.keyspaces.transformation.filterExpression

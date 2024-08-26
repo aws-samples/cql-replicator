@@ -54,6 +54,8 @@ MAVEN_REPO=https://repo1.maven.org/maven2
 CLEANUP_REQUESTED="false"
 REPLAY_LOG="false"
 MAIN_SCRIPT_LANDING="false"
+DEFAULT_WORKLOAD_TYPE="continuous"
+GLUE_TYPE="glueStreaming"
 
 # Progress bar configuration
 PS=40
@@ -335,12 +337,18 @@ function Init {
   fi
 
   # Uploading the jars
-  ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar"
+  "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
+  "/com/datastax/oss/java-driver-metrics-micrometer/4.13.0/java-driver-metrics-micrometer-4.13.0.jar"
+  "/io/micrometer/micrometer-commons/1.10.4/micrometer-commons-1.10.4.jar"
+  "/io/micrometer/micrometer-core/1.10.4/micrometer-core-1.10.4.jar"
+  "/io/micrometer/micrometer-observation/1.10.4/micrometer-observation-1.10.4.jar"
+  "/io/micrometer/micrometer-registry-cloudwatch/1.10.4/micrometer-registry-cloudwatch-1.10.4.jar")
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
   ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar" "/org/opensearch/driver/opensearch-sql-jdbc/1.4.0.1/opensearch-sql-jdbc-1.4.0.1.jar")
   S3_PATH_BASE=("$S3_LANDING_ZONE/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "$S3_LANDING_ZONE/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
-  S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-retry-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-core-1.7.1.jar")
+  S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-retry-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-core-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/java-driver-metrics-micrometer-4.13.0.jar" "$S3_LANDING_ZONE/artifacts/micrometer-commons-1.10.4.jar" "$S3_LANDING_ZONE/artifacts/micrometer-core-1.10.4.jar" "$S3_LANDING_ZONE/artifacts/micrometer-observation-1.10.4.jar" "$S3_LANDING_ZONE/artifacts/micrometer-registry-cloudwatch-1.10.4.jar")
   S3_PATH_MEMORYDB=("$S3_LANDING_ZONE/artifacts/jedis-4.4.6.jar")
   S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "$S3_LANDING_ZONE/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
 
@@ -461,7 +469,7 @@ function Init {
            --number-of-workers 2 \
            --worker-type "$WORKER_TYPE" \
            --connections "Connections=$glue_conn_name$DEFAULT_ENV" \
-           --command "Name=gluestreaming,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator$DEFAULT_ENV.scala" \
+           --command "Name=$GLUE_TYPE,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator$DEFAULT_ENV.scala" \
            --execution-property '{"MaxConcurrentRuns": 32}' \
            --max-retries 1 \
            --region "$AWS_REGION" \
@@ -483,7 +491,7 @@ function Init {
           --glue-version "4.0" \
           --number-of-workers 2 \
           --worker-type "$WORKER_TYPE" \
-          --command "Name=gluestreaming,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator$DEFAULT_ENV.scala" \
+          --command "Name=$GLUE_TYPE,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator$DEFAULT_ENV.scala" \
           --execution-property '{"MaxConcurrentRuns": 32}' \
           --max-retries 1 \
           --region "$AWS_REGION" \
@@ -578,7 +586,8 @@ function Start_Discovery {
         "--CLEANUP_REQUESTED":"'$CLEANUP_REQUESTED'",
         "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
         "--REPLAY_LOG":"'$REPLAY_LOG'",
-        "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
+        "--TTL_COLUMN":"'$TTL_COLUMN'",
+        "--WORKLOAD_TYPE":"'$DEFAULT_WORKLOAD_TYPE'"}' --output text)
      JOBS+=("$rs")
   fi
 }
@@ -615,7 +624,8 @@ function Start_Replication {
           "--CLEANUP_REQUESTED":"false",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
           "--REPLAY_LOG":"'$REPLAY_LOG'",
-          "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
+          "--TTL_COLUMN":"'$TTL_COLUMN'",
+          "--WORKLOAD_TYPE":"'$DEFAULT_WORKLOAD_TYPE'"}' --output text)
        JOBS+=("$rs")
       sleep $COOLING_PERIOD
     fi
@@ -654,7 +664,8 @@ function Start_Single_Replication {
           "--CLEANUP_REQUESTED":"false",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
           "--REPLAY_LOG":"'$REPLAY_LOG'",
-          "--TTL_COLUMN":"'$TTL_COLUMN'"}' --output text)
+          "--TTL_COLUMN":"'$TTL_COLUMN'",
+          "--WORKLOAD_TYPE":"'$DEFAULT_WORKLOAD_TYPE'"}' --output text)
     JOBS+=("$rs")
   fi
 }
@@ -801,6 +812,11 @@ while (( "$#" )); do
       COOLING_PERIOD="$2"
       log "Custom incremental traffic for the historical workload is enabled"
       log "Custom incremental period: $COOLING_PERIOD seconds"
+      shift 2
+      ;;
+    --workload-type|--wlt)
+      DEFAULT_WORKLOAD_TYPE="$2"
+      log "Default workload type: $DEFAULT_WORKLOAD_TYPE"
       shift 2
       ;;
     --region|--sr)

@@ -9,7 +9,7 @@ This solution offers customers the flexibility to scale the migration workload u
 jobs of CQLReplicator.
 Each glue job (tile) is tasked with handling a specific subset of primary keys (1M per one data processing unit
 G.2X) to distribute migration workload evenly across data processing units.
-A single replication glue job (AWS Glue DPU - G.2X) can push up to 8000 WCUs (io size 1KB) per second against the target table in
+A single Glue worker can push up to 4K WCUs (row size 1KB) per second against the target table in
 Amazon Keyspaces. This allows for easy estimation of the final traffic against Amazon Keyspaces.
 
 ![](architecture-glue.png "CQLReplicator on Glue")
@@ -124,6 +124,16 @@ minutes. At peak traffic, it can reach up to 6,300 WCUs per second.
    cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
                  --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic
+```
+
+### Change the workload type
+If you want to replicate only the historical workload and release Glue resources once it's completed, add the following flag
+`--workload-type batch` to the command line, for example:
+
+```shell
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-1234567890-us-west-2 --region us-west-2 \
+                 --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic --workload-type batch
 ```
 
 ### Replicate with TTL
@@ -291,6 +301,18 @@ cqlreplicator --state stats --landing-zone s3://cql-replicator-1234567890-us-wes
 [2024-02-02T16:50:39-05:00] Discovered rows in ks_test_cql_replicator.test_cql_replicator is 70270
 [2024-02-02T16:50:39-05:00] Replicated rows in ks_test_cql_replicator.test_cql_replicator is 70270
 ```
+## Monitor incoming traffic with Amazon CloudWatch 
+
+You can monitor CQLReplicator incoming traffic from the source Cassandra cluster. It automatically creates a CloudWatch 
+dashboard for each source table,for example,`CQLReplicator-ks_test_cql_replicator-test_cql_replicator`. 
+
+To enable CQLReplicator telemetry in Amazon CloudWatch follow these steps:
+1. Add the IAM policy `CloudWatchFullAccessV2` to your Glue Role.
+2. Modify the `CassandraConnector.conf` file and upload it back to the artifacts folder in the landing S3 bucket with the 
+following settings:
+   `advanced.metrics.factory.class = MicrometerMetricsFactory`
+   `advanced.metrics.session.enabled = [cql-requests,cql-client-timeouts]`
+3. You might need to restart the CQLReplicator by running`request-stop`, then start it again.
 
 ## AWS Glue Monitoring
 

@@ -370,13 +370,20 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG", "WORKLOAD_TYPE").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
     val totalTiles = args("TOTAL_TILES").toInt
     val safeMode = args("SAFE_MODE")
     val replayLog = Try(args("REPLAY_LOG").toBoolean).getOrElse(false)
+    val workloadTypeArg = Try(args("WORKLOAD_TYPE")).getOrElse("continuous")
+    val workloadType = if (workloadTypeArg == "continuous" || workloadTypeArg == "batch") workloadTypeArg
+    else {
+      logger.error(s"ERROR: Invalid workload type '$workloadTypeArg'. Supported values are 'continuous' and 'batch'")
+      sys.exit()
+    }
+
     // Internal configuration
     val WAIT_TIME = safeMode match {
       case "true" => 20000
@@ -662,16 +669,26 @@ object GlueApp {
       }
     }
 
+    def filterOutColumn(jvalue: JValue, columnName: String): JValue = jvalue match {
+      case JObject(fields) =>
+        JObject(fields.flatMap {
+          case (key, value) if key != columnName =>
+            Some(key -> filterOutColumn(value, columnName))
+          case _ => None
+        })
+      case JArray(elements) =>
+        JArray(elements.map(filterOutColumn(_, columnName)))
+      case other => other
+    }
+
     def backToCQLStatementWithoutTTL(jvalue: org.json4s.JValue): String = {
-      val res = jvalue filterField (p => (p._1 != s"ttl($ttlColumn)"))
-      val jsonNew = JObject(res)
-      compact(render(jsonNew))
+      val filteredJson = filterOutColumn(jvalue, s"ttl($ttlColumn)")
+      compact(render(filteredJson))
     }
 
     def backToCQLStatementWithoutTs(jvalue: org.json4s.JValue): String = {
-      val res = jvalue filterField (p => p._1 != "ts")
-      val jsonNew = JObject(res)
-      compact(render(jsonNew))
+      val filteredJson = filterOutColumn(jvalue, "ts")
+      compact(render(filteredJson))
     }
 
     def getSourceRow(cls: String, wc: String, session: CqlSession, defaultFormat: org.json4s.Formats): String = {
@@ -703,115 +720,121 @@ object GlueApp {
     }
 
     def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
-      df.rdd.foreachPartition(
-        partition => {
-          val cloudWatchSourceConfig = new CloudWatchConfig() {
-            override def get(s: String): String = null
-            override def namespace = s"CQLReplicator-$srcKeyspaceName-$srcTableName"
-          }
-          val customFormat = if (jsonMapping4s.replication.useCustomSerializer) {
-            DefaultFormats + new CustomResultSetSerializer
-          } else {
-            DefaultFormats
-          }
-          val supportFunctions = new SupportFunctions()
-          val retryConfig = RetryConfig.custom.maxAttempts(MAX_RETRY_ATTEMPTS).
-            intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1)).
-            retryExceptions(classOf[WriteFailureException], classOf[WriteTimeoutException], classOf[ServerError],
-              classOf[UnavailableException], classOf[NoNodeAvailableException], classOf[AllNodesFailedException], classOf[DriverException]).build()
-          val retry = Retry.of("keyspaces", retryConfig)
-          val s3ClientOnPartition = AmazonS3ClientBuilder.defaultClient()
-          val cw = AmazonCloudWatchAsyncClientBuilder.defaultClient()
-          val meterSourceRegistry = new CloudWatchMeterRegistry(cloudWatchSourceConfig, Clock.SYSTEM, cw)
-          val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition, meterSourceRegistry)
-          val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
+      df.rdd.foreachPartition(partition => {
+        lazy val cloudWatchSourceConfig = new CloudWatchConfig() {
+          override def get(s: String): String = null
+          override def namespace = s"CQLReplicator-$srcKeyspaceName-$srcTableName"
+        }
+        lazy val customFormat = if (jsonMapping4s.replication.useCustomSerializer) {
+          DefaultFormats + new CustomResultSetSerializer
+        } else {
+          DefaultFormats
+        }
+        lazy val supportFunctions = new SupportFunctions()
+        lazy val retryConfig = RetryConfig.custom
+          .maxAttempts(MAX_RETRY_ATTEMPTS)
+          .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1))
+          .retryExceptions(
+            classOf[WriteFailureException],
+            classOf[WriteTimeoutException],
+            classOf[ServerError],
+            classOf[UnavailableException],
+            classOf[NoNodeAvailableException],
+            classOf[AllNodesFailedException],
+            classOf[DriverException]
+          )
+          .build()
+        lazy val retry = Retry.of("keyspaces", retryConfig)
+        lazy val s3ClientOnPartition = AmazonS3ClientBuilder.defaultClient()
+        lazy val cw = AmazonCloudWatchAsyncClientBuilder.defaultClient()
+        lazy val meterSourceRegistry = new CloudWatchMeterRegistry(cloudWatchSourceConfig, Clock.SYSTEM, cw)
+        lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition, meterSourceRegistry)
+        lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
 
-          partition.foreach(
-            row => {
-              val whereClause = rowToStatement(row, columns, columnsPos)
-              if (whereClause.nonEmpty) {
-                if (op == "insert" || op == "update") {
-                  if (counterColumns.nonEmpty) {
-                    val counterValues = getCounters(row)
-                    val setStmt = counterValues.map(m => s"${m._1}=${m._1}+${m._2}").mkString(",")
-                    val counterCqlStmt = s"UPDATE $trgKeyspaceName.$trgTableName SET $setStmt WHERE $whereClause"
-                    val resTry = Try(Retry.decorateSupplier(retry, () => keyspacesConnPerPar.execute(counterCqlStmt)).get())
-                    resTry match {
-                      case Success(_) =>
-                      case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", counterCqlStmt)
-                    }
-                  }
-                  else
-                  {
-                    if (ttlColumn.equals("None")) {
-                      val rs = getSourceRow(selectStmtWithTs, whereClause, cassandraConnPerPar, customFormat)
-                      if (rs.nonEmpty) {
-                        val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
-                        val jsonRow = compressValues(jsonRowEscaped)
-                        val json4sRow = parse(jsonRow)
-                        val tsValue = getTsValue(json4sRow)
-                        val tsSuffix = if (tsValue > 0) s"USING TIMESTAMP $tsValue" else ""
-                        val backToJsonRow = backToCQLStatementWithoutTs(json4sRow)
-                        jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
-                          case false => {
-                            val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' $tsSuffix$cas"
-                            val resTry = Try(Retry.decorateSupplier(retry, () => keyspacesConnPerPar.execute(cqlStatement)).get())
-                            resTry match {
-                              case Success(_) =>
-                              case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
-                            }
-                          }
-                          case _ => {
-                            val updatedJsonRow = compact(render(offloadToS3(parse(backToJsonRow), s3ClientOnPartition, whereClause)))
-                            val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow' $tsSuffix$cas"
-                            val resTry = Try(Retry.decorateSupplier(retry, () => keyspacesConnPerPar.execute(cqlStatement)).get())
-                            resTry match {
-                              case Success(_) =>
-                              case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
-                            }
-                          }
-                        }
-                      }
-                      else {
-                        val rs = getSourceRow(selectStmtWithTTL, whereClause, cassandraConnPerPar, customFormat)
-                        if (rs.nonEmpty) {
-                          val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
-                          val jsonRow = compressValues(jsonRowEscaped)
-                          val json4sRow = parse(jsonRow)
-                          jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
-                            case false => {
-                              val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
-                              val ttlVal = getTTLvalue(json4sRow)
-                              Retry.decorateSupplier(retry, () => keyspacesConnPerPar.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas")).get()
-                            }
-                            case _ => {
-                              val json4sRow = parse(jsonRow)
-                              val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
-                              val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
-                              val ttlVal = getTTLvalue(json4sRow)
-                              Retry.decorateSupplier(retry, () => keyspacesConnPerPar.execute(s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas")).get()
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
+        def executeCQLStatement(cqlStatement: String): Unit = {
+          val resTry = Try(Retry.decorateSupplier(retry, () => keyspacesConnPerPar.execute(cqlStatement)).get())
+          resTry match {
+            case Success(_) =>
+            case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
+          }
+        }
+
+        def processRow(row: Row): Unit = {
+          val whereClause = rowToStatement(row, columns, columnsPos)
+          if (whereClause.nonEmpty) {
+            op match {
+              case "insert" | "update" =>
+                if (counterColumns.nonEmpty) {
+                  val counterValues = getCounters(row)
+                  val setStmt = counterValues.map(m => s"${m._1}=${m._1}+${m._2}").mkString(",")
+                  val counterCqlStmt = s"UPDATE $trgKeyspaceName.$trgTableName SET $setStmt WHERE $whereClause"
+                  executeCQLStatement(counterCqlStmt)
+                } else {
+                  processNonCounterRow(row, whereClause)
                 }
-                if (op == "delete") {
-                  val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause"
-                  val resTry = Try(Retry.decorateSupplier(retry, () => keyspacesConnPerPar.execute(cqlStatement)).get())
-                  resTry match {
-                    case Success(_) =>
-                    case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
-                  }
-                }
+              case "delete" =>
+                val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause"
+                executeCQLStatement(cqlStatement)
+              case _ =>
+            }
+          }
+        }
+
+        def processNonCounterRow(row: Row, whereClause: String): Unit = {
+          if (ttlColumn.equals("None")) {
+            val rs = getSourceRow(selectStmtWithTs, whereClause, cassandraConnPerPar, customFormat)
+            if (rs.nonEmpty) {
+              processRowWithTimestamp(row, whereClause, rs)
+            } else {
+              val rs = getSourceRow(selectStmtWithTTL, whereClause, cassandraConnPerPar, customFormat)
+              if (rs.nonEmpty) {
+                processRowWithTTL(row, whereClause, rs)
               }
             }
-          )
-          keyspacesConnPerPar.close()
-          cassandraConnPerPar.close()
+          }
         }
-      )
+
+        def processRowWithTimestamp(row: Row, whereClause: String, rs: String): Unit = {
+          val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
+          val jsonRow = compressValues(jsonRowEscaped)
+          val json4sRow = parse(jsonRow)
+          val tsValue = getTsValue(json4sRow)
+          val tsSuffix = if (tsValue > 0) s"USING TIMESTAMP $tsValue" else ""
+          val backToJsonRow = backToCQLStatementWithoutTs(json4sRow)
+          jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
+            case false =>
+              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' $tsSuffix$cas"
+              executeCQLStatement(cqlStatement)
+            case _ =>
+              val updatedJsonRow = compact(render(offloadToS3(parse(backToJsonRow), s3ClientOnPartition, whereClause)))
+              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow' $tsSuffix$cas"
+              executeCQLStatement(cqlStatement)
+          }
+        }
+
+        def processRowWithTTL(row: Row, whereClause: String, rs: String): Unit = {
+          val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
+          val jsonRow = compressValues(jsonRowEscaped)
+          val json4sRow = parse(jsonRow)
+          jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
+            case false =>
+              val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
+              val ttlVal = getTTLvalue(json4sRow)
+              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
+              executeCQLStatement(cqlStatement)
+            case _ =>
+              val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
+              val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
+              val ttlVal = getTTLvalue(json4sRow)
+              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
+              executeCQLStatement(cqlStatement)
+          }
+        }
+
+        partition.foreach(processRow)
+        keyspacesConnPerPar.close()
+        cassandraConnPerPar.close()
+      })
     }
 
     def listWithSingleQuotes(lst: java.util.List[String], colType: String): String = {
@@ -1109,6 +1132,10 @@ object GlueApp {
         processType match {
           case "discovery" => {
             keysDiscoveryProcess()
+            if (workloadType.equals("batch")) {
+              logger.info("The discovery job is completed")
+              sys.exit()
+            }
           }
           case "replication" => {
             if (replayLog) {
@@ -1120,6 +1147,10 @@ object GlueApp {
               replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "delete", internalConnectionToTarget)
             }
             dataReplicationProcess()
+            if (workloadType.equals("batch")) {
+              logger.info("The replication job is completed")
+              sys.exit()
+            }
           }
           case _ => {
             logger.info(s"Unrecognizable process type - $processType")

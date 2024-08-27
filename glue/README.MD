@@ -470,7 +470,7 @@ In order to preserve existing records during the bulk migration phase set `readB
                                           }
                                         }'
 ```
-## Converting UTDs to JSON
+## Converting UDTs to JSON
 
 This feature allows the CQLReplicator tool to automatically convert UDTs in C* to plain JSON strings. 
 This enhancement provides a seamless way to transform UDTs into a more universal compatible JSON format, 

@@ -55,7 +55,7 @@ CLEANUP_REQUESTED="false"
 REPLAY_LOG="false"
 MAIN_SCRIPT_LANDING="false"
 DEFAULT_WORKLOAD_TYPE="continuous"
-GLUE_TYPE="glueStreaming"
+GLUE_TYPE="gluestreaming"
 
 # Progress bar configuration
 PS=40

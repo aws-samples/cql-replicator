@@ -22,7 +22,7 @@ Parameters:
     Default: 'CQLReplicator'
     MinLength: 3
     MaxLength: 63
-    Description: The name of your Amazon Cloud Watch Dashboard for your table's metrics
+    Description: The name of your Amazon CloudWatch Dashboard for your table's metrics
   SourceKeyspaceNameParameter:
     Type: String
     Default: 'source_keyspace'
@@ -46,13 +46,13 @@ Parameters:
     Default: 'target_table'
     MinLength: 3
     MaxLength: 63
-    Description: The name of your cqlrepicator's keyspace
+    Description: The name of your CQLReplicator's keyspace
   MigrationKeyspaceNameParameter:
     Type: String
     Default: 'migration'
     MinLength: 3
     MaxLength: 63
-    Description: The name of your  cqlrepicator's ledger table
+    Description: The name of your  CQLReplicator's ledger table
   MigrationLedgerTableNameParameter:
     Type: String
     Default: 'ledger'
@@ -519,12 +519,12 @@ Resources:
     ]}'
 Outputs:
   KeyspacesGlueJobServiceRoleOutput:
-    Description: Glue service role for glue jobs
+    Description: Glue service role for Glue jobs
     Value: !Ref KeyspacesGlueJobServiceRole
     Export:
       Name: !Sub ['KeyspacesGlueJobServiceRoleExport-${STACKNAME}', STACKNAME: !Ref AWS::StackName]
   CQLReplicatorS3BucketNameOutput:
-    Description: S3 Bucket for glue jobs
+    Description: S3 Bucket for Glue jobs
     Value: !Ref CQLReplicatorS3BucketName
     Export:
       Name: !Sub ['CQLReplicatorS3BucketNameExport-${STACKNAME}', STACKNAME: !Ref AWS::StackName]

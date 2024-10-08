@@ -151,8 +151,36 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
 }
 
 class SupportFunctions {
-  def correctValues(binColumns: List[String] = List(), utdColumns: List[String] = List(), input: String): String = {
+  def correctValues(binColumns: List[String] = List(), utdColumns: List[String] = List(), input: String, nestedUdtColumns: List[String]): String = {
     implicit val formats: DefaultFormats.type = DefaultFormats
+
+    def wrapValuesInQuotesIfUDT(columns: List[String], jvalue: JValue): JValue = {
+      def transform(json: JValue): JValue = json match {
+        case JObject(fields) =>
+          JObject(fields.map { case (key, value) =>
+            if (columns.contains(key)) {
+              value match {
+                case JObject(nestedFields) =>
+                  val transformedFields = nestedFields.map {
+                    case (nestedKey, nestedValue) =>
+                      nestedValue match {
+                        case JObject(_) => (nestedKey, JString(compact(render(nestedValue))))
+                        case _ => (nestedKey, nestedValue)
+                      }
+                  }
+                  (key, JObject(transformedFields))
+                case _ => (key, value)
+              }
+            } else {
+              (key, transform(value))
+            }
+          })
+        case JArray(arr) =>
+          JArray(arr.map(transform))
+        case other => other
+      }
+      transform(jvalue)
+    }
 
     @tailrec
     def correctEmptyBin(json: JValue, cols: Seq[String]): JValue = cols match {
@@ -184,7 +212,8 @@ class SupportFunctions {
       val json = parse(input)
       val correctedBins = if (binColumns.nonEmpty) correctEmptyBin(json, binColumns) else json
       val convertedUdt = if (utdColumns.nonEmpty) convertUDTtoText(correctedBins, utdColumns) else correctedBins
-      compact(render(convertedUdt))
+      val convertedNestedUdt = if (nestedUdtColumns.nonEmpty) wrapValuesInQuotesIfUDT(nestedUdtColumns, convertedUdt) else convertedUdt
+      compact(render(convertedNestedUdt))
     }
     transformedResult
   }
@@ -441,6 +470,12 @@ object GlueApp {
     val allColumnsFromSource = getAllColumns(internalConnectionToSource, srcKeyspaceName, srcTableName)
     val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
     val counterColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "COUNTER").keys).toList
+    // list of columns with UDT in map collection only
+    val udtWithMapColumns: List[String] = allColumnsFromSource.filter { map =>
+      map.values.exists { value =>
+        value.contains("UDT(") && value.contains("=>")
+      }
+    }.flatMap(k => k.keys).toList
     val pkFinalWithoutTs = pkFinal.filterNot(_ == s"writetime($columnTs) as ts")
     val pks = pkFinal.filterNot(_ == s"writetime($columnTs) as ts")
     val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
@@ -795,7 +830,7 @@ object GlueApp {
         }
 
         def processRowWithTimestamp(row: Row, whereClause: String, rs: String): Unit = {
-          val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
+          val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs, udtWithMapColumns)
           val jsonRow = compressValues(jsonRowEscaped)
           val json4sRow = parse(jsonRow)
           val tsValue = getTsValue(json4sRow)
@@ -813,7 +848,7 @@ object GlueApp {
         }
 
         def processRowWithTTL(row: Row, whereClause: String, rs: String): Unit = {
-          val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
+          val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs, udtWithMapColumns)
           val jsonRow = compressValues(jsonRowEscaped)
           val json4sRow = parse(jsonRow)
           jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {

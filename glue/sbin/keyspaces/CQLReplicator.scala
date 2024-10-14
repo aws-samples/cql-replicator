@@ -809,6 +809,7 @@ object GlueApp {
         lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
         lazy val dlqConfig = DlqConfig(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op")
         lazy val fl = FlushingSet(keyspacesConnPerPar, jsonMapping4s.keyspaces.writeConfiguration, dlqConfig)
+        lazy val maxStatementsPerBatch = jsonMapping4s.keyspaces.writeConfiguration.maxStatementsPerBatch
 
         def processRow(row: Row): Unit = {
           val whereClause = rowToStatement(row, columns, columnsPos)
@@ -825,7 +826,10 @@ object GlueApp {
                 }
               case "delete" =>
                 val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause"
-                fl.add(cqlStatement)
+                if (maxStatementsPerBatch>1)
+                  fl.add(cqlStatement)
+                else
+                  fl.executeCQLStatement(cqlStatement)
               case _ =>
             }
           }
@@ -855,11 +859,17 @@ object GlueApp {
           jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
             case false =>
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' $tsSuffix$cas"
-              fl.add(cqlStatement)
+              if (maxStatementsPerBatch>1)
+                fl.add(cqlStatement)
+              else
+                fl.executeCQLStatement(cqlStatement)
             case _ =>
               val updatedJsonRow = compact(render(offloadToS3(parse(backToJsonRow), s3ClientOnPartition, whereClause)))
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow' $tsSuffix$cas"
-              fl.add(cqlStatement)
+              if (maxStatementsPerBatch>1)
+                fl.add(cqlStatement)
+              else
+                fl.executeCQLStatement(cqlStatement)
           }
         }
 
@@ -872,13 +882,19 @@ object GlueApp {
               val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
               val ttlVal = getTTLvalue(json4sRow)
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
-              fl.add(cqlStatement)
+              if (maxStatementsPerBatch>1)
+                fl.add(cqlStatement)
+              else
+                fl.executeCQLStatement(cqlStatement)
             case _ =>
               val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
               val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
               val ttlVal = getTTLvalue(json4sRow)
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
-              fl.add(cqlStatement)
+              if (maxStatementsPerBatch>1)
+                fl.add(cqlStatement)
+              else
+                fl.executeCQLStatement(cqlStatement)
           }
         }
 

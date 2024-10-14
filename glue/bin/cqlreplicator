@@ -805,23 +805,23 @@ while (( "$#" )); do
       STATE="$2"
       shift 2
       ;;
-    --tiles|-t)
+    --tiles|--t)
       TILES="$2"
       shift 2
       ;;
-    --tile|-tl)
+    --tile|--tl)
       TILE="$2"
       shift 2
       ;;
-    --worker-type|-wt)
+    --worker-type|--wt)
       WORKER_TYPE="$2"
       shift 2
       ;;
-    --discovery-worker-type|-dwt)
+    --discovery-worker-type|--dwt)
       DISCOVERY_WORKER_TYPE="$2"
       shift 2
       ;;
-    --override-discovery-workers|-odw)
+    --override-discovery-workers|--odw)
       OVERRIDE_DISCOVERY_WORKERS="$2"
       shift 2
       ;;

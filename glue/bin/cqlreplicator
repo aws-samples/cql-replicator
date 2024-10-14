@@ -13,6 +13,7 @@ DISCOVERY_WORKER_TYPE=G.1X
 TILE=""
 PROCESS_TYPE_DISCOVERY=discovery
 PROCESS_TYPE_REPLICATION=replication
+PROCESS_TYPE_SAMPLER=sampler
 SOURCE_KS=""
 SOURCE_TBL=""
 TARGET_KS=""
@@ -164,6 +165,19 @@ function check_discovery_runs() {
        exit 1
    fi
    return 0
+}
+
+sampler_running=false
+
+function check_sampler_runs() {
+   local rs
+   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION"  \
+    --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`sampler`] | [?"--SOURCE_KS"==`'"$SOURCE_KS"'`] | [?"--SOURCE_TBL"==`'"$SOURCE_TBL"'`]' | jq 'length != 0')
+   if [ "$rs" = "true" ]; then
+       sampler_running=true
+     else
+       sampler_running=false
+   fi
 }
 
 function check_replication_runs() {
@@ -532,6 +546,50 @@ function Init {
 fi
 
 log "Deploy is completed"
+}
+
+function Start_Sampler {
+  check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
+  check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
+  check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
+  check_input "$AWS_REGION" "ERROR: aws region must be provided"
+  log "SOURCE:" "$SOURCE_KS"."$SOURCE_TBL"
+  log "LANDING ZONE:" "$S3_LANDING_ZONE"
+  log "WORKER_TYPE: $WORKER_TYPE"
+  check_sampler_runs
+  if [ "$sampler_running" = false ]; then
+    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "G.025X" --number-of-workers 10 --region "$AWS_REGION" --arguments '{
+          "--PROCESS_TYPE":"'$PROCESS_TYPE_SAMPLER'",
+          "--TILE":"0",
+          "--TOTAL_TILES":"1",
+          "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
+          "--SOURCE_KS":"'$SOURCE_KS'",
+          "--SOURCE_TBL":"'$SOURCE_TBL'",
+          "--TARGET_KS":"'$SOURCE_KS'",
+          "--TARGET_TBL":"'$SOURCE_TBL'",
+          "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
+          "--SAFE_MODE":"'$SAFE_MODE'",
+          "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
+          "--CLEANUP_REQUESTED":"'$CLEANUP_REQUESTED'",
+          "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
+          "--REPLAY_LOG":"'$REPLAY_LOG'",
+          "--TTL_COLUMN":"'$TTL_COLUMN'",
+          "--WORKLOAD_TYPE":"'$DEFAULT_WORKLOAD_TYPE'"}' --output text)
+    check_sampler_runs
+    local delay=0.1
+    local spinstr='|/-\'
+    output="Glue job $rs is running"
+    while [ "$sampler_running" = true ]; do
+      local temp=${spinstr#?}
+      printf "\r%s [%c]  " "$output" "$spinstr"
+      local spinstr=$temp${spinstr%"$temp"}
+      sleep $delay
+      check_sampler_runs
+    done
+    printf "\r%s    \n" "$output"
+    sampled_result=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/columnStats/stats.json --region "$AWS_REGION" -)
+    echo "$sampled_result"
+  fi
 }
 
 function Start_Discovery {
@@ -942,6 +1000,10 @@ if [[ $STATE == run ]]; then
   fi
   Start_Replication
   log "Started jobs:" "${JOBS[@]}"
+fi
+
+if [[ $STATE == sample ]]; then
+  Start_Sampler
 fi
 
 if [[ $STATE == run-single ]]; then

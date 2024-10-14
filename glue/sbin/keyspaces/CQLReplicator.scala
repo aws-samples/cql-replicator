@@ -31,6 +31,7 @@ import io.github.resilience4j.retry.{Retry, RetryConfig}
 import io.github.resilience4j.core.IntervalFunction
 import io.micrometer.cloudwatch.{CloudWatchConfig, CloudWatchMeterRegistry}
 import io.micrometer.core.instrument.Clock
+import org.apache.spark.sql.types._
 
 import scala.util.{Failure, Success, Try}
 import scala.io.Source
@@ -41,13 +42,13 @@ import org.json4s._
 import org.json4s.jackson.JsonMethods._
 import org.json4s.jackson.Serialization
 import org.json4s.jackson.Serialization.write
-
 import java.util.Base64
 import java.nio.charset.StandardCharsets
 import java.time.format.DateTimeFormatter
 import java.time.{Duration, ZoneId, ZonedDateTime}
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
 import com.amazonaws.services.cloudwatch.AmazonCloudWatchAsyncClientBuilder
+import com.datastax.oss.driver.api.core.cql.{BatchStatement, BatchStatementBuilder, DefaultBatchType, SimpleStatement}
 
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
@@ -78,6 +79,7 @@ class DlqS3Exception(s: String) extends RuntimeException {
 }
 
 sealed trait Stats
+case class WriteConfiguration(batchSize: Int = 1024 * 1024, maxRetryAttempts: Int = 64, expBackoff: Int = 25, maxStatementsPerBatch: Int = 29)
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
 case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
@@ -88,10 +90,10 @@ case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
 case class Transformation(enabled: Boolean = false, filterExpression: String = "")
 case class UdtConversion(enabled: Boolean = false, columns: List[String] = List(""))
-case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation, readBeforeWrite: Boolean = false, udtConversion: UdtConversion)
+case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation, readBeforeWrite: Boolean = false, udtConversion: UdtConversion, writeConfiguration: WriteConfiguration)
 case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
+case class DlqConfig(s3client: AmazonS3, bucketName: String, key: String)
 
-// **************************Custom JSON Serializer Start*******************************************
 class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.driver.api.core.cql.Row] {
   implicit val formats: DefaultFormats.type = DefaultFormats
   def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
@@ -187,6 +189,75 @@ class SupportFunctions {
       compact(render(convertedUdt))
     }
     transformedResult
+  }
+}
+
+case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfiguration, dlqConfig: DlqConfig) {
+  private val batch: BatchStatementBuilder = BatchStatement.builder(DefaultBatchType.UNLOGGED)
+  private def persistToDlq(dlqConfig: DlqConfig,payload: String): Unit = {
+    val ts = org.joda.time.LocalDateTime.now().toString
+    dlqConfig.s3client.putObject(dlqConfig.bucketName,
+      s"${dlqConfig.key}/log-$ts.msg", payload)
+  }
+
+  private def executeCQLStatement(batchStatement: BatchStatement): Unit = {
+    val resTry = Try(Retry.decorateSupplier(retry, () => flushingClient.execute(batchStatement)).get())
+    resTry match {
+      case Success(_) =>
+      case Failure(_) =>
+        batchStatement.asScala.foreach{ stmt =>
+          persistToDlq(dlqConfig, stmt.toString)
+        }
+    }
+  }
+
+  def executeCQLStatement(statement: String): Unit = {
+    val resTry = Try(Retry.decorateSupplier(retry, () => flushingClient.execute(statement.toString)).get())
+    resTry match {
+      case Success(_) =>
+      case Failure(_) => persistToDlq(dlqConfig, statement.toString)
+    }
+  }
+
+  private val retryConfig = RetryConfig.custom
+    .maxAttempts(internalConfig.maxRetryAttempts)
+    .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(internalConfig.expBackoff), 1.1))
+    .retryExceptions(
+      classOf[WriteFailureException],
+      classOf[WriteTimeoutException],
+      classOf[ServerError],
+      classOf[UnavailableException],
+      classOf[NoNodeAvailableException],
+      classOf[AllNodesFailedException],
+      classOf[DriverException]
+    )
+    .build()
+  lazy val retry: Retry = Retry.of("keyspaces", retryConfig)
+
+  private var size: Int = 0
+
+  final def add(element: String): Unit = this.synchronized {
+    val elementSize = element.toString.getBytes.length
+    if (size + elementSize >= internalConfig.batchSize || batch.getStatementsCount>internalConfig.maxStatementsPerBatch) {
+      flush()
+      size = elementSize
+      batch.addStatement(SimpleStatement.newInstance(element.toString))
+    } else {
+      size += elementSize
+      batch.addStatement(SimpleStatement.newInstance(element.toString))
+    }
+  }
+
+  def flush(): Unit = this.synchronized {
+    if (batch.getStatementsCount > 0) {
+      executeCQLStatement(batch.build())
+      batch.clearStatements()
+      size = 0
+    }
+  }
+
+  def getSize: Int = this.synchronized {
+    size
   }
 }
 
@@ -313,7 +384,12 @@ object GlueApp {
 
     def parseJSONMapping(s: String): JsonMapping = {
       Option(s) match {
-        case Some("None") => JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig(), Transformation(), readBeforeWrite = false, UdtConversion()))
+        case Some("None") => JsonMapping(Replication(),
+          Keyspaces(CompressionConfig(),
+            LargeObjectsConfig(),
+            Transformation(),
+            readBeforeWrite = false,
+            UdtConversion(), WriteConfiguration()))
         case _ =>
           implicit val formats: DefaultFormats.type = DefaultFormats
           parse(s).extract[JsonMapping]
@@ -389,14 +465,13 @@ object GlueApp {
       case "true" => 20000
       case _ => 0
     }
+
+    val SAMPLE_SIZE = 100000
+    val SAMPLE_FRACTION = 0.2
     val cachingMode = safeMode match {
       case "true" => StorageLevel.DISK_ONLY
       case _ => StorageLevel.MEMORY_AND_DISK_SER
     }
-    // An increased number of retry attempts could potentially result in a significant number of operations being delayed
-    val MAX_RETRY_ATTEMPTS = 64
-    // Unit ms
-    val EXP_BACKOFF = 25
     sparkSession.conf.set(s"spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
     sparkSession.conf.set("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
 
@@ -520,6 +595,7 @@ object GlueApp {
       val key = processType match {
         case "discovery" => s"$srcKeyspaceName/$srcTableName/$processType/stopRequested"
         case "replication" => s"$srcKeyspaceName/$srcTableName/$processType/$currentTile/stopRequested"
+        case "sampler" => s"$landingZone/$srcKeyspaceName/$srcTableName/columnStats"
         case _ => throw new ProcessTypeException("Unrecognizable process type")
       }
       Try {
@@ -618,11 +694,6 @@ object GlueApp {
       } else {
         json
       }
-    }
-
-    def persistToDlq(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String, event: String): Unit = {
-      val ts = org.joda.time.LocalDateTime.now().toString
-      s3Client.putObject(bucket, s"$key/log-$ts.msg", event)
     }
 
     def putStats(bucket: String, key: String, objectName: String, stats: Stats): Unit = {
@@ -731,33 +802,13 @@ object GlueApp {
           DefaultFormats
         }
         lazy val supportFunctions = new SupportFunctions()
-        lazy val retryConfig = RetryConfig.custom
-          .maxAttempts(MAX_RETRY_ATTEMPTS)
-          .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(EXP_BACKOFF), 1.1))
-          .retryExceptions(
-            classOf[WriteFailureException],
-            classOf[WriteTimeoutException],
-            classOf[ServerError],
-            classOf[UnavailableException],
-            classOf[NoNodeAvailableException],
-            classOf[AllNodesFailedException],
-            classOf[DriverException]
-          )
-          .build()
-        lazy val retry = Retry.of("keyspaces", retryConfig)
         lazy val s3ClientOnPartition = AmazonS3ClientBuilder.defaultClient()
         lazy val cw = AmazonCloudWatchAsyncClientBuilder.defaultClient()
         lazy val meterSourceRegistry = new CloudWatchMeterRegistry(cloudWatchSourceConfig, Clock.SYSTEM, cw)
         lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition, meterSourceRegistry)
         lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
-
-        def executeCQLStatement(cqlStatement: String): Unit = {
-          val resTry = Try(Retry.decorateSupplier(retry, () => keyspacesConnPerPar.execute(cqlStatement)).get())
-          resTry match {
-            case Success(_) =>
-            case Failure(_) => persistToDlq(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op", cqlStatement)
-          }
-        }
+        lazy val dlqConfig = DlqConfig(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op")
+        lazy val fl = FlushingSet(keyspacesConnPerPar, jsonMapping4s.keyspaces.writeConfiguration, dlqConfig)
 
         def processRow(row: Row): Unit = {
           val whereClause = rowToStatement(row, columns, columnsPos)
@@ -768,13 +819,13 @@ object GlueApp {
                   val counterValues = getCounters(row)
                   val setStmt = counterValues.map(m => s"${m._1}=${m._1}+${m._2}").mkString(",")
                   val counterCqlStmt = s"UPDATE $trgKeyspaceName.$trgTableName SET $setStmt WHERE $whereClause"
-                  executeCQLStatement(counterCqlStmt)
+                  fl.executeCQLStatement(counterCqlStmt)
                 } else {
                   processNonCounterRow(row, whereClause)
                 }
               case "delete" =>
                 val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause"
-                executeCQLStatement(cqlStatement)
+                fl.add(cqlStatement)
               case _ =>
             }
           }
@@ -804,11 +855,11 @@ object GlueApp {
           jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
             case false =>
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' $tsSuffix$cas"
-              executeCQLStatement(cqlStatement)
+              fl.add(cqlStatement)
             case _ =>
               val updatedJsonRow = compact(render(offloadToS3(parse(backToJsonRow), s3ClientOnPartition, whereClause)))
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow' $tsSuffix$cas"
-              executeCQLStatement(cqlStatement)
+              fl.add(cqlStatement)
           }
         }
 
@@ -821,13 +872,13 @@ object GlueApp {
               val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
               val ttlVal = getTTLvalue(json4sRow)
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
-              executeCQLStatement(cqlStatement)
+              fl.add(cqlStatement)
             case _ =>
               val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
               val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
               val ttlVal = getTTLvalue(json4sRow)
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
-              executeCQLStatement(cqlStatement)
+              fl.add(cqlStatement)
           }
         }
 
@@ -1014,6 +1065,81 @@ object GlueApp {
       }
     }
 
+    def sampleProcess(): Unit = {
+      def addTotalColumns(df: DataFrame): DataFrame = {
+        // Get all unique column names (without the _name, _min, _avg, _max suffixes)
+        val columnNames = df.columns
+          .filter(_.endsWith("_name"))
+          .map(_.stripSuffix("_name"))
+
+        // Create expressions for the new columns
+        val totalExpressions = columnNames.flatMap { colName =>
+          Seq(
+            coalesce(col(s"${colName}_min").cast(DoubleType), lit(0.0)).as(s"${colName}_min_double"),
+            coalesce(col(s"${colName}_avg").cast(DoubleType), lit(0.0)).as(s"${colName}_avg_double"),
+            coalesce(col(s"${colName}_max").cast(DoubleType), lit(0.0)).as(s"${colName}_max_double")
+          )
+        }
+
+        // Add the new columns to the DataFrame
+        val dfWithDoubles = df.select(df.columns.map(col) ++ totalExpressions: _*)
+
+        // Calculate totals
+        val minTotal = columnNames.map(colName => col(s"${colName}_min_double")).reduce(_ + _)
+        val avgTotal = columnNames.map(colName => col(s"${colName}_avg_double")).reduce(_ + _)
+        val maxTotal = columnNames.map(colName => col(s"${colName}_max_double")).reduce(_ + _)
+
+        // Add total columns
+        dfWithDoubles
+          .withColumn("row_min_total", minTotal)
+          .withColumn("row_avg_total", avgTotal)
+          .withColumn("row_max_total", maxTotal)
+          .drop(columnNames.flatMap(colName => Seq(
+            s"${colName}_min_double",
+            s"${colName}_avg_double",
+            s"${colName}_max_double"
+          )): _*)
+      }
+
+      def getColumnStats(df: DataFrame): DataFrame = {
+        val expressions = df.schema.fields.flatMap { field =>
+          val colName = field.name
+          val col = df(colName)
+
+          val (minExpr, avgExpr, maxExpr) = field.dataType match {
+            case _: NumericType | BooleanType  =>
+              (min(col), avg(col), max(col))
+            case StringType =>
+              (min(length(col)), avg(length(col)), max(length(col)))
+            case BinaryType =>
+              (min(length(col)), avg(length(col)), max(length(col)))
+            case TimestampType =>
+              (lit("8"), lit("8"), lit("8"))
+            case DateType =>
+              (lit("4"), lit("4"), lit("4"))
+            case _ =>
+              (lit(null), lit(null), lit(null))
+          }
+
+          List(
+            lit(colName).alias(s"${colName}_name"),
+            minExpr.cast("string").alias(s"${colName}_min"),
+            avgExpr.cast("string").alias(s"${colName}_avg"),
+            maxExpr.cast("string").alias(s"${colName}_max")
+          )
+        }
+        val columnStats = df.select(expressions: _*)
+        columnStats
+      }
+
+      val sampledDf = sparkSession.read.cassandraFormat(srcTableName, srcKeyspaceName).option("inferSchema", "true").
+        load().limit(SAMPLE_SIZE).sample(SAMPLE_FRACTION)
+
+      val columnStats = addTotalColumns(getColumnStats(sampledDf))
+      val jsonStats = parse(columnStats.toJSON.collect().mkString)
+      s3client.putObject(bcktName, s"$srcKeyspaceName/$srcTableName/columnStats/stats.json", pretty(render(jsonStats)))
+    }
+
     def keysDiscoveryProcess(): Unit = {
       val srcTableForDiscovery = if (jsonMapping4s.replication.useMaterializedView.enabled) {
         jsonMapping4s.replication.useMaterializedView.mvName
@@ -1130,6 +1256,10 @@ object GlueApp {
     Iterator.continually(stopRequested(bcktName)).takeWhile(_ == false).foreach {
       _ => {
         processType match {
+          case "sampler" => {
+            sampleProcess()
+            sys.exit()
+          }
           case "discovery" => {
             keysDiscoveryProcess()
             if (workloadType.equals("batch")) {

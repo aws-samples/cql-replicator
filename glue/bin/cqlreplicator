@@ -4,59 +4,49 @@
 # // SPDX-License-Identifier: Apache-2.0
 #
 # Migration parameters
-MIGRATOR_VERSION=0.3
-DESCRIPTION="Migration Toolbox"
-JOB_NAME=CQLReplicator
-TILES=1
-WORKER_TYPE=G.2X
-DISCOVERY_WORKER_TYPE=G.1X
-TILE=""
-PROCESS_TYPE_DISCOVERY=discovery
-PROCESS_TYPE_REPLICATION=replication
-PROCESS_TYPE_SAMPLER=sampler
-SOURCE_KS=""
-SOURCE_TBL=""
-TARGET_KS=""
-TARGET_TBL=""
-WRITETIME_COLUMN="None"
-TTL_COLUMN="None"
-S3_LANDING_ZONE=""
-COOLING_PERIOD=5
-INCR_TRAFFIC=240
-JOBS=()
-DISCOVERED_TOTAL=0
-REPLICATED_TOTAL=0
-OVERRIDE_DISCOVERY_WORKERS=0
-BASE_FOLDER=$(pwd -L)
-AWS_REGION=""
-SUBNET=""
-SG=""
-AZ=""
-TRG_SUBNET=""
-TRG_AZ=""
-TRG_SG=""
-GLUE_IAM_ROLE=""
-AWS_ACCOUNT=""
-KEYS_PER_TILE=0
-ROWS_PER_WORKER=1000000
-TARGET_TYPE=keyspaces
-SKIP_GLUE_CONNECTOR=false
-SKIP_KEYSPACES_LEDGER=false
+declare -A params=(
+    [MIGRATOR_VERSION]="1.0"
+    [DESCRIPTION]="Migration Toolbox"
+    [JOB_NAME]="CQLReplicator"
+    [TILES]=8
+    [WORKER_TYPE]="G.2X"
+    [DISCOVERY_WORKER_TYPE]="G.1X"
+    [PROCESS_TYPE_DISCOVERY]="discovery"
+    [PROCESS_TYPE_REPLICATION]="replication"
+    [PROCESS_TYPE_SAMPLER]="sampler"
+    [WRITETIME_COLUMN]="None"
+    [TTL_COLUMN]="None"
+    [COOLING_PERIOD]=5
+    [INCR_TRAFFIC]=240
+    [DISCOVERED_TOTAL]=0
+    [REPLICATED_TOTAL]=0
+    [OVERRIDE_DISCOVERY_WORKERS]=0
+    [KEYS_PER_TILE]=0
+    [ROWS_PER_WORKER]=1000000
+    [TARGET_TYPE]=keyspaces
+    [SKIP_GLUE_CONNECTOR]=false
+    [SKIP_KEYSPACES_LEDGER]=false
+    [REPLICATION_POINT_IN_TIME]=0
+    [REPLICATION_STATS_ENABLED]=false
+    [GLUE_MONITORING]=false
+    [SAFE_MODE]=true
+    [SKIP_DISCOVERY]=false
+    [MAVEN_REPO]="https://repo1.maven.org/maven2"
+    [CLEANUP_REQUESTED]=false
+    [REPLAY_LOG]=false
+    [MAIN_SCRIPT_LANDING]=false
+    [DEFAULT_WORKLOAD_TYPE]=continuous
+    [GLUE_TYPE]=gluestreaming
+    [WCU_TRAFFIC]=0
+    [DEFAULT_ROWS_PER_SECOND]=600
+    [SAMPLER_RUNNING]=false
+)
+
+# Dynamic variables
+params[BASE_FOLDER]=$(pwd -L)
+params[OS]=$(uname -s)
 JSON_MAPPING_B64=$(echo "None" | base64)
-REPLICATION_POINT_IN_TIME=0
-REPLICATION_STATS_ENABLED=false
-GLUE_MONITORING=false
-SAFE_MODE=true
-OS=$(uname -a | awk '{print $1}')
-S3_PATH_LIBS=""
-SKIP_DISCOVERY=false
-DEFAULT_ENV=""
-MAVEN_REPO=https://repo1.maven.org/maven2
-CLEANUP_REQUESTED="false"
-REPLAY_LOG="false"
-MAIN_SCRIPT_LANDING="false"
-DEFAULT_WORKLOAD_TYPE="continuous"
-GLUE_TYPE="gluestreaming"
+JOBS=()
 
 # Progress bar configuration
 PS=40
@@ -65,7 +55,7 @@ PCU="-"
 PPS=2
 
 set +x
-
+# The Art
 cat << "EOF"
     ___ ___  _     ____            _ _           _
   / ___/ _ \| |   |  _ \ ___ _ __ | (_) ___ __ _| |_ ___  _ __
@@ -83,7 +73,13 @@ cat << "EOF"
 ·······································································
 EOF
 
-# preflight checks
+# Preflight checks
+
+# Check Bash version
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo >&2 "Bash version 4 or higher is required. You are using version $BASH_VERSION. Aborting."
+    exit 1
+fi
 command -v aws -v >/dev/null 2>&1 || { echo >&2 "aws cli requires but it's not installed. Aborting."; exit 1; }
 command -v curl -V >/dev/null 2>&1 || { echo >&2 "curl requires but it's not installed. Aborting."; exit 1; }
 command -v jq -V >/dev/null 2>&1 || { echo >&2 "jq requires but it's not installed. Aborting."; exit 1; }
@@ -93,8 +89,8 @@ log() {
   echo "[$(date -Iseconds)]" "$@"
 }
 
-if [[ "$OS" == Linux || "$OS" == Darwin ]]; then
-  log "OS: $OS"
+if [[ "${params[OS]}" == "Linux" || "${params[OS]}" == "Darwin" ]]; then
+  log "OS: ${params[OS]}"
   log "AWS CLI: $(aws --version)"
 else
   log "ERROR: Please run this script in AWS CloudShell or Linux/Darwin"
@@ -152,55 +148,60 @@ print_stat_table() {
 }
 
 function check_discovery_runs() {
-   local rs
-   local mode
-   # mode = true, if discovery job is not running return 0
-   # mode = false, if discovery job is not running return 1
-   mode=$1
-   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION"  \
-    --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"$SOURCE_KS"'`] | [?"--SOURCE_TBL"==`'"$SOURCE_TBL"'`]' | jq 'length != 0')
+    local rs
+    local mode
+    # mode = true, if discovery job is not running return 0
+    # mode = false, if discovery job is not running return 1
+    mode=$1
+    rs=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" \
+        --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
 
-   if [[ $rs == "$mode" ]]; then
-       log "ERROR: The discovery job has failed, check AWS Glue logs"
-       exit 1
-   fi
-   return 0
+    if [[ $rs == "$mode" ]]; then
+        log "ERROR: The discovery job has failed, check AWS Glue logs"
+        exit 1
+    fi
+    return 0
 }
 
-sampler_running=false
-
-function check_sampler_runs() {
-   local rs
-   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION"  \
-    --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`sampler`] | [?"--SOURCE_KS"==`'"$SOURCE_KS"'`] | [?"--SOURCE_TBL"==`'"$SOURCE_TBL"'`]' | jq 'length != 0')
-   if [ "$rs" = "true" ]; then
-       sampler_running=true
-     else
-       sampler_running=false
-   fi
+function check_target_table_req() {
+    local current_mode
+    current_mode=$(aws keyspaces get-table --keyspace-name "${params[TARGET_KS]}" --table-name "${params[TARGET_TBL]}" \
+        --query 'capacitySpecification' --output json)
+    if [[ $(jq -r '.throughputMode' <<< "$current_mode") == "PROVISIONED" ]]; then
+        local provisioned_to
+        provisioned_to=$(jq -r '.writeCapacityUnits' <<< "$current_mode")
+        if [[ $provisioned_to -ge ${params[WCU_TRAFFIC]} ]]; then
+            log "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is provisioned to $provisioned_to WCUs per second"
+            log "The requested traffic is ${params[WCU_TRAFFIC]}"
+        else
+            log "The incoming traffic exceeds the provisioned capacity"
+        fi
+    else
+      log "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is on-demand mode"
+    fi
 }
 
 function check_replication_runs() {
    local tile
    local rs
    tile=$1
-   rs=$(aws glue get-job-runs --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION" \
-    --query 'length(JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`] | [?"--SOURCE_KS"==`'"$SOURCE_KS"'`] | [?"--SOURCE_TBL"==`'"$SOURCE_TBL"'`] | [?"--TILE"==`"'"$tile"'"`])')
+   rs=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" \
+    --query 'length(JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`] | [?"--TILE"==`"'"$tile"'"`])')
 
    if [ "${rs}" -ne 0 ]; then
-     log "ERROR: Replication job is already running per tile $tile for $SOURCE_KS.$SOURCE_TBL"
+     log "ERROR: Replication job is already running per tile $tile for ${params[SOURCE_KS]}.${params[SOURCE_TBL]}"
      log "$rs"
      return 1
-  fi
+   fi
    return 0
 }
 
 function check_num_tiles() {
-  if [[ $TILES -lt 1 ]]; then
-        log "Total number of tiles should be => 1"
-        exit 1
+  if [[ ${params[TILES]} -lt 1 ]]; then
+    log "Total number of tiles should be => 1"
+    exit 1
   fi
-    return 0
+  return 0
 }
 
 function progress {
@@ -222,9 +223,9 @@ function progress {
 }
 
 function check_file_exists() {
-  FILE=$1
-  if [ ! -f "$FILE" ]; then
-    log "File $FILE doesn't exists, please check place files correctly"
+  file=$1
+  if [ ! -f "$file" ]; then
+    log "File $file doesn't exists, please check place files correctly"
     exit 1
   fi
 }
@@ -239,7 +240,7 @@ function uploader_helper() {
       if ls "$path_to_conf/$artifact_name" > /dev/null
         then
           progress $next_pos $final_pos "Uploading $artifact_name                   "
-          aws s3 cp "$path_to_conf"/"$artifact_name" "$S3_LANDING_ZONE"/artifacts/"$artifact_name" --region "$AWS_REGION" > /dev/null
+          aws s3 cp "$path_to_conf"/"$artifact_name" "${params[S3_LANDING_ZONE]}"/artifacts/"$artifact_name" --region "${params[AWS_REGION]}" > /dev/null
         else
           log "ERROR: $path_to_conf/$artifact_name not found"
           exit 1
@@ -255,7 +256,7 @@ function uploader_jars() {
     file=$(basename "$link")
     progress "$cnt" "$total_artifacts" "Uploading jar artifacts"
     curl -s -O "$MAVEN_REPO""$link"
-    aws s3 cp "$file" "$S3_LANDING_ZONE"/artifacts/"$file" --region "$AWS_REGION" > /dev/null
+    aws s3 cp "$file" "${params[S3_LANDING_ZONE]}"/artifacts/"$file" --region "${params[AWS_REGION]}" > /dev/null
     rm "$file"
     ((cnt++))
   done
@@ -267,8 +268,7 @@ function join_array() {
     for item in "$@"; do
         joined_array+="${joined_array:+,}$item"
     done
-
-    S3_PATH_LIBS+="$joined_array"
+    params[S3_PATH_LIBS]+="$joined_array"
 }
 
 function barrier() {
@@ -276,14 +276,14 @@ function barrier() {
   while true
   do
     cnt=0
-    for (( tile=0; tile<"$TILES"; tile++ ))
+    for (( tile=0; tile<"${params[TILES]}"; tile++ ))
     do
-      if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$tile"/ --region "$AWS_REGION" > /dev/null
+      if aws s3 ls "${params[S3_LANDING_ZONE]}"/"${params[SOURCE_KS]}"/"${params[SOURCE_TBL]}"/stats/discovery/"$tile"/ --region "${params[AWS_REGION]}" > /dev/null
       then
         ((cnt++))
       fi
     done
-    if [[ $cnt == "$TILES" ]]; then
+    if [[ $cnt == "${params[TILES]}" ]]; then
       break
     fi
     if [[ $flag_check_discovery_run == "true" ]]; then
@@ -295,60 +295,100 @@ function barrier() {
 }
 
 function Usage_Exit {
-  echo "$0 [--state init/run/request-stop|--tiles number of tiles|--landing-zone s3Uri|--writetime-column col3|\
-  --src-keyspace keyspace_name|--src-table table_name|--trg-keyspace keyspace_name|--trg-table table_name]"
-  echo "Script version:" ${MIGRATOR_VERSION}
-  echo "init - Deploy CQLReplicator Glue job, and download jars"
-  echo "run - Start migration process"
-  echo "stats - Upload progress. Only for historical workload"
-  echo "request-stop - Stop migration process"
-  echo "cleanup - Delete all the CQLReplicator's artifacts"
+  echo "Usage: $0 [OPTIONS]"
+  echo "Script version: ${params[MIGRATOR_VERSION]}"
+  echo
+  echo "Options:"
+  echo "  --state STATE                    Set the state (init/run/request-stop/stats/cleanup/kill"
+  echo "  --tiles, --t NUMBER              Set the number of tiles"
+  echo "  --tile, --tl NUMBER              Set the tile number"
+  echo "  --worker-type, --wt TYPE         Set the worker type"
+  echo "  --discovery-worker-type, --dwt TYPE  Set the discovery worker type"
+  echo "  --override-discovery-workers, --odw NUMBER  Override discovery workers"
+  echo "  --landing-zone, --lz S3_URI      Set the S3 landing zone"
+  echo "  --main-script-landing, --msl     Enable main script landing"
+  echo "  --writetime-column, --wc COLUMN  Set the writetime column"
+  echo "  --ttl-column, --tc COLUMN        Set the TTL column"
+  echo "  --src-keyspace, --sk KEYSPACE    Set the source keyspace"
+  echo "  --src-table, --st TABLE          Set the source table"
+  echo "  --trg-keyspace, --tk KEYSPACE    Set the target keyspace"
+  echo "  --trg-table, --tt TABLE          Set the target table"
+  echo "  --inc-traffic, --it              Enable incremental traffic"
+  echo "  --custom-inc-traffic, --cit SECONDS  Set custom incremental traffic period"
+  echo "  --workload-type, --wlt TYPE      Set the default workload type: batch"
+  echo "  --region, --sr REGION            Set the AWS region"
+  echo "  --subnet, --ss SUBNET            Set the subnet"
+  echo "  --target-subnet, --ts SUBNET     Set the target subnet"
+  echo "  --security-groups, --sg GROUPS   Set the security groups"
+  echo "  --target-sg, --tsg GROUPS        Set the target security groups"
+  echo "  --glue-iam-role, --gir ROLE      Set the Glue IAM role"
+  echo "  --availability-zone, --az ZONE   Set the availability zone"
+  echo "  --target-az, --taz ZONE          Set the target availability zone"
+  echo "  --target-type, --ttp TYPE        Set the target type"
+  echo "  --json-mapping, --jm JSON        Set the JSON mapping configuration"
+  echo "  --start-replication-from, --srf TIME  Set the replication start time"
+  echo "  --override-rows-per-worker, --orw NUMBER  Override rows per worker"
+  echo "  --skip-glue-connector, --sgc     Skip Glue connector"
+  echo "  --skip-keyspaces-ledger, --skl   Skip Keyspaces ledger"
+  echo "  --replication-stats-enabled, --rse  Enable replication stats"
+  echo "  --enhanced-monitoring-enabled, --eme  Enable enhanced monitoring"
+  echo "  --safe-mode-disabled, --smd      Disable safe mode"
+  echo "  --skip-discovery, --sd           Skip discovery job"
+  echo "  --cqlreplicator-enviroment, --env ENV  Set CQLReplicator environment"
+  echo "  --cleanup-requested, --cr        Request cleanup"
+  echo
+  echo "States:"
+  echo "  init        Deploy CQLReplicator Glue job and download jars"
+  echo "  run         Start migration process"
+  echo "  stats       Upload progress (only for historical workload)"
+  echo "  request-stop  Stop migration process"
+  echo "  cleanup     Delete all CQLReplicator artifacts"
   exit 1
 }
 
 function Clean_Up {
-  check_input "$S3_LANDING_ZONE" "ERROR:landing zone parameter is empty, must be provided"
-  check_input "$AWS_REGION" "ERROR: AWS Region is empty, must be provided"
-  aws s3 rm "$S3_LANDING_ZONE" --recursive --region "$AWS_REGION"
-  aws s3 rb "$S3_LANDING_ZONE" --region "$AWS_REGION"
+  check_input "${params[S3_LANDING_ZONE]}" "ERROR: landing zone parameter is empty, must be provided"
+  check_input "${params[AWS_REGION]}" "ERROR: AWS Region is empty, must be provided"
+  aws s3 rm "${params[S3_LANDING_ZONE]}" --recursive --region "${params[AWS_REGION]}"
+  aws s3 rb "${params[S3_LANDING_ZONE]}" --region "${params[AWS_REGION]}"
   local connection_name
-  connection_name=$(aws glue get-job --job-name "CQLReplicator$DEFAULT_ENV" --query 'Job.Connections.Connections[0]' --output text)
-  aws glue delete-connection --connection-name "$connection_name" --region "$AWS_REGION" > /dev/null 2>&1
-  aws glue delete-connection --connection-name "cql-replicator-memorydb-integration$DEFAULT_ENV" --region "$AWS_REGION" > /dev/null 2>&1
-  aws glue delete-connection --connection-name "cql-replicator-opensearch-integration$DEFAULT_ENV" --region "$AWS_REGION" > /dev/null 2>&1
-  aws glue delete-job --job-name "CQLReplicator$DEFAULT_ENV" --region "$AWS_REGION"
-  if [[ $SKIP_KEYSPACES_LEDGER == false ]]; then
-    aws keyspaces delete-keyspace --keyspace-name migration --region "$AWS_REGION"
+  connection_name=$(aws glue get-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --query 'Job.Connections.Connections[0]' --output text)
+  aws glue delete-connection --connection-name "$connection_name" --region "${params[AWS_REGION]}" > /dev/null 2>&1
+  aws glue delete-connection --connection-name "cql-replicator-memorydb-integration${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null 2>&1
+  aws glue delete-connection --connection-name "cql-replicator-opensearch-integration${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null 2>&1
+  aws glue delete-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}"
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
+    aws keyspaces delete-keyspace --keyspace-name migration --region "${params[AWS_REGION]}"
   fi
 }
 
 function Init {
-  if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
-      check_input "$AZ" "ERROR:availability zone is, must be provided"
-      check_input "$SUBNET" "ERROR:subnet is empty, must be provided"
-      check_input "$SG" "ERROR:sg is empty, must be provided"
-  else
-      log "Skipping glue connector creation"
-  fi
-  check_input "$AWS_REGION" "ERROR:region is empty, must be provided"
-  log "TARGET TYPE: $TARGET_TYPE"
+  if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
+        check_input "${params[AZ]}" "ERROR: availability zone is, must be provided"
+        check_input "${params[SUBNET]}" "ERROR: subnet is empty, must be provided"
+        check_input "${params[SG]}" "ERROR: sg is empty, must be provided"
+    else
+        log "Skipping glue connector creation"
+    fi
+    check_input "${params[AWS_REGION]}" "ERROR: region is empty, must be provided"
+    log "TARGET TYPE: ${params[TARGET_TYPE]}"
 
-  AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --region "$AWS_REGION" --output text)
-  log "Starting initialization process for AWS account:$AWS_ACCOUNT"
-  # Create S3 bucket
-  if [[ -z $S3_LANDING_ZONE ]]; then
-      log "S3 LANDING ZONE is empty"
-      bucket=$(echo "cql-replicator-$AWS_ACCOUNT-$AWS_REGION$DEFAULT_ENV" | tr ' [:upper:]' ' [:lower:]')
-      S3_LANDING_ZONE="s3://""$bucket"
-      log "Creating a new S3 bucket: $S3_LANDING_ZONE"
-      if aws s3 mb "$S3_LANDING_ZONE" > /dev/null 2>&1
-      then
-        echo "$S3_LANDING_ZONE" > "working_bucket.dat"
-      else
-        log "ERROR: not able to create a S3 bucket: $S3_LANDING_ZONE"
-        exit 1
-      fi
-  fi
+    AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --region "${params[AWS_REGION]}" --output text)
+    log "Starting initialization process for AWS account: $AWS_ACCOUNT"
+    # Create S3 bucket
+    if [[ -z ${params[S3_LANDING_ZONE]} ]]; then
+        log "S3 LANDING ZONE is empty"
+        bucket=$(echo "cql-replicator-$AWS_ACCOUNT-${params[AWS_REGION]}${params[DEFAULT_ENV]}" | tr ' [:upper:]' ' [:lower:]')
+        params[S3_LANDING_ZONE]="s3://$bucket"
+        log "Creating a new S3 bucket: ${params[S3_LANDING_ZONE]}"
+        if aws s3 mb "${params[S3_LANDING_ZONE]}" > /dev/null 2>&1
+        then
+          echo "${params[S3_LANDING_ZONE]}" > "working_bucket.dat"
+        else
+          log "ERROR: not able to create a S3 bucket: ${params[S3_LANDING_ZONE]}"
+          exit 1
+        fi
+    fi
 
   # Uploading the jars
   ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar"
@@ -361,43 +401,45 @@ function Init {
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
   ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar" "/org/opensearch/driver/opensearch-sql-jdbc/1.4.0.1/opensearch-sql-jdbc-1.4.0.1.jar")
-  S3_PATH_BASE=("$S3_LANDING_ZONE/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "$S3_LANDING_ZONE/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
-  S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-retry-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-core-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/java-driver-metrics-micrometer-4.13.0.jar" "$S3_LANDING_ZONE/artifacts/micrometer-commons-1.10.4.jar" "$S3_LANDING_ZONE/artifacts/micrometer-core-1.10.4.jar" "$S3_LANDING_ZONE/artifacts/micrometer-observation-1.10.4.jar" "$S3_LANDING_ZONE/artifacts/micrometer-registry-cloudwatch-1.10.4.jar")
+  S3_PATH_BASE=("$S3_LANDING_ZONE/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-retry-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-core-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/java-driver-metrics-micrometer-4.13.0.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-commons-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-core-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-observation-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-registry-cloudwatch-1.10.4.jar")
   S3_PATH_MEMORYDB=("$S3_LANDING_ZONE/artifacts/jedis-4.4.6.jar")
-  S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "$S3_LANDING_ZONE/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
+  S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
 
   uploader_jars "${ARTIFACTS_BASE[@]}"
   join_array "${S3_PATH_BASE[@]}"
 
-  if [[ $TARGET_TYPE == "keyspaces" ]]; then
+  if [[ ${params[TARGET_TYPE]} == "keyspaces" ]]; then
     uploader_jars "${ARTIFACTS_KEYSPACES[@]}"
     S3_PATH_LIBS+=","
     join_array "${S3_PATH_KEYSPACES[@]}"
   fi
 
-  if [[ $TARGET_TYPE == "memorydb" ]]; then
+  if [[ ${params[TARGET_TYPE]} == "memorydb" ]]; then
     uploader_jars "${ARTIFACTS_MEMORYDB[@]}"
     S3_PATH_LIBS+=","
     join_array "${S3_PATH_MEMORYDB[@]}"
   fi
 
-  if [[ $TARGET_TYPE == "opensearch" ]]; then
+  if [[ ${params[TARGET_TYPE]} == "opensearch" ]]; then
     uploader_jars "${ARTIFACTS_OSS[@]}"
     S3_PATH_LIBS+=","
     join_array "${S3_PATH_OSS[@]}"
   fi
 
+  params[S3_PATH_LIBS]="$S3_PATH_LIBS"
+
   # Uploading the config files
   local path_to_conf
   local path_to_scala
-  path_to_conf=$(ls -d "$BASE_FOLDER" | sed 's/bin/conf/g')
-  path_to_scala=$(ls -d "$BASE_FOLDER" | sed 's/bin/sbin/g')"/$TARGET_TYPE"
+  path_to_conf=$(ls -d "${params[BASE_FOLDER]}" | sed 's/bin/conf/g')
+  path_to_scala=$(ls -d "${params[BASE_FOLDER]}" | sed 's/bin/sbin/g')"/${params[TARGET_TYPE]}"
 
-  if [[ $TARGET_TYPE == "memorydb" ]]; then
+  if [[ ${params[TARGET_TYPE]} == "memorydb" ]]; then
     uploader_helper "RedisConnector.conf" 0 1 5
   fi
 
-  if [[ $TARGET_TYPE == "opensearch" ]]; then
+  if [[ ${params[TARGET_TYPE]} == "opensearch" ]]; then
     uploader_helper "OpenSearchConnector.conf" 0 1 5
   fi
 
@@ -408,22 +450,22 @@ function Init {
   uploader_helper "CassandraConnector.conf" 1 2 5
 
   local glue_bucket_artifacts
-  if [[ "$MAIN_SCRIPT_LANDING" = false ]]; then
-    glue_bucket_artifacts=s3://aws-glue-assets-"$AWS_ACCOUNT"-"$AWS_REGION"
+  if [[ "${params[MAIN_SCRIPT_LANDING]}" = false ]]; then
+    glue_bucket_artifacts=s3://aws-glue-assets-"$AWS_ACCOUNT"-"${params[AWS_REGION]}"
   else
-    glue_bucket_artifacts="$S3_LANDING_ZONE"
+    glue_bucket_artifacts="${params[S3_LANDING_ZONE]}"
   fi
 
-  if aws s3 ls "$glue_bucket_artifacts"/scripts/ --region "$AWS_REGION" > /dev/null --region "$AWS_REGION"
+  if aws s3 ls "$glue_bucket_artifacts"/scripts/ --region "${params[AWS_REGION]}" > /dev/null --region "${params[AWS_REGION]}"
   then
-    aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator$DEFAULT_ENV.scala --region "$AWS_REGION" > /dev/null
+    aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala --region "${params[AWS_REGION]}" > /dev/null
   else
-    aws s3 mb "$glue_bucket_artifacts" --region "$AWS_REGION" > /dev/null 2>&1
+    aws s3 mb "$glue_bucket_artifacts" --region "${params[AWS_REGION]}" > /dev/null 2>&1
     sleep 25
     if ls "$path_to_scala"/CQLReplicator.scala
     then
       progress 3 5 "Uploading CQLReplicator.scala                  "
-      aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/CQLReplicator$DEFAULT_ENV.scala --region "$AWS_REGION" > /dev/null
+      aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala --region "${params[AWS_REGION]}" > /dev/null
     else
       log "ERROR: $path_to_scala/CQLReplicator.scala not found"
       exit 1
@@ -433,100 +475,99 @@ function Init {
   # Create Glue Connector
   local glue_conn_name
   local enhanced_monitoring=""
-  if [[ "$GLUE_MONITORING" == true ]]; then
+  if [[ "${params[GLUE_MONITORING]}" == true ]]; then
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
   fi
 
-  if [[ $SKIP_GLUE_CONNECTOR == false ]]; then
+  if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
       progress 3 5 "Creating Glue artifacts                             "
       glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
       aws glue create-connection --connection-input '{
-         "Name":"'$glue_conn_name$DEFAULT_ENV'",
+         "Name":"'$glue_conn_name${params[DEFAULT_ENV]}'",
          "Description":"CQLReplicator connection to the C* cluster",
          "ConnectionType":"NETWORK",
          "ConnectionProperties":{
            "JDBC_ENFORCE_SSL": "false"
            },
          "PhysicalConnectionRequirements":{
-           "SubnetId":"'$SUBNET'",
-           "SecurityGroupIdList":['$SG'],
-           "AvailabilityZone":"'$AZ'"}
-           }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
+           "SubnetId":"'${params[SUBNET]}'",
+           "SecurityGroupIdList":['${params[SG]}'],
+           "AvailabilityZone":"'${params[AZ]}'"}
+           }' --region "${params[AWS_REGION]}" --endpoint https://glue."${params[AWS_REGION]}".amazonaws.com --output json
 
-       if [[ $TARGET_TYPE == "opensearch" || $TARGET_TYPE == "memorydb" ]]; then
-         check_input "$TRG_SUBNET" "ERROR: subnet for $TARGET_TYPE is empty, must be provided"
-         check_input "$TRG_SG" "ERROR: sg for $TARGET_TYPE is empty, must be provided"
-         check_input "$TRG_AZ" "ERROR: az for $TARGET_TYPE is empty, must be provided"
-         glue_conn_name_oss="cql-replicator-$TARGET_TYPE-integration"
-         glue_conn_name="$glue_conn_name$DEFAULT_ENV,$glue_conn_name_oss"
+       if [[ ${params[TARGET_TYPE]} == "opensearch" || ${params[TARGET_TYPE]} == "memorydb" ]]; then
+         check_input "${params[TRG_SUBNET]}" "ERROR: subnet for ${params[TARGET_TYPE]} is empty, must be provided"
+         check_input "${params[TRG_SG]}" "ERROR: sg for ${params[TARGET_TYPE]} is empty, must be provided"
+         check_input "${params[TRG_AZ]}" "ERROR: az for ${params[TARGET_TYPE]} is empty, must be provided"
+         glue_conn_name_oss="cql-replicator-${params[TARGET_TYPE]}-integration"
+         glue_conn_name="$glue_conn_name${params[DEFAULT_ENV]},$glue_conn_name_oss"
 
          aws glue create-connection --connection-input '{
-          "Name":"'$glue_conn_name_oss$DEFAULT_ENV'",
-          "Description":"CQLReplicator connection to '$TARGET_TYPE'",
+          "Name":"'$glue_conn_name_oss${params[DEFAULT_ENV]}'",
+          "Description":"CQLReplicator connection to '${params[TARGET_TYPE]}'",
           "ConnectionType":"NETWORK",
           "ConnectionProperties":{
             "JDBC_ENFORCE_SSL": "false"
           },
           "PhysicalConnectionRequirements":{
-            "SubnetId":"'$TRG_SUBNET'",
-            "SecurityGroupIdList":['$TRG_SG'],
-            "AvailabilityZone":"'$TRG_AZ'"}
-          }' --region "$AWS_REGION" --endpoint https://glue."$AWS_REGION".amazonaws.com --output json
-
+            "SubnetId":"'${params[TRG_SUBNET]}'",
+            "SecurityGroupIdList":['${params[TRG_SG]}'],
+            "AvailabilityZone":"'${params[TRG_AZ]}'"}
+          }' --region "${params[AWS_REGION]}" --endpoint https://glue."${params[AWS_REGION]}".amazonaws.com --output json
        fi
 
        aws glue create-job \
-           --name "CQLReplicator$DEFAULT_ENV" \
-           --role "$GLUE_IAM_ROLE" \
-           --description "$DESCRIPTION for $TARGET_TYPE" \
+           --name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
+           --role "${params[GLUE_IAM_ROLE]}" \
+           --description "${params[DESCRIPTION]} for ${params[TARGET_TYPE]}" \
            --glue-version "4.0" \
            --number-of-workers 2 \
-           --worker-type "$WORKER_TYPE" \
-           --connections "Connections=$glue_conn_name$DEFAULT_ENV" \
-           --command "Name=$GLUE_TYPE,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator$DEFAULT_ENV.scala" \
-           --execution-property '{"MaxConcurrentRuns": 32}' \
+           --worker-type "${params[WORKER_TYPE]}" \
+           --connections "Connections=$glue_conn_name${params[DEFAULT_ENV]}" \
+           --command "Name=${params[GLUE_TYPE]},ScriptLocation=$glue_bucket_artifacts/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala" \
+           --execution-property '{"MaxConcurrentRuns": 64}' \
            --max-retries 1 \
-           --region "$AWS_REGION" \
+           --region "${params[AWS_REGION]}" \
            --default-arguments '{
                "--job-language":"scala",
-               "--extra-jars":"'$S3_PATH_LIBS'",
-               "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
+               "--extra-jars":"'${params[S3_PATH_LIBS]}'",
+               "--conf":"spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
                "--class":"GlueApp"
                '$enhanced_monitoring'
            }' > /dev/null
    fi
 
-  if [[ $SKIP_GLUE_CONNECTOR == true ]]; then
-      progress 3 5 "Creating Glue artifacts                             "
-      aws glue create-job \
-          --name "CQLReplicator$DEFAULT_ENV" \
-          --role "$GLUE_IAM_ROLE" \
-          --description "$DESCRIPTION -> $TARGET_TYPE" \
-          --glue-version "4.0" \
-          --number-of-workers 2 \
-          --worker-type "$WORKER_TYPE" \
-          --command "Name=$GLUE_TYPE,ScriptLocation=$glue_bucket_artifacts/scripts/CQLReplicator$DEFAULT_ENV.scala" \
-          --execution-property '{"MaxConcurrentRuns": 32}' \
-          --max-retries 1 \
-          --region "$AWS_REGION" \
-          --default-arguments '{
-              "--job-language":"scala",
-              "--extra-jars":"'$S3_PATH_LIBS'",
-              "--conf":"spark.files='$S3_LANDING_ZONE'/artifacts/KeyspacesConnector.conf,'$S3_LANDING_ZONE'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
-              "--class":"GlueApp"
-              '$enhanced_monitoring'
-              }' > /dev/null
-  fi
+  if [[ ${params[SKIP_GLUE_CONNECTOR]} == true ]]; then
+        progress 3 5 "Creating Glue artifacts                             "
+        aws glue create-job \
+            --name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
+            --role "${params[GLUE_IAM_ROLE]}" \
+            --description "${params[DESCRIPTION]} -> ${params[TARGET_TYPE]}" \
+            --glue-version "4.0" \
+            --number-of-workers 2 \
+            --worker-type "${params[WORKER_TYPE]}" \
+            --command "Name=${params[GLUE_TYPE]},ScriptLocation=${params[glue_bucket_artifacts]}/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala" \
+            --execution-property '{"MaxConcurrentRuns": 64}' \
+            --max-retries 1 \
+            --region "${params[AWS_REGION]}" \
+            --default-arguments '{
+                "--job-language":"scala",
+                "--extra-jars":"'${params[S3_PATH_LIBS]}'",
+                "--conf":"spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
+                "--class":"GlueApp"
+                '${params[enhanced_monitoring]}'
+                }' > /dev/null
+    fi
 
-  if [[ $SKIP_KEYSPACES_LEDGER == true ]]; then
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == true ]]; then
     progress 4 5 "Skipping CQLReplicator's internal keyspace          "
     progress 5 5 "Skipping CQLReplicator's internal table             "
   fi
 
-  if [[ $SKIP_KEYSPACES_LEDGER == false ]]; then
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
     progress 4 5 "Creating CQLReplicator's internal resources         "
     # Create a keyspace - migration
-    aws keyspaces create-keyspace --keyspace-name migration --region "$AWS_REGION" > /dev/null
+    aws keyspaces create-keyspace --keyspace-name migration --region "${params[AWS_REGION]}" > /dev/null
     sleep 20
 
     # Create a table - ledger
@@ -541,7 +582,7 @@ function Init {
     { "name": "location", "type": "text" },
     { "name": "offload_status", "type": "text" } ],
     "partitionKeys": [ { "name": "ks" }, { "name": "tbl" } ],
-    "clusteringKeys": [ { "name": "tile", "orderBy": "ASC" }, { "name": "ver", "orderBy": "ASC" } ] }' --region "$AWS_REGION" > /dev/null
+    "clusteringKeys": [ { "name": "tile", "orderBy": "ASC" }, { "name": "ver", "orderBy": "ASC" } ] }' --region "${params[AWS_REGION]}" > /dev/null
   progress 5 5 "Created the CQLReplicator internal resources        "
 fi
 
@@ -549,37 +590,37 @@ log "Deploy is completed"
 }
 
 function Start_Sampler {
-  check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
-  check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
-  check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
-  check_input "$AWS_REGION" "ERROR: aws region must be provided"
-  log "SOURCE:" "$SOURCE_KS"."$SOURCE_TBL"
-  log "LANDING ZONE:" "$S3_LANDING_ZONE"
-  log "WORKER_TYPE: $WORKER_TYPE"
+  check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"
+  check_input "${params[S3_LANDING_ZONE]}" "ERROR: landing zone must be provided"
+  check_input "${params[AWS_REGION]}" "ERROR: aws region must be provided"
+  log "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"
+  log "LANDING ZONE:" "${params[S3_LANDING_ZONE]}"
+  log "WORKER_TYPE: ${params[WORKER_TYPE]}"
   check_sampler_runs
-  if [ "$sampler_running" = false ]; then
-    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "G.025X" --number-of-workers 10 --region "$AWS_REGION" --arguments '{
-          "--PROCESS_TYPE":"'$PROCESS_TYPE_SAMPLER'",
+  if [ "${params[SAMPLER_RUNNING]}" = false ]; then
+    rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "G.025X" --number-of-workers 10 --region "${params[AWS_REGION]}" --arguments '{
+          "--PROCESS_TYPE":"'${params[PROCESS_TYPE_SAMPLER]}'",
           "--TILE":"0",
           "--TOTAL_TILES":"1",
-          "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
-          "--SOURCE_KS":"'$SOURCE_KS'",
-          "--SOURCE_TBL":"'$SOURCE_TBL'",
-          "--TARGET_KS":"'$SOURCE_KS'",
-          "--TARGET_TBL":"'$SOURCE_TBL'",
-          "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
-          "--SAFE_MODE":"'$SAFE_MODE'",
-          "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
-          "--CLEANUP_REQUESTED":"'$CLEANUP_REQUESTED'",
+          "--S3_LANDING_ZONE":"'${params[S3_LANDING_ZONE]}'",
+          "--SOURCE_KS":"'${params[SOURCE_KS]}'",
+          "--SOURCE_TBL":"'${params[SOURCE_TBL]}'",
+          "--TARGET_KS":"'${params[SOURCE_KS]}'",
+          "--TARGET_TBL":"'${params[SOURCE_TBL]}'",
+          "--WRITETIME_COLUMN":"'${params[WRITETIME_COLUMN]}'",
+          "--SAFE_MODE":"'${params[SAFE_MODE]}'",
+          "--REPLICATION_POINT_IN_TIME":"'${params[REPLICATION_POINT_IN_TIME]}'",
+          "--CLEANUP_REQUESTED":"'${params[CLEANUP_REQUESTED]}'",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
-          "--REPLAY_LOG":"'$REPLAY_LOG'",
-          "--TTL_COLUMN":"'$TTL_COLUMN'",
-          "--WORKLOAD_TYPE":"'$DEFAULT_WORKLOAD_TYPE'"}' --output text)
+          "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
+          "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
+          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
     check_sampler_runs
     local delay=0.1
     local spinstr='|/-\'
     output="Glue job $rs is running"
-    while [ "$sampler_running" = true ]; do
+    while [ "${params[SAMPLER_RUNNING]}" = true ]; do
       local temp=${spinstr#?}
       printf "\r%s [%c]  " "$output" "$spinstr"
       local spinstr=$temp${spinstr%"$temp"}
@@ -587,143 +628,160 @@ function Start_Sampler {
       check_sampler_runs
     done
     printf "\r%s    \n" "$output"
-    sampled_result=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/columnStats/stats.json --region "$AWS_REGION" -)
+    sampled_result=$(aws s3 cp "${params[S3_LANDING_ZONE]}"/"${params[SOURCE_KS]}"/"${params[SOURCE_TBL]}"/columnStats/stats.json --region "${params[AWS_REGION]}" -)
     echo "$sampled_result"
   fi
 }
 
 function Start_Discovery {
-  check_input "$TILES" "ERROR: tiles parameter is empty, must be provided"
-  check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
-  check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
-  check_input "$TARGET_KS" "ERROR: target keyspace name is empty, must be provided"
-  check_input "$TARGET_TBL" "ERROR: target table name is empty, must be provided"
-  check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
-  check_input "$AWS_REGION" "ERROR: aws region must be provided"
+  check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"
+  check_input "${params[TARGET_KS]}" "ERROR: target keyspace name is empty, must be provided"
+  check_input "${params[TARGET_TBL]}" "ERROR: target table name is empty, must be provided"
+  check_input "${params[S3_LANDING_ZONE]}" "ERROR: landing zone must be provided"
+  check_input "${params[AWS_REGION]}" "ERROR: aws region must be provided"
+  check_target_table_req
   check_num_tiles
 
-  log "TILES:" "$TILES"
-  log "SOURCE:" "$SOURCE_KS"."$SOURCE_TBL"
-  log "TARGET:" "$TARGET_KS"."$TARGET_TBL"
-  log "LANDING ZONE:" "$S3_LANDING_ZONE"
-  log "WRITE TIME COLUMN:" $WRITETIME_COLUMN
-  log "TTL COLUMN:" $TTL_COLUMN
-  log "ROWS PER DPU:" $ROWS_PER_WORKER
-  log "START REPLICATING FROM: $REPLICATION_POINT_IN_TIME (0 is disabled)"
-  log "SAFE MODE: $SAFE_MODE"
-  log "WORKER_TYPE: $WORKER_TYPE"
+  log "TILES:" "${params[TILES]}"
+  log "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"
+  log "TARGET:" "${params[TARGET_KS]}"."${params[TARGET_TBL]}"
+  log "LANDING ZONE:" "${params[S3_LANDING_ZONE]}"
+  log "WRITE TIME COLUMN:" ${params[WRITETIME_COLUMN]}
+  log "TTL COLUMN:" ${params[TTL_COLUMN]}
+  log "ROWS PER DPU:" ${params[ROWS_PER_WORKER]}
+  log "START REPLICATING FROM: ${params[REPLICATION_POINT_IN_TIME]} (0 is disabled)"
+  log "SAFE MODE: ${params[SAFE_MODE]}"
+  log "DEFAULT WORKER TYPE: ${params[WORKER_TYPE]}"
   local workers=0
-  if [[ $OVERRIDE_DISCOVERY_WORKERS == 0 ]]; then
+  if [[ ${params[OVERRIDE_DISCOVERY_WORKERS]} == 0 ]]; then
     max_value2=2
-    max_value1=$((1 + TILES / 2))
+    max_value1=$((1 + ${params[TILES]}))
     workers=$(max_value $max_value1 $max_value2)
   else
-    workers=$OVERRIDE_DISCOVERY_WORKERS
+    workers=${params[OVERRIDE_DISCOVERY_WORKERS]}
   fi
   log "Checking if the discovery job is already running..."
-  if [[ $CLEANUP_REQUESTED == "true" ]]; then
+  if [[ ${params[CLEANUP_REQUESTED]} == "true" ]]; then
     log "The ledger is going to be cleaned up"
     confirm "<=== Do you want to continue? ===> "
-    log "Deleting objects in $S3_LANDING_ZONE/$SOURCE_KS/$SOURCE_TBL..."
-    aws s3 rm "$S3_LANDING_ZONE/$SOURCE_KS/$SOURCE_TBL" --recursive --region "$AWS_REGION" > /dev/null 2>&1
+    log "Deleting objects in ${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}..."
+    aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}" --recursive --region "${params[AWS_REGION]}" > /dev/null 2>&1
   fi
   if check_discovery_runs "true"; then
     Delete_Stop_Event_D
     log "Starting the discovery job..."
-    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "$DISCOVERY_WORKER_TYPE" --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_DISCOVERY'",
+    rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "${params[DISCOVERY_WORKER_TYPE]}" --number-of-workers "$workers" --region "${params[AWS_REGION]}" --arguments '{"--PROCESS_TYPE":"'${params[PROCESS_TYPE_DISCOVERY]}'",
         "--TILE":"0",
-        "--TOTAL_TILES":"'$TILES'",
-        "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
-        "--SOURCE_KS":"'$SOURCE_KS'",
-        "--SOURCE_TBL":"'$SOURCE_TBL'",
-        "--TARGET_KS":"'$TARGET_KS'",
-        "--TARGET_TBL":"'$TARGET_TBL'",
-        "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
-        "--SAFE_MODE":"'$SAFE_MODE'",
-        "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
-        "--CLEANUP_REQUESTED":"'$CLEANUP_REQUESTED'",
+        "--TOTAL_TILES":"'${params[TILES]}'",
+        "--S3_LANDING_ZONE":"'${params[S3_LANDING_ZONE]}'",
+        "--SOURCE_KS":"'${params[SOURCE_KS]}'",
+        "--SOURCE_TBL":"'${params[SOURCE_TBL]}'",
+        "--TARGET_KS":"'${params[TARGET_KS]}'",
+        "--TARGET_TBL":"'${params[TARGET_TBL]}'",
+        "--WRITETIME_COLUMN":"'${params[WRITETIME_COLUMN]}'",
+        "--SAFE_MODE":"'${params[SAFE_MODE]}'",
+        "--REPLICATION_POINT_IN_TIME":"'${params[REPLICATION_POINT_IN_TIME]}'",
+        "--CLEANUP_REQUESTED":"'${params[CLEANUP_REQUESTED]}'",
         "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
-        "--REPLAY_LOG":"'$REPLAY_LOG'",
-        "--TTL_COLUMN":"'$TTL_COLUMN'",
-        "--WORKLOAD_TYPE":"'$DEFAULT_WORKLOAD_TYPE'"}' --output text)
+        "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
+        "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
+        "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
      JOBS+=("$rs")
   fi
 }
 
+function Kill_Replication {
+    local process_type="$1"
+
+    rs=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}"  \
+        --query 'JobRuns[?JobRunState==`RUNNING`] | [].{Id: Id, Arguments: Arguments} | [?Arguments."--PROCESS_TYPE"==`'"${process_type}"'`] | [?Arguments."--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?Arguments."--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' |  jq -r '.[].Id')
+
+    for job_id in $rs; do
+      aws glue batch-stop-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --job-run-ids "$job_id" --region "${params[AWS_REGION]}"
+    done
+}
+
 function Start_Replication {
   cnt=0
-  KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys')
+  KEYS_PER_TILE=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/discovery/$cnt/count.json" --region "${params[AWS_REGION]}" - | head | jq '.primaryKeys')
   log "Sampled primary keys per tile is $KEYS_PER_TILE"
-  local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
+  local workers=$(( 2 + KEYS_PER_TILE/${params[ROWS_PER_WORKER]} ))
   if [[ workers -gt 299 ]]; then
     log "=== The total number of Glue workers are over 299 per each tile (glue job), you have two options:                  ==="
     log "=== [1] Increase the number of tiles. In order to rerun with the higher number of tiles                            ==="
     log "=== request a stop for this migration process, and after rerun again with the flag --cleanup-requested             ==="
     log "======================================================================================================================"
-    log "=== [2] Increase the number of primary keys per worker. Default value is $ROWS_PER_WORKER per worker                         ==="
+    log "=== [2] Increase the number of primary keys per worker. Default value is ${params[ROWS_PER_WORKER]} per worker                         ==="
     log "=== request a stop for this migration process and rerun again with the flag --override-rows-per-worker <new value> ==="
     exit 1
   fi
-  while [ $cnt -lt $TILES ]
+  while [ $cnt -lt ${params[TILES]} ]
   do
     if check_replication_runs $cnt; then
       Delete_Stop_Event_R $cnt
-      rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "$WORKER_TYPE" --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
+      if [ "${params[WCU_TRAFFIC]}" -gt 0 ]; then
+          workers=${params[DEFAULT_WORKERS]}
+      fi
+      rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "${params[WORKER_TYPE]}" --number-of-workers "$workers" --region "${params[AWS_REGION]}" --arguments '{"--PROCESS_TYPE":"'${params[PROCESS_TYPE_REPLICATION]}'",
           "--TILE":"'$cnt'",
-          "--TOTAL_TILES":"'$TILES'",
-          "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
-          "--SOURCE_KS":"'$SOURCE_KS'",
-          "--SOURCE_TBL":"'$SOURCE_TBL'",
-          "--TARGET_KS":"'$TARGET_KS'",
-          "--TARGET_TBL":"'$TARGET_TBL'",
-          "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
-          "--SAFE_MODE":"'$SAFE_MODE'",
-          "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
+          "--TOTAL_TILES":"'${params[TILES]}'",
+          "--S3_LANDING_ZONE":"'${params[S3_LANDING_ZONE]}'",
+          "--SOURCE_KS":"'${params[SOURCE_KS]}'",
+          "--SOURCE_TBL":"'${params[SOURCE_TBL]}'",
+          "--TARGET_KS":"'${params[TARGET_KS]}'",
+          "--TARGET_TBL":"'${params[TARGET_TBL]}'",
+          "--WRITETIME_COLUMN":"'${params[WRITETIME_COLUMN]}'",
+          "--SAFE_MODE":"'${params[SAFE_MODE]}'",
+          "--REPLICATION_POINT_IN_TIME":"'${params[REPLICATION_POINT_IN_TIME]}'",
           "--CLEANUP_REQUESTED":"false",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
-          "--REPLAY_LOG":"'$REPLAY_LOG'",
-          "--TTL_COLUMN":"'$TTL_COLUMN'",
-          "--WORKLOAD_TYPE":"'$DEFAULT_WORKLOAD_TYPE'"}' --output text)
+          "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
+          "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
+          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
        JOBS+=("$rs")
-      sleep $COOLING_PERIOD
+      sleep ${params[COOLING_PERIOD]}
     fi
     ((cnt++))
-    progress "$cnt" "$TILES" "Starting Glue Jobs"
+    progress "$cnt" "${params[TILES]}" "Starting Glue Jobs"
   done
 }
 
 function Start_Single_Replication {
-  cnt=$TILE
-  KEYS_PER_TILE=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/discovery/"$cnt"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys')
+  cnt=${params[TILE]}
+  KEYS_PER_TILE=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/discovery/$cnt/count.json" --region "${params[AWS_REGION]}" - | head | jq '.primaryKeys')
   log "Sampled primary keys per tile is $KEYS_PER_TILE"
-  local workers=$(( 2 + KEYS_PER_TILE/ROWS_PER_WORKER ))
+  local workers=$(( 2 + KEYS_PER_TILE/${params[ROWS_PER_WORKER]} ))
   if [[ workers -gt 299 ]]; then
     log "=== The total number of Glue workers are over 299 per each tile (glue job), you have two options:                  ==="
     log "=== [1] Increase the number of tiles. In order to rerun with the higher number of tiles                            ==="
     log "=== request a stop for this migration process, and after rerun again with the flag --cleanup-requested             ==="
     log "======================================================================================================================"
-    log "=== [2] Increase the number of primary keys per worker. Default value is $ROWS_PER_WORKER per worker                         ==="
+    log "=== [2] Increase the number of primary keys per worker. Default value is ${params[ROWS_PER_WORKER]} per worker                         ==="
     log "=== request a stop for this migration process and rerun again with the flag --override-rows-per-worker <new value> ==="
     exit 1
   fi
   if check_replication_runs "$cnt"; then
     Delete_Stop_Event_R "$cnt"
-    rs=$(aws glue start-job-run --job-name "$JOB_NAME$DEFAULT_ENV" --worker-type "$WORKER_TYPE" --number-of-workers "$workers" --region "$AWS_REGION" --arguments '{"--PROCESS_TYPE":"'$PROCESS_TYPE_REPLICATION'",
+    if [ "${params[WCU_TRAFFIC]}" -gt 0 ]; then
+        workers=${params[DEFAULT_WORKERS]}
+    fi
+    rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "${params[WORKER_TYPE]}" --number-of-workers "$workers" --region "${params[AWS_REGION]}" --arguments '{"--PROCESS_TYPE":"'${params[PROCESS_TYPE_REPLICATION]}'",
           "--TILE":"'$cnt'",
-          "--TOTAL_TILES":"'$TILES'",
-          "--S3_LANDING_ZONE":"'$S3_LANDING_ZONE'",
-          "--SOURCE_KS":"'$SOURCE_KS'",
-          "--SOURCE_TBL":"'$SOURCE_TBL'",
-          "--TARGET_KS":"'$TARGET_KS'",
-          "--TARGET_TBL":"'$TARGET_TBL'",
-          "--WRITETIME_COLUMN":"'$WRITETIME_COLUMN'",
-          "--SAFE_MODE":"'$SAFE_MODE'",
-          "--REPLICATION_POINT_IN_TIME":"'$REPLICATION_POINT_IN_TIME'",
+          "--TOTAL_TILES":"'${params[TILES]}'",
+          "--S3_LANDING_ZONE":"'${params[S3_LANDING_ZONE]}'",
+          "--SOURCE_KS":"'${params[SOURCE_KS]}'",
+          "--SOURCE_TBL":"'${params[SOURCE_TBL]}'",
+          "--TARGET_KS":"'${params[TARGET_KS]}'",
+          "--TARGET_TBL":"'${params[TARGET_TBL]}'",
+          "--WRITETIME_COLUMN":"'${params[WRITETIME_COLUMN]}'",
+          "--SAFE_MODE":"'${params[SAFE_MODE]}'",
+          "--REPLICATION_POINT_IN_TIME":"'${params[REPLICATION_POINT_IN_TIME]}'",
           "--CLEANUP_REQUESTED":"false",
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
-          "--REPLAY_LOG":"'$REPLAY_LOG'",
-          "--TTL_COLUMN":"'$TTL_COLUMN'",
-          "--WORKLOAD_TYPE":"'$DEFAULT_WORKLOAD_TYPE'"}' --output text)
+          "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
+          "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
+          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
     JOBS+=("$rs")
   fi
 }
@@ -765,36 +823,61 @@ function validate_json() {
 }
 
 function Delete_Stop_Event_D {
-  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested" --region "$AWS_REGION"
-  # Debug
-  # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested"
+  aws s3api delete-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/discovery/stopRequested" --region "${params[AWS_REGION]}"
 }
 
 function Delete_Stop_Event_R {
-  aws s3api delete-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested" --region "$AWS_REGION"
-  # Debug
-  # log "s3://${S3_LANDING_ZONE:5}/$SOURCE_KS/$SOURCE_TBL/replication/$1/stopRequested"
+  aws s3api delete-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$1/stopRequested" --region "${params[AWS_REGION]}"
 }
 
 function Request_Stop {
   tile=0
   log "Requested a stop for the discovery job"
 
-  if aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/discovery/stopRequested" --region "$AWS_REGION" >/dev/null
+  if aws s3api put-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/discovery/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
   then
-    while [ $tile -lt $TILES ]
+    while [ $tile -lt ${params[TILES]} ]
     do
       log "Requested a stop for the replication tile: $tile"
-      aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested" --region "$AWS_REGION" >/dev/null
+      aws s3api put-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$tile/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
       ((tile++))
     done
   fi
 }
 
 function Request_Single_Stop {
-  tile=$TILE
+  tile=${params[TILE]}
   log "Requested a stop for the replication tile: $tile"
-  aws s3api put-object --bucket "${S3_LANDING_ZONE:5}" --key "$SOURCE_KS/$SOURCE_TBL/replication/$tile/stopRequested" --region "$AWS_REGION" >/dev/null
+  aws s3api put-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$tile/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
+}
+
+calculate_resources() {
+  local workers=0
+  local drps=${params[DEFAULT_ROWS_PER_SECOND]}
+  local tiles=${params[TILES]}
+  local wcu=${params[WCU_TRAFFIC]}
+  if [ -z "${params[WCU_TRAFFIC]}" ]; then
+    echo "Error: WCU_TRAFFIC is not set"
+    return 1
+  fi
+
+  if [ "${params[WCU_TRAFFIC]}" -le 5000 ]; then
+    k=-1
+    params[WORKER_TYPE]="G.025X"
+    f=$(( drps * tiles ))
+    workers=$(( (wcu + f - 1) / f - k ))
+  elif [ ${params[WCU_TRAFFIC]} -le 10000 ]; then
+    k=-1
+    params[WORKER_TYPE]="G.025X"
+    f=$(( drps * tiles ))
+    workers=$(( (wcu + f - 1) / f - k ))
+  elif [ ${params[WCU_TRAFFIC]} -ge 10000 ]; then
+    k=1
+    params[WORKER_TYPE]="G.1X"
+    f=$(( drps * tiles ))
+    workers=$(( (wcu + f - 1) / f - k ))
+  fi
+  params[DEFAULT_WORKERS]=$workers
 }
 
 (( $#<1 )) && Usage_Exit
@@ -802,180 +885,187 @@ function Request_Single_Stop {
 while (( "$#" )); do
   case "$1" in
     --state)
-      STATE="$2"
+      params[STATE]="$2"
       shift 2
       ;;
     --tiles|--t)
-      TILES="$2"
+      params[TILES]="$2"
       shift 2
       ;;
     --tile|--tl)
-      TILE="$2"
+      params[TILE]="$2"
       shift 2
       ;;
     --worker-type|--wt)
-      WORKER_TYPE="$2"
+      params[WORKER_TYPE]="$2"
       shift 2
       ;;
     --discovery-worker-type|--dwt)
-      DISCOVERY_WORKER_TYPE="$2"
+      params[DISCOVERY_WORKER_TYPE]="$2"
       shift 2
       ;;
     --override-discovery-workers|--odw)
-      OVERRIDE_DISCOVERY_WORKERS="$2"
+      params[OVERRIDE_DISCOVERY_WORKERS]="$2"
       shift 2
       ;;
     --landing-zone|--lz)
-      S3_LANDING_ZONE="$2"
+      params[S3_LANDING_ZONE]="$2"
       shift 2
       ;;
     --main-script-landing|--msl)
-      MAIN_SCRIPT_LANDING="true"
+      params[MAIN_SCRIPT_LANDING]="true"
       shift 1
       ;;
     --writetime-column|--wc)
-      WRITETIME_COLUMN="$2"
+      params[WRITETIME_COLUMN]="$2"
       shift 2
       ;;
     --ttl-column|--tc)
-      TTL_COLUMN="$2"
+      params[TTL_COLUMN]="$2"
       shift 2
       ;;
     --src-keyspace|--sk)
-      SOURCE_KS="$2"
+      params[SOURCE_KS]="$2"
       shift 2
       ;;
     --src-table|--st)
-      SOURCE_TBL="$2"
+      params[SOURCE_TBL]="$2"
       shift 2
       ;;
     --trg-keyspace|--tk)
-      TARGET_KS="$2"
+      params[TARGET_KS]="$2"
       shift 2
       ;;
     --trg-table|--tt)
-      TARGET_TBL="$2"
+      params[TARGET_TBL]="$2"
       shift 2
       ;;
     --inc-traffic|--it)
       #You can increase this value to reduce traffic pressure
-      COOLING_PERIOD="$INCR_TRAFFIC"
+      params[COOLING_PERIOD]="${params[INCR_TRAFFIC]}"
       log "Incremental traffic for the historical workload is enabled"
-      log "Incremental period: $COOLING_PERIOD seconds"
+      log "Incremental period: ${params[COOLING_PERIOD]} seconds"
       shift 1
       ;;
     --custom-inc-traffic|--cit)
       #You can increase this value to reduce traffic pressure
-      INCR_TRAFFIC="$2"
-      COOLING_PERIOD="$2"
+      params[INCR_TRAFFIC]="$2"
+      params[COOLING_PERIOD]="$2"
       log "Custom incremental traffic for the historical workload is enabled"
-      log "Custom incremental period: $COOLING_PERIOD seconds"
+      log "Custom incremental period: ${params[COOLING_PERIOD]} seconds"
       shift 2
       ;;
     --workload-type|--wlt)
-      DEFAULT_WORKLOAD_TYPE="$2"
-      log "Default workload type: $DEFAULT_WORKLOAD_TYPE"
+      params[DEFAULT_WORKLOAD_TYPE]="$2"
+      log "Default workload type: ${params[DEFAULT_WORKLOAD_TYPE]}"
       shift 2
       ;;
     --region|--sr)
-      AWS_REGION="$2"
+      params[AWS_REGION]="$2"
       shift 2
       ;;
     --subnet|--ss)
-      SUBNET="$2"
+      params[SUBNET]="$2"
       shift 2
       ;;
     --target-subnet|--ts)
-      TRG_SUBNET="$2"
+      params[TRG_SUBNET]="$2"
       shift 2
       ;;
     --security-groups|--sg)
-      SG="$2"
+      params[SG]="$2"
       shift 2
       ;;
     --target-sg|--tsg)
-      TRG_SG="$2"
+      params[TRG_SG]="$2"
       shift 2
       ;;
     --glue-iam-role|--gir)
-      GLUE_IAM_ROLE="$2"
+      params[GLUE_IAM_ROLE]="$2"
       shift 2
       ;;
     --availability-zone|--az)
-      AZ="$2"
+      params[AZ]="$2"
       shift 2
       ;;
     --target-az|--taz)
-      TRG_AZ="$2"
+      params[TRG_AZ]="$2"
       shift 2
       ;;
     --target-type|--ttp)
-      TARGET_TYPE="$2"
+      params[TARGET_TYPE]="$2"
       shift 2
       ;;
     --json-mapping|--jm)
-      JSON_MAPPING="$2"
-      echo "$JSON_MAPPING" | jq empty
+      params[JSON_MAPPING]="$2"
+      echo "${params[JSON_MAPPING]}" | jq empty
       log "Provided a json mapping configuration $JSON_MAPPING"
       # Should work for AWS CloudShell, use 0 to disable line wrapping
-      if [[ $OS == Linux ]]; then
-        JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64 -w 0)
+      if [[ ${params[OS]} == Linux ]]; then
+        params[JSON_MAPPING_B64]=$(echo "$JSON_MAPPING" | base64 -w 0)
       fi
       # Use base64 without params for MacOS instead
-      if [[ $OS == Darwin ]]; then
-        JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64)
+      if [[ ${params[OS]} == Darwin ]]; then
+        params[JSON_MAPPING_B64]=$(echo "$JSON_MAPPING" | base64)
       fi
       shift 2
       ;;
     --start-replication-from|--srf)
-      REPLICATION_POINT_IN_TIME="$2"
+      params[REPLICATION_POINT_IN_TIME]="$2"
       shift 2
       ;;
     --override-rows-per-worker|--orw)
-      ROWS_PER_WORKER="$2"
+      params[ROWS_PER_WORKER]="$2"
       shift 2
       ;;
     --skip-glue-connector|--sgc)
-      SKIP_GLUE_CONNECTOR=true
+      params[SKIP_GLUE_CONNECTOR]=true
       shift 1
       ;;
     --skip-keyspaces-ledger|--skl)
-      SKIP_KEYSPACES_LEDGER=true
+      params[SKIP_KEYSPACES_LEDGER]=true
       shift 1
       ;;
     --replication-stats-enabled|--rse)
-      REPLICATION_STATS_ENABLED=true
+      params[REPLICATION_STATS_ENABLED]=true
       shift 1
       ;;
     --enhanced-monitoring-enabled|--eme)
-      GLUE_MONITORING=true
+      params[GLUE_MONITORING]=true
       shift 1
       ;;
     --safe-mode-disabled|--smd)
-      SAFE_MODE=false
+      params[SAFE_MODE]=false
       shift 1
       ;;
     --skip-discovery|--sd)
-      SKIP_DISCOVERY="true"
+      params[SKIP_DISCOVERY]="true"
       log "Skipping the discovery job"
       shift 1
       ;;
     --cqlreplicator-enviroment|--env)
       if [[ "$2" != "" ]]; then
           log "Environment name: $2"
-          DEFAULT_ENV="-$2"
+          params[DEFAULT_ENV]="-$2"
       fi
       shift 2
       ;;
     --cleanup-requested|--cr)
       log "The ledger is going to be cleaned up"
-      CLEANUP_REQUESTED="true"
+      params[CLEANUP_REQUESTED]="true"
       shift 1
       ;;
     --replay-log|--rl)
       log "The log of failed retries will be replayed, in order: inserts, updates, and deletes"
-      REPLAY_LOG=true
+      params[REPLAY_LOG]=true
       shift 1
+      ;;
+    --max-wcu-traffic|--mwt)
+      params[WCU_TRAFFIC]="$2"
+      calculate_resources
+      log "The write traffic set up to ${params[WCU_TRAFFIC]} WCUs per second"
+      log "The workers per tile is ${params[DEFAULT_WORKERS]}"
+      shift 2
       ;;
     --)
       shift
@@ -993,8 +1083,8 @@ done
 
 eval set -- "$PARAMS"
 
-if [[ $STATE == run ]]; then
-  if [[ $SKIP_DISCOVERY == "false" ]]; then
+if [[ ${params[STATE]} == run ]]; then
+  if [[ ${params[SKIP_DISCOVERY]} == "false" ]]; then
     Start_Discovery
     barrier "true"
   fi
@@ -1002,50 +1092,55 @@ if [[ $STATE == run ]]; then
   log "Started jobs:" "${JOBS[@]}"
 fi
 
-if [[ $STATE == sample ]]; then
+if [[ ${params[STATE]} == sample ]]; then
   Start_Sampler
 fi
 
-if [[ $STATE == run-single ]]; then
-  check_input "$TILE" "ERROR: tile parameter is empty, must be provided"
+if [[ ${params[STATE]} == run-single ]]; then
+  check_input "${params[TILE]}" "ERROR: tile parameter is empty, must be provided"
   Start_Single_Replication
   log "Started jobs:" "${JOBS[@]}"
 fi
 
-if [[ $STATE == request-single-stop ]]; then
-  check_input "$TILE" "ERROR: tile parameter is empty, must be provided"
+if [[ ${params[STATE]} == request-single-stop ]]; then
+  check_input "${params[TILE]}" "ERROR: tile parameter is empty, must be provided"
   Request_Single_Stop
 fi
 
-if [[ $STATE == request-stop ]]; then
+if [[ ${params[STATE]} == request-stop ]]; then
   Request_Stop
+fi
+
+if [[ ${params[STATE]} == kill ]]; then
+  Kill_Replication discovery
+  Kill_Replication replication
 fi
 
 function Gather_Stats() {
    tile=$1
    process_type=$2
    local total_per_tile=0
-   if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/ --region "$AWS_REGION" > /dev/null
+   if aws s3 ls "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/" --region "${params[AWS_REGION]}" > /dev/null
    then
-     if [[ $process_type == "discovery" ]]; then
-       total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys') && DISCOVERED_TOTAL=$(( DISCOVERED_TOTAL + total_per_tile ))
+     if [[ $process_type == "${params[PROCESS_TYPE_DISCOVERY]}" ]]; then
+       total_per_tile=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/$process_type/$tile/count.json" --region "${params[AWS_REGION]}" - | head | jq '.primaryKeys') && params[DISCOVERED_TOTAL]=$(( ${params[DISCOVERED_TOTAL]} + total_per_tile ))
      fi
-     if [[ $process_type == "replication" ]]; then
-       if  aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/ --region "$AWS_REGION" > /dev/null
+     if [[ $process_type == "${params[PROCESS_TYPE_REPLICATION]}" ]]; then
+       if  aws s3 ls "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/$process_type/$tile/" --region "${params[AWS_REGION]}" > /dev/null
          then
-         total_per_tile=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.primaryKeys') && REPLICATED_TOTAL=$(( REPLICATED_TOTAL + total_per_tile ))
+         total_per_tile=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/$process_type/$tile/count.json" --region "${params[AWS_REGION]}" - | head | jq '.primaryKeys') && params[REPLICATED_TOTAL]=$(( ${params[REPLICATED_TOTAL]} + total_per_tile ))
       fi
-      if [[ $REPLICATION_STATS_ENABLED == true ]]; then
-        if aws s3 ls "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile" --region "$AWS_REGION" > /dev/null
+      if [[ ${params[REPLICATION_STATS_ENABLED]} == true ]]; then
+        if aws s3 ls "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/$process_type/$tile" --region "${params[AWS_REGION]}" > /dev/null
         then
           local inserted=0
-          inserted=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.insertedPrimaryKeys')
+          inserted=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/$process_type/$tile/count.json" --region "${params[AWS_REGION]}" - | head | jq '.insertedPrimaryKeys')
           local updated=0
-          updated=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.updatedPrimaryKeys')
+          updated=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/$process_type/$tile/count.json" --region "${params[AWS_REGION]}" - | head | jq '.updatedPrimaryKeys')
           local deleted=0
-          deleted=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.deletedPrimaryKeys')
+          deleted=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/$process_type/$tile/count.json" --region "${params[AWS_REGION]}" - | head | jq '.deletedPrimaryKeys')
           local timestamp=""
-          timestamp=$(aws s3 cp "$S3_LANDING_ZONE"/"$SOURCE_KS"/"$SOURCE_TBL"/stats/"$process_type"/"$tile"/count.json --region "$AWS_REGION" - | head | jq '.updatedTimestamp')
+          timestamp=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/$process_type/$tile/count.json" --region "${params[AWS_REGION]}" - | head | jq '.updatedTimestamp')
           local header=true
           if [[ $tile != 0 ]]; then
             header=false
@@ -1057,38 +1152,39 @@ function Gather_Stats() {
   fi
 }
 
-if [[ $STATE == init ]]; then
+
+if [[ ${params[STATE]} == init ]]; then
  Init
 fi
 
-if [[ $STATE == cleanup ]]; then
+if [[ ${params[STATE]} == cleanup ]]; then
   log "Deleting deployed artifacts: the glue connection (optional), the S3 bucket, and the glue job"
   Clean_Up
 fi
 
-if [[ $STATE == stats ]]; then
-  check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
-  check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
-  check_input "$S3_LANDING_ZONE" "ERROR: landing zone must be provided"
-  check_input "$AWS_REGION" "ERROR: aws region must be provided"
-  check_input "$SOURCE_KS" "ERROR: source keyspace name is empty, must be provided"
-  check_input "$SOURCE_TBL" "ERROR: source table name is empty, must be provided"
-  check_input "$TARGET_TBL" "ERROR: target table name is empty, must be provided"
-  check_input "$TARGET_KS" "ERROR: target keyspace name is empty, must be provided"
+if [[ ${params[STATE]} == stats ]]; then
+  check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"
+  check_input "${params[S3_LANDING_ZONE]}" "ERROR: landing zone must be provided"
+  check_input "${params[AWS_REGION]}" "ERROR: aws region must be provided"
+  check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"
+  check_input "${params[TARGET_TBL]}" "ERROR: target table name is empty, must be provided"
+  check_input "${params[TARGET_KS]}" "ERROR: target keyspace name is empty, must be provided"
   # the barrier without checking if the discovery job is running
   barrier "false"
   tile=0
-  while [ $tile -lt "$TILES" ]
+  while [ $tile -lt "${params[TILES]}" ]
     do
-      Gather_Stats $tile "discovery"
-      Gather_Stats $tile "replication"
+      Gather_Stats $tile "${params[PROCESS_TYPE_DISCOVERY]}"
+      Gather_Stats $tile "${params[PROCESS_TYPE_REPLICATION]}"
       ((tile++))
     done
-  log "Discovered rows in" "$SOURCE_KS"."$SOURCE_TBL" is "$DISCOVERED_TOTAL"
-  log "Replicated rows in" "$TARGET_KS"."$TARGET_TBL" is "$REPLICATED_TOTAL"
-  if [[ $REPLICATION_STATS_ENABLED == true ]]; then
+  log "Discovered rows in" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}" is "${params[DISCOVERED_TOTAL]}"
+  log "Replicated rows in" "${params[TARGET_KS]}"."${params[TARGET_TBL]}" is "${params[REPLICATED_TOTAL]}"
+  if [[ ${params[REPLICATION_STATS_ENABLED]} == true ]]; then
     t=0
-    while [ $t -lt "$TILES" ]
+    while [ $t -lt "${params[TILES]}" ]
     do
       Gather_Stats $t "detailed-replication"
       ((t++))

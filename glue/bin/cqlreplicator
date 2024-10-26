@@ -3,6 +3,7 @@
 # // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # // SPDX-License-Identifier: Apache-2.0
 #
+# The following script supports only bash versions 4 and 5
 # Migration parameters
 declare -A params=(
     [MIGRATOR_VERSION]="1.0"
@@ -255,7 +256,7 @@ function uploader_jars() {
   do
     file=$(basename "$link")
     progress "$cnt" "$total_artifacts" "Uploading jar artifacts"
-    curl -s -O "$MAVEN_REPO""$link"
+    curl -s -O "${params[MAVEN_REPO]}""$link"
     aws s3 cp "$file" "${params[S3_LANDING_ZONE]}"/artifacts/"$file" --region "${params[AWS_REGION]}" > /dev/null
     rm "$file"
     ((cnt++))
@@ -341,9 +342,109 @@ function Usage_Exit {
   echo "  init        Deploy CQLReplicator Glue job and download jars"
   echo "  run         Start migration process"
   echo "  stats       Upload progress (only for historical workload)"
-  echo "  request-stop  Stop migration process"
+  echo "  request-stop  Stop migration process gracefully"
   echo "  cleanup     Delete all CQLReplicator artifacts"
+  echo "  kill        Stop migration process forcefully"
   exit 1
+}
+
+check_glue_job_connection() {
+    local job_name="$1"
+    local aws_region="$2"
+    if [ -z "$job_name" ] || [ -z "$aws_region" ]; then
+        log "[Error] Job name and AWS region must be provided."
+        return 1
+    fi
+    job_details=$(aws glue get-job --job-name "$job_name" --region "$aws_region" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        log "[Error] Job $job_name not found in region $aws_region."
+        return 1
+    fi
+    connections=$(echo "$job_details" | jq -r '.Job.Connections.Connections[]' 2>/dev/null)
+    if [ -z "$connections" ]; then
+        log "[WARN] The Glue job $job_name does not have any attached connections."
+    fi
+}
+
+validate_iam_role_permissions() {
+    local role_name="$1"
+    local role_arn
+    local region="$2"
+    local account="$3"
+    role_arn=$(aws iam get-role --role-name "$role_name" --query 'Role.Arn' --output text)
+    if [ -z "$role_arn" ]; then
+        log "Error: Unable to find role $role_name"
+        return 1
+    fi
+    local keyspaces_actions=("cassandra:Insert" "cassandra:Update" "cassandra:Select" "cassandra:Delete")
+    local s3_actions=("s3:ListBucket" "s3:PutObject" "s3:DeleteObject" "s3:GetObject")
+
+    check_permissions() {
+        local service="$1"
+        shift
+        local actions=("$@")
+
+        for action in "${actions[@]}"; do
+            result=$(aws iam simulate-principal-policy \
+                --policy-source-arn "$role_arn" \
+                --action-names "$action" \
+                --resource-arns "arn:aws:$service:$region:$account:*" \
+                --query 'EvaluationResults[0].EvalDecision' \
+                --output text)
+
+            if [ "$result" = "allowed" ]; then
+                log "✅ $action is allowed"
+            else
+                log "❌ $action is not allowed"
+            fi
+        done
+    }
+    check_permissions "cassandra" "${keyspaces_actions[@]}"
+    check_permissions "s3" "${s3_actions[@]}"
+    check_glue_service_role
+}
+
+check_glue_service_role() {
+    local attached_policies=$(aws iam list-attached-role-policies --role-name "$role_name" --query 'AttachedPolicies[*].PolicyName' --output text)
+
+    if log "$attached_policies" | grep -q "AWSGlueServiceRole"; then
+        log "✅ AWSGlueServiceRole is attached to the role"
+    else
+        log "❌ AWSGlueServiceRole is not attached to the role"
+
+        # Check if the role has a custom policy that might provide Glue permissions
+        local inline_policies=$(aws iam list-role-policies --role-name "$role_name" --query 'PolicyNames' --output text)
+
+        if [ -n "$inline_policies" ]; then
+            log "   Checking inline policies for Glue permissions..."
+            for policy in $inline_policies; do
+                policy_doc=$(aws iam get-role-policy --role-name "$role_name" --policy-name "$policy" --query 'PolicyDocument' --output json)
+                if log "$policy_doc" | grep -q "glue:"; then
+                    log "   ✅ Custom policy '$policy' contains Glue permissions"
+                    return
+                fi
+            done
+            log "   ❌ No custom policies found with Glue permissions"
+        else
+            log "   ❌ No inline policies found"
+        fi
+    fi
+}
+
+check_security_group_self_referencing() {
+    local sg_id="$1"
+    sg_rules=$(aws ec2 describe-security-groups \
+        --group-ids "$sg_id" \
+        --query 'SecurityGroups[0]' \
+        --output json)
+
+    inbound_rules=$(echo "$sg_rules" | jq -r '.IpPermissions[] | select(.UserIdGroupPairs[].GroupId == "'"$sg_id"'") | .IpProtocol')
+
+    if [ -n "$inbound_rules" ]; then
+        log "✅ Self-referencing inbound rule found"
+    else
+        log "❌ No self-referencing inbound rule found"
+    fi
 }
 
 function Clean_Up {
@@ -401,10 +502,10 @@ function Init {
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
   ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar" "/org/opensearch/driver/opensearch-sql-jdbc/1.4.0.1/opensearch-sql-jdbc-1.4.0.1.jar")
-  S3_PATH_BASE=("$S3_LANDING_ZONE/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
-  S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-retry-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-core-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/java-driver-metrics-micrometer-4.13.0.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-commons-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-core-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-observation-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-registry-cloudwatch-1.10.4.jar")
-  S3_PATH_MEMORYDB=("$S3_LANDING_ZONE/artifacts/jedis-4.4.6.jar")
-  S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
+  S3_PATH_BASE=("${params[S3_LANDING_ZONE]}/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  S3_PATH_KEYSPACES=("${params[S3_LANDING_ZONE]}/artifacts/vavr-0.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-retry-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-core-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/java-driver-metrics-micrometer-4.13.0.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-commons-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-core-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-observation-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-registry-cloudwatch-1.10.4.jar")
+  S3_PATH_MEMORYDB=("${params[S3_LANDING_ZONE]}/artifacts/jedis-4.4.6.jar")
+  S3_PATH_OSS=("${params[S3_LANDING_ZONE]}/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
 
   uploader_jars "${ARTIFACTS_BASE[@]}"
   join_array "${S3_PATH_BASE[@]}"
@@ -413,6 +514,9 @@ function Init {
     uploader_jars "${ARTIFACTS_KEYSPACES[@]}"
     S3_PATH_LIBS+=","
     join_array "${S3_PATH_KEYSPACES[@]}"
+    validate_iam_role_permissions "${params[GLUE_IAM_ROLE]}" "${params[AWS_REGION]}" "$AWS_ACCOUNT"
+    security_group_id=$(echo "${params[SG]}" | tr -d "'\"")
+    check_security_group_self_referencing "$security_group_id"
   fi
 
   if [[ ${params[TARGET_TYPE]} == "memorydb" ]]; then
@@ -642,6 +746,7 @@ function Start_Discovery {
   check_input "${params[AWS_REGION]}" "ERROR: aws region must be provided"
   check_target_table_req
   check_num_tiles
+  check_glue_job_connection "${params[JOB_NAME]}${params[DEFAULT_ENV]}" "${params[AWS_REGION]}"
 
   log "TILES:" "${params[TILES]}"
   log "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"

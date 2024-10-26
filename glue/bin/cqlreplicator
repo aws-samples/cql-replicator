@@ -48,6 +48,7 @@ params[BASE_FOLDER]=$(pwd -L)
 params[OS]=$(uname -s)
 JSON_MAPPING_B64=$(echo "None" | base64)
 JOBS=()
+S3_PATH_LIBS=""
 
 # Progress bar configuration
 PS=40
@@ -269,13 +270,21 @@ function join_array() {
     for item in "$@"; do
         joined_array+="${joined_array:+,}$item"
     done
-    params[S3_PATH_LIBS]+="$joined_array"
+    S3_PATH_LIBS+="$joined_array"
 }
 
 function barrier() {
   flag_check_discovery_run="$1"
+  local delay=0.1
+  local spinstr='|/-\'
+  output="Glue job $rs is running"
+
   while true
   do
+    local temp=${spinstr#?}
+    printf "\r%s [%c]  " "$output" "$spinstr"
+    local spinstr=$temp${spinstr%"$temp"}
+    sleep $delay
     cnt=0
     for (( tile=0; tile<"${params[TILES]}"; tile++ ))
     do
@@ -293,6 +302,7 @@ function barrier() {
       check_discovery_runs "false"
     fi
   done
+  printf "\r%s    \n" "$output"
 }
 
 function Usage_Exit {
@@ -540,8 +550,6 @@ function Init {
     join_array "${S3_PATH_OSS[@]}"
   fi
 
-  params[S3_PATH_LIBS]="$S3_PATH_LIBS"
-
   # Uploading the config files
   local path_to_conf
   local path_to_scala
@@ -643,7 +651,7 @@ function Init {
            --region "${params[AWS_REGION]}" \
            --default-arguments '{
                "--job-language":"scala",
-               "--extra-jars":"'${params[S3_PATH_LIBS]}'",
+               "--extra-jars":"'$S3_PATH_LIBS'",
                "--conf":"spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
                "--class":"GlueApp"
                '$enhanced_monitoring'
@@ -665,7 +673,7 @@ function Init {
             --region "${params[AWS_REGION]}" \
             --default-arguments '{
                 "--job-language":"scala",
-                "--extra-jars":"'${params[S3_PATH_LIBS]}'",
+                "--extra-jars":"'$S3_PATH_LIBS'",
                 "--conf":"spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
                 "--class":"GlueApp"
                 '${params[enhanced_monitoring]}'

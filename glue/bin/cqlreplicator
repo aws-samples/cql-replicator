@@ -650,7 +650,7 @@ function Init {
             --glue-version "4.0" \
             --number-of-workers 2 \
             --worker-type "${params[WORKER_TYPE]}" \
-            --command "Name=${params[GLUE_TYPE]},ScriptLocation=${params[glue_bucket_artifacts]}/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala" \
+            --command "Name=${params[GLUE_TYPE]},ScriptLocation=$glue_bucket_artifacts/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala" \
             --execution-property '{"MaxConcurrentRuns": 64}' \
             --max-retries 1 \
             --region "${params[AWS_REGION]}" \

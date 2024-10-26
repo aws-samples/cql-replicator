@@ -383,12 +383,20 @@ validate_iam_role_permissions() {
         local service="$1"
         shift
         local actions=("$@")
+        local resource_arn
+        if [[ $service == "cassandra" ]]; then
+          resource_arn="arn:aws:$service:$region:$account:*"
+        fi
+        if [[ $service == "s3" ]]; then
+          bkt_name=$(echo "${params[S3_LANDING_ZONE]}" | sed 's|s3://||')
+          resource_arn="arn:aws:$service:$region:$account:$bkt_name"
+        fi
 
         for action in "${actions[@]}"; do
             result=$(aws iam simulate-principal-policy \
                 --policy-source-arn "$role_arn" \
                 --action-names "$action" \
-                --resource-arns "arn:aws:$service:$region:$account:*" \
+                --resource-arns $resource_arn \
                 --query 'EvaluationResults[0].EvalDecision' \
                 --output text)
 
@@ -399,6 +407,7 @@ validate_iam_role_permissions() {
             fi
         done
     }
+
     check_permissions "cassandra" "${keyspaces_actions[@]}"
     check_permissions "s3" "${s3_actions[@]}"
     check_glue_service_role

@@ -712,6 +712,17 @@ fi
 log "Deploy is completed"
 }
 
+function check_sampler_runs() {
+   local rs
+   rs=$(aws glue get-job-runs --job-name "CQLReplicator${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}"  \
+    --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`sampler`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
+   if [ "$rs" = "true" ]; then
+       params[SAMPLER_RUNNING]=true
+     else
+       params[SAMPLER_RUNNING]=false
+   fi
+}
+
 function Start_Sampler {
   check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
   check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"

@@ -27,6 +27,7 @@ import com.datastax.oss.driver.api.core.CqlSession
 import com.datastax.oss.driver.api.core.uuid.Uuids
 import com.datastax.oss.driver.api.core.DriverException
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader
+import com.datastax.oss.driver.api.core.cql.{BatchStatement, BatchStatementBuilder, DefaultBatchType, SimpleStatement}
 import io.github.resilience4j.retry.{Retry, RetryConfig}
 import io.github.resilience4j.core.IntervalFunction
 import io.micrometer.cloudwatch.{CloudWatchConfig, CloudWatchMeterRegistry}
@@ -48,8 +49,6 @@ import java.time.format.DateTimeFormatter
 import java.time.{Duration, ZoneId, ZonedDateTime}
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
 import com.amazonaws.services.cloudwatch.AmazonCloudWatchAsyncClientBuilder
-import com.datastax.oss.driver.api.core.cql.{BatchStatement, BatchStatementBuilder, DefaultBatchType, SimpleStatement}
-
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
 }
@@ -76,6 +75,13 @@ class CustomSerializationException(s: String) extends RuntimeException {
 
 class DlqS3Exception(s: String) extends RuntimeException {
   println(s)
+}
+
+class PreFlightCheckException(val message: String, val errorCode: Int, val cause: Throwable = null)
+  extends Exception(s"[$errorCode] $message", cause) {
+  def this(message: String) = this(message, 0)
+  def this(message: String, cause: Throwable) = this(message, 0, cause)
+  override def toString: String = s"PreFlightCheckException($errorCode, $message)"
 }
 
 sealed trait Stats
@@ -396,8 +402,12 @@ object GlueApp {
       }
     }
 
-    def preFlightCheck(connection: CqlSession, keyspace: String, table: String, dir: String): Unit = {
-      val logger = new GlueLogger
+    def preFlightCheck(connection: CqlSession, keyspace: String, table: String, dir: String, logger: GlueLogger): Unit = {
+      def logErrorAndExit(message: String, code: Int): Nothing = {
+        logger.error(message)
+        throw new PreFlightCheckException(message, code)
+        sys.exit(code)
+      }
       Try {
         val c1 = Option(connection)
         c1.isEmpty match {
@@ -409,30 +419,23 @@ object GlueApp {
                     logger.info(s"the $dir table $table exists")
                   }
                   case false => {
-                    val err = s"ERROR: the $dir table $table does not exist"
-                    logger.error(err)
-                    sys.exit(-1)
+                    logErrorAndExit(s"ERROR: the $dir table $table does not exist", -1)
                   }
                 }
               }
               case false => {
-                val err = s"ERROR: the $dir keyspace $keyspace does not exist"
-                logger.error(err)
-                sys.exit(-1)
+                logErrorAndExit(s"ERROR: the $dir keyspace $keyspace does not exist", -2)
               }
             }
           }
           case _ => {
-            val err = s"ERROR: The job was not able to connecto to the $dir"
-            logger.error(err)
-            sys.exit(-1)
+            logErrorAndExit(s"ERROR: The job was not able to connecto to the $dir", -3)
           }
         }
       } match {
         case Failure(r) => {
-          val err = s"ERROR: Detected connectivity issue. Check the reference conf file/Glue connection for the $dir, the job is aborted"
-          logger.error(s"$err ${r.toString}")
-          sys.exit(-1)
+          val err = s"ERROR: Detected a connectivity issue. Check the conf file. Glue connection for the $dir, the job was aborted"
+          logErrorAndExit(s"$err ${r.toString}", -4)
         }
         case Success(_) => {
           logger.info(s"Connected to the $dir")
@@ -504,8 +507,8 @@ object GlueApp {
 
     // Let's do preflight checks
     logger.info("Preflight check started")
-    preFlightCheck(internalConnectionToSource, srcKeyspaceName, srcTableName, "source")
-    preFlightCheck(internalConnectionToTarget, trgKeyspaceName, trgTableName, "target")
+    preFlightCheck(internalConnectionToSource, srcKeyspaceName, srcTableName, "source", logger)
+    preFlightCheck(internalConnectionToTarget, trgKeyspaceName, trgTableName, "target", logger)
     logger.info("Preflight check completed")
 
     val pkFinal = columnTs match {

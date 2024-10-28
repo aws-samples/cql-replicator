@@ -49,6 +49,7 @@ params[OS]=$(uname -s)
 JSON_MAPPING_B64=$(echo "None" | base64)
 JOBS=()
 S3_PATH_LIBS=""
+DISCOVERY_RUNNING_ID=""
 
 # Progress bar configuration
 PS=40
@@ -157,9 +158,10 @@ function check_discovery_runs() {
     mode=$1
     rs=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" \
         --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
-
     if [[ $rs == "$mode" ]]; then
-        log "ERROR: The discovery job has failed, check AWS Glue logs"
+        log "ERROR: The discovery job ${params[JOB_NAME]}${params[DEFAULT_ENV]} has failed, check AWS Glue logs"
+        error_message=$(aws glue get-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --run-id "$DISCOVERY_RUNNING_ID" | jq '.JobRun | {ErrorMessage}')
+        log "$error_message"
         exit 1
     fi
     return 0
@@ -765,16 +767,17 @@ function Start_Discovery {
   check_num_tiles
   check_glue_job_connection "${params[JOB_NAME]}${params[DEFAULT_ENV]}" "${params[AWS_REGION]}"
 
-  log "TILES:" "${params[TILES]}"
-  log "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"
-  log "TARGET:" "${params[TARGET_KS]}"."${params[TARGET_TBL]}"
-  log "LANDING ZONE:" "${params[S3_LANDING_ZONE]}"
-  log "WRITE TIME COLUMN:" ${params[WRITETIME_COLUMN]}
-  log "TTL COLUMN:" ${params[TTL_COLUMN]}
-  log "ROWS PER DPU:" ${params[ROWS_PER_WORKER]}
-  log "START REPLICATING FROM: ${params[REPLICATION_POINT_IN_TIME]} (0 is disabled)"
-  log "SAFE MODE: ${params[SAFE_MODE]}"
-  log "DEFAULT WORKER TYPE: ${params[WORKER_TYPE]}"
+  log "Your workload is divided into ${params[TILES]} tile(s)"
+  log "Source: ${params[SOURCE_KS]}.${params[SOURCE_TBL]}"
+  log "Target: ${params[TARGET_KS]}.${params[TARGET_TBL]}"
+  log "Landing zone for artifacts and temp files: ${params[S3_LANDING_ZONE]}"
+  log "Column used to detect changes in the source: ${params[WRITETIME_COLUMN]}"
+  log "TTL column: ${params[TTL_COLUMN]}"
+  log "Each Glue DPU will handle up to ${params[ROWS_PER_WORKER]} rows (will be ignored if you use --max-wcu-traffic)"
+  log "Replication start timestamp: ${params[REPLICATION_POINT_IN_TIME]} (0 means disabled)"
+  log "Safe mode: ${params[SAFE_MODE]} (reduces overhead on the source)"
+  log "Default worker type: ${params[WORKER_TYPE]}"
+
   local workers=0
   if [[ ${params[OVERRIDE_DISCOVERY_WORKERS]} == 0 ]]; then
     max_value2=2
@@ -809,7 +812,8 @@ function Start_Discovery {
         "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
         "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
         "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
-     JOBS+=("$rs")
+    DISCOVERY_RUNNING_ID=$rs
+    JOBS+=("$rs")
   fi
 }
 
@@ -983,17 +987,12 @@ calculate_resources() {
     return 1
   fi
 
-  if [ "${params[WCU_TRAFFIC]}" -le 5000 ]; then
+  if [ "${params[WCU_TRAFFIC]}" -le 10000 ]; then
     k=-1
     params[WORKER_TYPE]="G.025X"
     f=$(( drps * tiles ))
     workers=$(( (wcu + f - 1) / f - k ))
-  elif [ ${params[WCU_TRAFFIC]} -le 10000 ]; then
-    k=-1
-    params[WORKER_TYPE]="G.025X"
-    f=$(( drps * tiles ))
-    workers=$(( (wcu + f - 1) / f - k ))
-  elif [ ${params[WCU_TRAFFIC]} -ge 10000 ]; then
+  elif [ "${params[WCU_TRAFFIC]}" -ge 10000 ]; then
     k=1
     params[WORKER_TYPE]="G.1X"
     f=$(( drps * tiles ))

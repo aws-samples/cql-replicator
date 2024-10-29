@@ -96,7 +96,7 @@ if [[ "${params[OS]}" == "Linux" || "${params[OS]}" == "Darwin" ]]; then
   log "OS: ${params[OS]}"
   log "AWS CLI: $(aws --version)"
 else
-  log "ERROR: Please run this script in AWS CloudShell or Linux/Darwin"
+  log "Error: Please run this script in AWS CloudShell or Linux/Darwin"
   exit 1
 fi
 
@@ -159,7 +159,7 @@ function check_discovery_runs() {
     rs=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" \
         --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
     if [[ $rs == "$mode" ]]; then
-        log "ERROR: The discovery job ${params[JOB_NAME]}${params[DEFAULT_ENV]} has failed, check AWS Glue logs"
+        log "Error: The discovery job ${params[JOB_NAME]}${params[DEFAULT_ENV]} has failed, check AWS Glue logs"
         error_message=$(aws glue get-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --run-id "$DISCOVERY_RUNNING_ID" | jq '.JobRun | {ErrorMessage}')
         log "$error_message"
         exit 1
@@ -169,8 +169,17 @@ function check_discovery_runs() {
 
 function check_target_table_req() {
     local current_mode
-    current_mode=$(aws keyspaces get-table --keyspace-name "${params[TARGET_KS]}" --table-name "${params[TARGET_TBL]}" \
-        --query 'capacitySpecification' --output json)
+    if ! current_mode=$(aws keyspaces get-table --keyspace-name "${params[TARGET_KS]}" --table-name "${params[TARGET_TBL]}" \
+        --query 'capacitySpecification' --output json 2>&1); then
+        if [[ $current_mode == *"ResourceNotFoundException"* ]]; then
+            log "Error: Keyspaces or Table ${params[TARGET_KS]}.${params[TARGET_TBL]} not found."
+            exit 1
+        else
+            log "Error: Failed to get table information: $current_mode"
+            exit 1
+        fi
+    fi
+
     if [[ $(jq -r '.throughputMode' <<< "$current_mode") == "PROVISIONED" ]]; then
         local provisioned_to
         provisioned_to=$(jq -r '.writeCapacityUnits' <<< "$current_mode")
@@ -178,12 +187,13 @@ function check_target_table_req() {
             log "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is provisioned to $provisioned_to WCUs per second"
             log "The requested traffic is ${params[WCU_TRAFFIC]}"
         else
-            log "The incoming traffic exceeds the provisioned capacity"
+            log "Warn: The incoming traffic exceeds the provisioned capacity"
         fi
     else
-      log "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is on-demand mode"
+        log "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is on-demand mode"
     fi
 }
+
 
 function check_replication_runs() {
    local tile
@@ -193,7 +203,7 @@ function check_replication_runs() {
     --query 'length(JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`replication`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`] | [?"--TILE"==`"'"$tile"'"`])')
 
    if [ "${rs}" -ne 0 ]; then
-     log "ERROR: Replication job is already running per tile $tile for ${params[SOURCE_KS]}.${params[SOURCE_TBL]}"
+     log "Error: Replication job is already running per tile $tile for ${params[SOURCE_KS]}.${params[SOURCE_TBL]}"
      log "$rs"
      return 1
    fi
@@ -246,7 +256,7 @@ function uploader_helper() {
           progress $next_pos $final_pos "Uploading $artifact_name                   "
           aws s3 cp "$path_to_conf"/"$artifact_name" "${params[S3_LANDING_ZONE]}"/artifacts/"$artifact_name" --region "${params[AWS_REGION]}" > /dev/null
         else
-          log "ERROR: $path_to_conf/$artifact_name not found"
+          log "Error: $path_to_conf/$artifact_name not found"
           exit 1
         fi
 }
@@ -364,17 +374,17 @@ check_glue_job_connection() {
     local job_name="$1"
     local aws_region="$2"
     if [ -z "$job_name" ] || [ -z "$aws_region" ]; then
-        log "[Error] Job name and AWS region must be provided."
+        log "Error: Job name and AWS region must be provided."
         return 1
     fi
     job_details=$(aws glue get-job --job-name "$job_name" --region "$aws_region" 2>/dev/null)
     if [ $? -ne 0 ]; then
-        log "[Error] Job $job_name not found in region $aws_region."
+        log "Error: Job $job_name not found in region $aws_region."
         return 1
     fi
     connections=$(echo "$job_details" | jq -r '.Job.Connections.Connections[]' 2>/dev/null)
     if [ -z "$connections" ]; then
-        log "[WARN] The Glue job $job_name does not have any attached connections."
+        log "Warn: The Glue job $job_name does not have any attached connections."
     fi
 }
 
@@ -469,8 +479,8 @@ check_security_group_self_referencing() {
 }
 
 function Clean_Up {
-  check_input "${params[S3_LANDING_ZONE]}" "ERROR: landing zone parameter is empty, must be provided"
-  check_input "${params[AWS_REGION]}" "ERROR: AWS Region is empty, must be provided"
+  check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone parameter is empty, must be provided"
+  check_input "${params[AWS_REGION]}" "Error: AWS Region is empty, must be provided"
   aws s3 rm "${params[S3_LANDING_ZONE]}" --recursive --region "${params[AWS_REGION]}"
   aws s3 rb "${params[S3_LANDING_ZONE]}" --region "${params[AWS_REGION]}"
   local connection_name
@@ -486,13 +496,13 @@ function Clean_Up {
 
 function Init {
   if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
-        check_input "${params[AZ]}" "ERROR: availability zone is, must be provided"
-        check_input "${params[SUBNET]}" "ERROR: subnet is empty, must be provided"
-        check_input "${params[SG]}" "ERROR: sg is empty, must be provided"
+        check_input "${params[AZ]}" "Error: availability zone is, must be provided"
+        check_input "${params[SUBNET]}" "Error: subnet is empty, must be provided"
+        check_input "${params[SG]}" "Error: sg is empty, must be provided"
     else
         log "Skipping glue connector creation"
     fi
-    check_input "${params[AWS_REGION]}" "ERROR: region is empty, must be provided"
+    check_input "${params[AWS_REGION]}" "Error: region is empty, must be provided"
     log "TARGET TYPE: ${params[TARGET_TYPE]}"
 
     AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --region "${params[AWS_REGION]}" --output text)
@@ -507,7 +517,7 @@ function Init {
         then
           echo "${params[S3_LANDING_ZONE]}" > "working_bucket.dat"
         else
-          log "ERROR: not able to create a S3 bucket: ${params[S3_LANDING_ZONE]}"
+          log "Error: not able to create a S3 bucket: ${params[S3_LANDING_ZONE]}"
           exit 1
         fi
     fi
@@ -590,7 +600,7 @@ function Init {
       progress 3 5 "Uploading CQLReplicator.scala                  "
       aws s3 cp "$path_to_scala"/CQLReplicator.scala "$glue_bucket_artifacts"/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala --region "${params[AWS_REGION]}" > /dev/null
     else
-      log "ERROR: $path_to_scala/CQLReplicator.scala not found"
+      log "Error: $path_to_scala/CQLReplicator.scala not found"
       exit 1
     fi
   fi
@@ -619,9 +629,9 @@ function Init {
            }' --region "${params[AWS_REGION]}" --endpoint https://glue."${params[AWS_REGION]}".amazonaws.com --output json
 
        if [[ ${params[TARGET_TYPE]} == "opensearch" || ${params[TARGET_TYPE]} == "memorydb" ]]; then
-         check_input "${params[TRG_SUBNET]}" "ERROR: subnet for ${params[TARGET_TYPE]} is empty, must be provided"
-         check_input "${params[TRG_SG]}" "ERROR: sg for ${params[TARGET_TYPE]} is empty, must be provided"
-         check_input "${params[TRG_AZ]}" "ERROR: az for ${params[TARGET_TYPE]} is empty, must be provided"
+         check_input "${params[TRG_SUBNET]}" "Error: subnet for ${params[TARGET_TYPE]} is empty, must be provided"
+         check_input "${params[TRG_SG]}" "Error: sg for ${params[TARGET_TYPE]} is empty, must be provided"
+         check_input "${params[TRG_AZ]}" "Error: az for ${params[TARGET_TYPE]} is empty, must be provided"
          glue_conn_name_oss="cql-replicator-${params[TARGET_TYPE]}-integration"
          glue_conn_name="$glue_conn_name${params[DEFAULT_ENV]},$glue_conn_name_oss"
 
@@ -724,10 +734,10 @@ function check_sampler_runs() {
 }
 
 function Start_Sampler {
-  check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
-  check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"
-  check_input "${params[S3_LANDING_ZONE]}" "ERROR: landing zone must be provided"
-  check_input "${params[AWS_REGION]}" "ERROR: aws region must be provided"
+  check_input "${params[SOURCE_KS]}" "Error: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
+  check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
+  check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
   log "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"
   log "LANDING ZONE:" "${params[S3_LANDING_ZONE]}"
   log "WORKER_TYPE: ${params[WORKER_TYPE]}"
@@ -768,12 +778,12 @@ function Start_Sampler {
 }
 
 function Start_Discovery {
-  check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
-  check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"
-  check_input "${params[TARGET_KS]}" "ERROR: target keyspace name is empty, must be provided"
-  check_input "${params[TARGET_TBL]}" "ERROR: target table name is empty, must be provided"
-  check_input "${params[S3_LANDING_ZONE]}" "ERROR: landing zone must be provided"
-  check_input "${params[AWS_REGION]}" "ERROR: aws region must be provided"
+  check_input "${params[SOURCE_KS]}" "Error: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
+  check_input "${params[TARGET_KS]}" "Error: target keyspace name is empty, must be provided"
+  check_input "${params[TARGET_TBL]}" "Error: target table name is empty, must be provided"
+  check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
+  check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
   check_target_table_req
   check_num_tiles
   check_glue_job_connection "${params[JOB_NAME]}${params[DEFAULT_ENV]}" "${params[AWS_REGION]}"
@@ -929,7 +939,7 @@ function validate_json() {
   # Check if the JSON is valid
   echo "$json_str" | jq empty
   if [[ $? -ne 0 ]]; then
-      log "ERROR: Invalid JSON"
+      log "Error: Invalid JSON"
       log '{"column": "column_name", "bucket": "bucket-name", "prefix": "keyspace_name/table_name/payload", "xref": "reference-column"}'
       exit 1
   fi
@@ -937,7 +947,7 @@ function validate_json() {
   # Check for empty values
   empty_values=$(echo "$json_str" | jq 'recurse | select(. == "" or . == null)')
   if [[ -n $empty_values ]]; then
-      echo "ERROR: JSON contains empty values"
+      echo "Error: JSON contains empty values"
       return 1
   fi
 
@@ -952,7 +962,7 @@ function validate_json() {
   xref=$(echo "$json_str" | jq -r '.xref')
 
   if [[ "$column" == null || "$bucket" == null || "$prefix" == null || "$xref" == null ]]; then
-      log "ERROR: JSON doesn't contain required keys: column, bucket, xref, and prefix"
+      log "Error: JSON doesn't contain required keys: column, bucket, xref, and prefix"
       return 1
   fi
 
@@ -1229,13 +1239,13 @@ if [[ ${params[STATE]} == sample ]]; then
 fi
 
 if [[ ${params[STATE]} == run-single ]]; then
-  check_input "${params[TILE]}" "ERROR: tile parameter is empty, must be provided"
+  check_input "${params[TILE]}" "Error: tile parameter is empty, must be provided"
   Start_Single_Replication
   log "Started jobs:" "${JOBS[@]}"
 fi
 
 if [[ ${params[STATE]} == request-single-stop ]]; then
-  check_input "${params[TILE]}" "ERROR: tile parameter is empty, must be provided"
+  check_input "${params[TILE]}" "Error: tile parameter is empty, must be provided"
   Request_Single_Stop
 fi
 
@@ -1295,14 +1305,14 @@ if [[ ${params[STATE]} == cleanup ]]; then
 fi
 
 if [[ ${params[STATE]} == stats ]]; then
-  check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
-  check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"
-  check_input "${params[S3_LANDING_ZONE]}" "ERROR: landing zone must be provided"
-  check_input "${params[AWS_REGION]}" "ERROR: aws region must be provided"
-  check_input "${params[SOURCE_KS]}" "ERROR: source keyspace name is empty, must be provided"
-  check_input "${params[SOURCE_TBL]}" "ERROR: source table name is empty, must be provided"
-  check_input "${params[TARGET_TBL]}" "ERROR: target table name is empty, must be provided"
-  check_input "${params[TARGET_KS]}" "ERROR: target keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_KS]}" "Error: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
+  check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
+  check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
+  check_input "${params[SOURCE_KS]}" "Error: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
+  check_input "${params[TARGET_TBL]}" "Error: target table name is empty, must be provided"
+  check_input "${params[TARGET_KS]}" "Error: target keyspace name is empty, must be provided"
   # the barrier without checking if the discovery job is running
   barrier "false"
   tile=0

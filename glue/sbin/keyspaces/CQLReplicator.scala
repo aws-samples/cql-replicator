@@ -16,7 +16,7 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import com.amazonaws.services.s3.{AmazonS3, AmazonS3ClientBuilder}
 import com.amazonaws.services.s3.model.{GetObjectRequest, ListObjectsV2Request}
-import com.amazonaws.ClientConfiguration
+import com.amazonaws.{AmazonServiceException, ClientConfiguration, SdkClientException}
 import com.amazonaws.retry.RetryPolicy
 import com.datastax.oss.driver.api.core.NoNodeAvailableException
 import com.datastax.oss.driver.api.core.AllNodesFailedException
@@ -198,19 +198,35 @@ class SupportFunctions {
   }
 }
 
-case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfiguration, dlqConfig: DlqConfig) {
+case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfiguration, dlqConfig: DlqConfig, logger: GlueLogger) {
+
   private val batch: BatchStatementBuilder = BatchStatement.builder(DefaultBatchType.UNLOGGED)
+
   private def persistToDlq(dlqConfig: DlqConfig,payload: String): Unit = {
     val ts = org.joda.time.LocalDateTime.now().toString
-    dlqConfig.s3client.putObject(dlqConfig.bucketName,
-      s"${dlqConfig.key}/log-$ts.msg", payload)
+    val key = s"${dlqConfig.key}/log-$ts.msg"
+
+    try {
+      dlqConfig.s3client.putObject(dlqConfig.bucketName, key, payload)
+    } catch {
+      case ase: AmazonServiceException =>
+        logger.error(s"Amazon S3 couldn't process the request: ${ase.getMessage}")
+
+      case sce: SdkClientException =>
+        logger.error(s"Couldn't contact Amazon S3 or couldn't parse the response: ${sce.getMessage}")
+
+      case e: Exception =>
+        logger.error(s"Unexpected error while persisting to S3: ${e.getMessage}")
+    }
   }
 
   private def executeCQLStatement(batchStatement: BatchStatement): Unit = {
+    logger.info(s"Executing CQL batch statement ${batchStatement.asScala.map(_.toString)}")
     val resTry = Try(Retry.decorateSupplier(retry, () => flushingClient.execute(batchStatement)).get())
     resTry match {
       case Success(_) =>
-      case Failure(_) =>
+      case Failure(exception) =>
+        logger.error(s"Failed to execute CQL batch statement after retries: ${exception.getMessage}")
         batchStatement.asScala.foreach{ stmt =>
           persistToDlq(dlqConfig, stmt.toString)
         }
@@ -218,10 +234,13 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
   }
 
   def executeCQLStatement(statement: String): Unit = {
+    logger.info(s"Executing CQL statement: $statement")
     val resTry = Try(Retry.decorateSupplier(retry, () => flushingClient.execute(statement.toString)).get())
     resTry match {
       case Success(_) =>
-      case Failure(_) => persistToDlq(dlqConfig, statement.toString)
+      case Failure(exception) =>
+        logger.error(s"Failed to execute CQL statement after retries: ${exception.getMessage}")
+        persistToDlq(dlqConfig, statement.toString)
     }
   }
 
@@ -811,7 +830,7 @@ object GlueApp {
         lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition, meterSourceRegistry)
         lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
         lazy val dlqConfig = DlqConfig(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op")
-        lazy val fl = FlushingSet(keyspacesConnPerPar, jsonMapping4s.keyspaces.writeConfiguration, dlqConfig)
+        lazy val fl = FlushingSet(keyspacesConnPerPar, jsonMapping4s.keyspaces.writeConfiguration, dlqConfig, logger)
         lazy val maxStatementsPerBatch = jsonMapping4s.keyspaces.writeConfiguration.maxStatementsPerBatch
 
         def processRow(row: Row): Unit = {

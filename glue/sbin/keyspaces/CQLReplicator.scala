@@ -902,6 +902,7 @@ object GlueApp {
         }
 
         partition.foreach(processRow)
+        fl.flush()
         keyspacesConnPerPar.close()
         cassandraConnPerPar.close()
       })

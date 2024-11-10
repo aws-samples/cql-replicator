@@ -94,7 +94,7 @@ case class Replication(allColumns: Boolean = true, columns: List[String] = List(
                        replicateWithTimestamp: Boolean = false, pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig())
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
-case class Transformation(enabled: Boolean = false, filterExpression: String = "")
+case class Transformation(enabled: Boolean = false, addNonPrimaryKeyColumns: List[String] = List(), filterExpression: String = "")
 case class UdtConversion(enabled: Boolean = false, columns: List[String] = List(""))
 case class Keyspaces(compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig,transformation: Transformation, readBeforeWrite: Boolean = false, udtConversion: UdtConversion, writeConfiguration: WriteConfiguration)
 case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
@@ -1190,22 +1190,27 @@ object GlueApp {
         case "lessThanOrEqual" => c <= replicationPointInTime
         case _ => true
       }
+      val filterColumns = if (jsonMapping4s.keyspaces.transformation.addNonPrimaryKeyColumns.isEmpty) {
+        pkFinal
+      } else {
+        pkFinal ++ jsonMapping4s.keyspaces.transformation.addNonPrimaryKeyColumns
+      }
       val primaryKeysDf = columnTs match {
         case ts if ts == "None" && counterColumns.isEmpty =>
           sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
             load().
-            selectExpr(pkFinal.map(c => c): _*).
+            selectExpr(filterColumns.map(c => c): _*).
             withColumn("ts", lit(0)).
             persist(cachingMode)
         case ts if ts != "None" && replicationPointInTime == 0 =>
           sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
             load().
-            selectExpr(pkFinal.map(c => c): _*).
+            selectExpr(filterColumns.map(c => c): _*).
             persist(cachingMode)
         case ts if ts != "None" && replicationPointInTime > 0 =>
           sparkSession.read.cassandraFormat(srcTableForDiscovery, srcKeyspaceName).option("inferSchema", "true").
             load().
-            selectExpr(pkFinal.map(c => c): _*).
+            selectExpr(filterColumns.map(c => c): _*).
             filter($"ts".isNotNull && pointInTimePredicate($"ts")).
             persist(cachingMode)
         case ts if ts == "None" && counterColumns.nonEmpty =>

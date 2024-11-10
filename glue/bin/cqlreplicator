@@ -1144,16 +1144,16 @@ while (( "$#" )); do
       shift 2
       ;;
     --json-mapping|--jm)
-      params[JSON_MAPPING]="$2"
-      echo "${params[JSON_MAPPING]}" | jq empty
+      JSON_MAPPING="$2"
+      echo "$JSON_MAPPING" | jq empty
       log_info "Provided a json mapping configuration $JSON_MAPPING"
       # Should work for AWS CloudShell, use 0 to disable line wrapping
       if [[ ${params[OS]} == Linux ]]; then
-        params[JSON_MAPPING_B64]=$(echo "$JSON_MAPPING" | base64 -w 0)
+        JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64 -w 0)
       fi
       # Use base64 without params for MacOS instead
       if [[ ${params[OS]} == Darwin ]]; then
-        params[JSON_MAPPING_B64]=$(echo "$JSON_MAPPING" | base64)
+        JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64)
       fi
       shift 2
       ;;

@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+#
+# // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# // SPDX-License-Identifier: Apache-2.0
+#
+# The following script supports only bash versions 4 and 5
+# Recovery parameters
+declare -A params=(
+    [MIGRATOR_VERSION]="1.0"
+    [DESCRIPTION]="Recover after stopping the CQLReplicator via AWS Glue Console"
+    [TILES]=8
+    [S3_LANDING_ZONE]=""
+    [SOURCE_KS]=""
+    [SOURCE_TBL]=""
+)
+
+# Define color codes
+LIGHT_GREEN='\033[1;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+log_info() { echo -e "${LIGHT_GREEN}INFO [$(date -Iseconds)]${NC} $*"; }
+log_error() { echo -e "${RED}ERROR [$(date -Iseconds)]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}WARN [$(date -Iseconds)]${NC} $*"; }
+
+Usage_Exit() {
+    echo "Usage: $0 [options]"
+    echo "Options:"
+    echo "  --state STATE             Set the state"
+    echo "  --tiles, -t TILES         Set the number of tiles"
+    echo "  --landing-zone, -lz ZONE  Set the S3 landing zone"
+    echo "  --src-keyspace, -sk KS    Set the source keyspace"
+    echo "  --src-table, -st TABLE    Set the source table"
+    echo "  --region, -sr REGION      Set the AWS region"
+    exit 1
+}
+
+function Recovery {
+    log_info "The recovery process started for ${params[TILES]}"
+    local s3_path="${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys/"
+    readarray -t rs < <(aws s3 ls "$s3_path")
+    log_info "Looking in $s3_path"
+    # After recovery attempt, recount existing tiles
+    local recovered_cnt_head=0
+    local recovered_cnt_tail=0
+
+    if [[ ${#rs[@]} -eq 0 ]]; then
+            log_info "No objects found in $s3_path. Nothing to recover."
+            return 0
+    fi
+
+    declare -A tail head
+    local word number
+
+    for str in "${rs[@]}"; do
+        if [[ $str =~ PRE[[:space:]]tile_([0-9]+)\.([^/]+)/ ]]; then
+            number=${BASH_REMATCH[1]}
+            word=${BASH_REMATCH[2]}
+            case "$word" in
+                tail) tail[$number]="$str" ;;
+                head) head[$number]="$str" ;;
+                *) log_warn "Unexpected prefix in S3 object: $word" ;;
+            esac
+        else
+            log_warn "Unexpected format in S3 listing: $str"
+        fi
+    done
+
+    local cnt_head=${#head[@]}
+    local cnt_tail=${#tail[@]}
+
+    if ((cnt_head == params[TILES] && cnt_tail == params[TILES])); then
+        log_info "Nothing to recover"
+        return 0
+    fi
+
+    if ((cnt_head < params[TILES] || cnt_tail < params[TILES])); then
+        log_warn "Detected inconsistency in $s3_path"
+
+        # First, recover missing tiles that exist in the opposite set
+        for ((i=0; i<params[TILES]; i++)); do
+            # If head exists but tail doesn't, copy from head to tail
+            if [[ -n ${head[$i]} && -z ${tail[$i]} ]]; then
+                log_warn "Recovering tail from head for tile_$i"
+                src="${s3_path}tile_${i}.head/"
+                dst="${s3_path}tile_${i}.tail/"
+                aws s3 cp "$src" "$dst" --recursive > /dev/null
+                ((recovered_cnt_tail++))
+            # If tail exists but head doesn't, copy from tail to head
+            elif [[ -z ${head[$i]} && -n ${tail[$i]} ]]; then
+                log_warn "Recovering head from tail for tile_$i"
+                src="${s3_path}tile_${i}.tail/"
+                dst="${s3_path}tile_${i}.head/"
+                aws s3 cp "$src" "$dst" --recursive > /dev/null
+                ((recovered_cnt_head++))
+            fi
+        done
+
+        local recovered_head=$(( cnt_head + recovered_cnt_head ))
+        local recovered_tail=$(( cnt_tail + recovered_cnt_tail ))
+
+        if ((recovered_head == params[TILES] && recovered_tail == params[TILES])); then
+            log_info "Recovery completed successfully"
+        else
+            log_error "Some tiles could not be recovered. Manual intervention required or use --cr flag"
+            exit 1
+        fi
+    fi
+}
+
+[[ $# -eq 0 ]] && Usage_Exit
+
+while (( "$#" )); do
+    case "$1" in
+        --state) params[STATE]="$2"; shift 2 ;;
+        --tiles|-t) params[TILES]="$2"; shift 2 ;;
+        --landing-zone|-lz) params[S3_LANDING_ZONE]="$2"; shift 2 ;;
+        --src-keyspace|-sk) params[SOURCE_KS]="$2"; shift 2 ;;
+        --src-table|-st) params[SOURCE_TBL]="$2"; shift 2 ;;
+        --region|-sr) params[AWS_REGION]="$2"; shift 2 ;;
+        --) shift; break ;;
+        -*|--*=) log_error "Unknown option: $1"; Usage_Exit ;;
+        *) PARAMS="$PARAMS $1"; shift ;;
+    esac
+done
+
+[[ -n "$PARAMS" ]] && eval set -- "$PARAMS"
+
+[[ ${params[STATE]} == recovery ]] && Recovery

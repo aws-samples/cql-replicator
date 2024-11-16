@@ -812,6 +812,9 @@ function Start_Discovery {
   else
     workers=${params[OVERRIDE_DISCOVERY_WORKERS]}
   fi
+  # TCO
+  total_dpu=$(( workers + ( params[DEFAULT_WORKERS] * params[TILES] )))
+  ./helper --state get-tco --total-dpu $total_dpu --region ${params[AWS_REGION]}
   log_info "Checking if the discovery job is already running..."
   if [[ ${params[CLEANUP_REQUESTED]} == "true" ]]; then
     log_info "The ledger is going to be cleaned up"

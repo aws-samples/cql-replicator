@@ -36,6 +36,46 @@ Usage_Exit() {
     exit 1
 }
 
+get_region_code() {
+    local region="$1"
+
+    case "${region,,}" in
+        us-east-1)     echo "USE1" ;;
+        us-east-2)     echo "USE2" ;;
+        us-west-1)     echo "USW1" ;;
+        us-west-2)     echo "USW2" ;;
+        eu-west-1)     echo "EUW1" ;;
+        eu-central-1)  echo "EUC1" ;;
+        ap-southeast-1) echo "APS1" ;;
+        ap-southeast-2) echo "APS2" ;;
+        ap-northeast-1) echo "APN1" ;;
+        af-south-1) echo "AFS1" ;;
+        *)
+            log_warn "TCO Unknown region format" >&2
+            return 0
+            ;;
+    esac
+}
+
+Get_TCO() {
+  # Execute the AWS CLI command to fetch Glue DPU price
+  local price
+  local region_code=$(get_region_code "${params[AWS_REGION]}")
+  price=$(aws pricing get-products \
+    --service-code AWSGlue \
+    --filters "Type=TERM_MATCH,Field=usagetype,Value=${region_code}-ETL-DPU-Hour" 2>/dev/null  \
+    | jq -r '.PriceList[] | fromjson | .terms.OnDemand[].priceDimensions[].pricePerUnit.USD' 2>/dev/null)
+  # Check if the command was successful and a price was returned
+  if [[ $? -eq 0 && -n "$price" && "$price" != "null" ]]; then
+    # Format the price in U.S. dollars
+    total_tco=$(echo "scale=2; ($price * ${params[TOTAL_DPU]} + 0.005) / 1" | bc -l)
+    log_info "The price of a Glue DPU is $price USD per hour. The total cost of CQLReplicator is $total_tco USD per hour"
+  else
+    # Print an error message if the price could not be retrieved
+    log_warn "Unable to retrieve the Glue TCO"
+  fi
+}
+
 function Recovery {
     log_info "The recovery process started for ${params[TILES]}"
     local s3_path="${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys/"
@@ -119,6 +159,7 @@ while (( "$#" )); do
         --src-keyspace|-sk) params[SOURCE_KS]="$2"; shift 2 ;;
         --src-table|-st) params[SOURCE_TBL]="$2"; shift 2 ;;
         --region|-sr) params[AWS_REGION]="$2"; shift 2 ;;
+        --total-dpu|-tdpu) params[TOTAL_DPU]="$2"; shift 2 ;;
         --) shift; break ;;
         -*|--*=) log_error "Unknown option: $1"; Usage_Exit ;;
         *) PARAMS="$PARAMS $1"; shift ;;
@@ -128,3 +169,4 @@ done
 [[ -n "$PARAMS" ]] && eval set -- "$PARAMS"
 
 [[ ${params[STATE]} == recovery ]] && Recovery
+[[ ${params[STATE]} == get-tco ]] && Get_TCO

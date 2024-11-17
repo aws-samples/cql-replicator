@@ -69,7 +69,7 @@ Get_TCO() {
   if [[ $? -eq 0 && -n "$price" && "$price" != "null" ]]; then
     # Format the price in U.S. dollars
     total_tco=$(echo "scale=2; ($price * ${params[TOTAL_DPU]} + 0.005) / 1" | bc -l)
-    log_info "The price of a Glue DPU is $price USD per hour. The total cost of CQLReplicator is $total_tco USD per hour"
+    log_info "The price of a Glue DPU is $price USD per hour. ${RED}The total cost of running CQLReplicator is $total_tco USD per hour${NC}"
   else
     # Print an error message if the price could not be retrieved
     log_warn "Unable to retrieve the Glue TCO"

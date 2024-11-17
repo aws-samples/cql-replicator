@@ -227,8 +227,9 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
       case Success(_) =>
       case Failure(exception) =>
         logger.error(s"Failed to execute CQL batch statement after retries: ${exception.getMessage}")
-        batchStatement.asScala.foreach{ stmt =>
-          persistToDlq(dlqConfig, stmt.toString)
+        batchStatement.asScala.foreach{
+          stmt =>
+            persistToDlq(dlqConfig, stmt.asInstanceOf[SimpleStatement].getQuery)
         }
     }
   }

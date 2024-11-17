@@ -238,14 +238,24 @@ The target column link will be populated by a referencing timeUUID, and col1 wil
 If you disable `enableRefByTimeUUID` the S3 bucket will be populated in the following format s3://my-application-resource/ks_test_cql_replicator/test_cql_replicator/col1/key=<col0>:<key>/payload,
 where col0 is the clustering column, and key is the partition key. The target column link and col1 will be skipped.
 
-### Replay failed operations (inserts, updates, and deletes)
+### Handling Failed Rows
+When the CQLReplicator encounters persistent failures during replication, failed rows are automatically stored in 
+a Dead Letter Queue (DLQ) directory within your S3 bucket.
+Failed rows are stored in the following S3 path format: s3://cql-replicator-6234567890-us-east-1-ver5/ks-name/tbl-name/dlq.
 
-`--replay-log` - this option allows you to replay failed operations during the replication phase, use cases:
-1) you have large partitions (over tens of megabytes) in the source,
-2) you expect the high number of retries against the target (over 256 retries).
+Common failure scenarios:
+- When source partitions exceed tens of megabytes
+- When operations exceed the maximum retry limit (64 attempts). Usually indicates persistent connectivity or resource issues
+- When the target table schema doesn't match the source. Fix the schema before replaying
 
-The logs will be stored in your landing S3 bucket, e.g. s3://cql-replicator-6234567890-us-east-1-ver5/ks-name/tbl-name/dlq,
-the file format is `log-epoch.msg`.
+Best practises:
+- Review the failed rows in DLQ to understand the failure patterns
+- Address any underlying issues (schema, connectivity, resources) before replay
+- Monitor the replay process to ensure successful completion
+
+To replay failed rows: 
+1. Stop the CQLReplicator with `request-stop`
+2. Run it again with `--replay-log` - this option allows you to replay failed operations during the replication phase.
 
 ## Stop migration process
 
@@ -360,18 +370,6 @@ command.
 
 ***You may incur additional charges when you enable job metrics and CloudWatch custom metrics are created***
 
-## Cost optimization
-
-In order to reduce AWS Glue costs after the historical workload moved to the target storage:
-
-1. Stop the migration
-   process: `cqlreplicator --state request-stop --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
-   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5`
-2. Restart the migration process with the same number of tiles but lower number of
-   DPUs: `cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
-   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
-   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 2000000 --env ver5`
-
 ## Point in time replication
 
 if you want to replicate your data from a timestamp simply add the flag `--start-replication-from` followed by
@@ -395,7 +393,6 @@ if you want to change the default point in time replication behavior and replica
   }
 }
 ```
-
 
 ## Compress selected columns
 
@@ -564,6 +561,23 @@ The following parameters must be
 set `allColumns`:`false`, `columns` : ["partitionKey", "clusteringKey","regularColumn"],
 and `useCustomSerializer`:`true`.
 
+## Cost optimization
+
+In order to reduce AWS Glue costs after the historical workload moved to the target storage:
+
+1. Stop the migration process: 
+    ```shell
+    cqlreplicator --state request-stop --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5
+    ```
+2. Restart the migration process with the same number of tiles but with lower number of
+   DPUs:
+   ```shell
+   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 2000000 --env ver5`
+   ```
+
 ### Limitations
 
 The custom JSON serializer supports the following data types: boolean, int, text, ascii, bigint, blob, counter, date,
@@ -645,7 +659,7 @@ The following run command starts 8 tiles, and replicate the source table `test_c
 to `s3://cql-replicator-backup/snapshots/keyspace_prefix/table_prefix/[0-7]/[insert|update|delete]/YYYY-MM-HHTMM:SS:ss.sss`.
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1" --env parquet \
+./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --env parquet \
                 --ttl-column col2 --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --trg-keyspace keyspace_prefix  --trg-table table_prefix --writetime-column col1 --json-mapping '
                 {"replication": {
                         "allColumns": true,

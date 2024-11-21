@@ -86,8 +86,8 @@ function Recovery {
     local recovered_cnt_tail=0
 
     if [[ ${#rs[@]} -eq 0 ]]; then
-            log_info "No objects found in $s3_path. Nothing to recover."
-            return 0
+        log_info "No objects found in $s3_path. Nothing to recover."
+        return 0
     fi
 
     declare -A tail head
@@ -111,8 +111,7 @@ function Recovery {
     local cnt_tail=${#tail[@]}
 
     if ((cnt_head == params[TILES] && cnt_tail == params[TILES])); then
-        log_info "Nothing to recover"
-        return 0
+        log_info "Heads=$cnt_head and tails=$cnt_tail are equal in $s3_path. Nothing to recover."
     fi
 
     if ((cnt_head < params[TILES] || cnt_tail < params[TILES])); then
@@ -142,11 +141,14 @@ function Recovery {
 
         if ((recovered_head == params[TILES] && recovered_tail == params[TILES])); then
             log_info "Recovery completed successfully"
+            return 0
         else
-            log_error "Some tiles could not be recovered. Manual intervention required or use --cr flag"
-            exit 1
+            log_warn "Some tiles could not be recovered. Manual intervention required or use --cr flag"
+            return 0
         fi
     fi
+    code=$?
+    return $code
 }
 
 [[ $# -eq 0 ]] && Usage_Exit
@@ -168,5 +170,11 @@ done
 
 [[ -n "$PARAMS" ]] && eval set -- "$PARAMS"
 
-[[ ${params[STATE]} == recovery ]] && Recovery
-[[ ${params[STATE]} == get-tco ]] && Get_TCO
+[[ ${params[STATE]} == recovery ]] && {
+  Recovery
+  exit $?
+}
+[[ ${params[STATE]} == get-tco ]] && {
+  Get_TCO
+  exit $?
+}

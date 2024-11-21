@@ -1235,12 +1235,13 @@ eval set -- "$PARAMS"
 
 if [[ ${params[STATE]} == run ]]; then
   if [[ ${params[CLEANUP_REQUESTED]} != "true" ]]; then
-    ./helper --state recovery --tiles ${params[TILES]} \
-    --landing-zone ${params[S3_LANDING_ZONE]} --region ${params[AWS_REGION]} \
-    --src-keyspace ${params[SOURCE_KS]} --src-table ${params[SOURCE_TBL]}
-    if [ $? -ne 0 ]; then
-        log_error "Recovery step has failed!"
-        exit 1
+    ./helper --state recovery --tiles "${params[TILES]}" \
+    --landing-zone "${params[S3_LANDING_ZONE]}" --region "${params[AWS_REGION]}" \
+    --src-keyspace "${params[SOURCE_KS]}" --src-table "${params[SOURCE_TBL]}"
+    RETURN_CODE=$?
+    if [  $RETURN_CODE -ne 0 ]; then
+        log_error "Recovery step has failed, the code is ${RETURN_CODE}"
+        exit $RETURN_CODE
     fi
   fi
 

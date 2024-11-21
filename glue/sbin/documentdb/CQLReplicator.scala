@@ -64,9 +64,19 @@ import net.jpountz.xxhash.XXHashFactory
 import com.mongodb.ConnectionString
 import com.mongodb.client.{MongoClients, MongoDatabase}
 import org.bson.Document
-// import org.mongodb.scala._
-// import org.mongodb.scala.model.Filters._
-// import org.mongodb.scala.model.UpdateOptions
+// import com.mongodb.client.*;
+// import com.mongodb.client.model.*;
+import org.mongodb.scala._
+import org.mongodb.scala.model.Filters._
+import org.mongodb.scala.model.UpdateOptions
+import org.mongodb.scala.model.ReplaceOptions
+import org.mongodb.scala.model.Updates._
+import org.bson.conversions.Bson
+import org.mongodb.scala.model.Filters.equal
+import org.mongodb.scala.model.Updates.set
+import org.bson.conversions.Bson
+import java.util.HashMap
+
 
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
@@ -130,7 +140,7 @@ object GlueApp {
     def getDocdbConnection(docdbConfig: DocdbConfig, clientName: String): MongoDatabase = {
 
       val databaseName = "sateesh"
-      val connectionString = "mongodb://<>:<>@mydocdb.cluster-cixmtbbtpjvf.us-east-1.docdb.amazonaws.com:27017/?replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
+      val connectionString = "mongodb://<user>:<password>@<connection_string>"
       val client = MongoClients.create(new ConnectionString(connectionString))
       client.getDatabase(databaseName)
 
@@ -424,22 +434,26 @@ object GlueApp {
                     }
                     if (!rs.isEmpty) {
                       val jsonRow = rs.get.getString(0).replace("'", "\\\\u0027")
+                      println(jsonRow)
                       val res = convertToKeyValuePair(whereClause, parse(jsonRow))
+                      println(res)
                       val key = computeHash(res._1, xxHash64Seed)
                       if (ttlColumn.equals("None")) {
-                        // redisCluster.set(key, res._2)
                         val collection = docdbCluster.getCollection(s"$trgTableName")
-                        // val doc = new Document().append(key,res._2)
                         val doc = parse(jsonRow)
                         val jsonString: String = compact(render(doc))
                         val bsonDocument: Document = Document.parse(jsonString)
                         bsonDocument.append("key",key)
-                        collection.insertOne(bsonDocument)
-
-                        // val filter = equal("key", key)
-                        // val update = Document("$set" -> bsonDocument)
-                        // val options = new UpdateOptions().upsert(true)
-                        // collection.updateOne(filter, update, options)
+                        println("reached if block at key")
+                        println(key)
+                        val map = new HashMap[String, Object]()
+                        map.put("$set", bsonDocument)
+                        val filter: Bson = equal("key", key)
+                        val update: Bson = new Document(map)
+                        println("reached if block at update")
+                        println(update)
+                        val options = new UpdateOptions().upsert(true)
+                        collection.updateOne(filter, update, options)
                       } else {
                         val json4sRow = parse(res._2)
                         val jsonValueWithoutTTL = getJsonWithoutTTLColumn(json4sRow)
@@ -448,16 +462,21 @@ object GlueApp {
                         // redisCluster.expire(key, ttl.toLong)
                         val collection = docdbCluster.getCollection(s"$trgTableName")
                         val doc = new Document().append(key,jsonValueWithoutTTL)
+                        println("reached else block")
                         collection.insertOne(doc)
                       }
                     }
                   }
                   if (op == "delete") {
-                    // redisCluster.del(computeHash(convertCassandraKeyToGenericKey(whereClause), xxHash64Seed))
-                    val collection = docdbCluster.getCollection(trgTableName)
-                    val doc = new Document("name","pi1").append("value",3.14)
-                    collection.insertOne(doc)
-                  }
+                    println("entered delete loop")
+                    val value = computeHash(convertCassandraKeyToGenericKey(whereClause), xxHash64Seed)
+                    println(value)
+                    val collection = docdbCluster.getCollection(s"$trgTableName")
+                    val filter: Bson = equal("key", value)
+                    collection.deleteMany(filter)
+
+                    
+                }
                 }
                 }
               }

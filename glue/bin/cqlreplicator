@@ -320,12 +320,12 @@ function Init {
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
   ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar")
-  ARTIFACTS_DOCUMENTDB=("/com/amazonaws/aws-java-sdk-docdb/1.12.687/aws-java-sdk-docdb-1.12.687.jar")
+  ARTIFACTS_DOCUMENTDB=("/com/amazonaws/aws-java-sdk-docdb/1.12.687/aws-java-sdk-docdb-1.12.687.jar" "/org/mongodb/scala/mongo-scala-driver_2.12/4.3.2/mongo-scala-driver_2.12-4.3.2.jar" "/org/mongodb/scala/mongo-scala-bson_2.12/4.3.2/mongo-scala-bson_2.12-4.3.2.jar")
   S3_PATH_BASE=("$S3_LANDING_ZONE/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "$S3_LANDING_ZONE/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   S3_PATH_KEYSPACES=("$S3_LANDING_ZONE/artifacts/vavr-0.10.4.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-retry-1.7.1.jar" "$S3_LANDING_ZONE/artifacts/resilience4j-core-1.7.1.jar")
   S3_PATH_MEMORYDB=("$S3_LANDING_ZONE/artifacts/jedis-4.4.6.jar")
   S3_PATH_OSS=("$S3_LANDING_ZONE/artifacts/opensearch-spark-30_2.12-1.0.1.jar")
-  S3_PATH_DOCUMENTDB=("$S3_LANDING_ZONE/artifacts/aws-java-sdk-docdb-1.12.687.jar")
+  S3_PATH_DOCUMENTDB=("$S3_LANDING_ZONE/artifacts/aws-java-sdk-docdb-1.12.687.jar" "$S3_LANDING_ZONE/artifacts/mongo-scala-driver_2.12-4.3.2.jar" "$S3_LANDING_ZONE/artifacts/mongo-scala-bson_2.12-4.3.2.jar")
 
   uploader_jars "${ARTIFACTS_BASE[@]}"
   join_array "${S3_PATH_BASE[@]}"

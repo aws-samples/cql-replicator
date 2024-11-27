@@ -45,7 +45,7 @@ The following command initializes the CQLReplicator environment, which involves 
 a S3 bucket, a Glue job, migration keyspace, and ledger table. 
 
 ```shell
-    cqlreplicator --state init --sg '"sg-1","sg-2"' \ 
+    cqlreplicator --cmd init --sg '"sg-1","sg-2"' \ 
                   --subnet "subnet-XXXXXXXXXXXX" --az us-east-1a --region us-east-1 \
                   # Optional
                   --env ver5 \ 
@@ -87,7 +87,7 @@ After running the below command, you should find in the AWS account:
 
 ## Start migration process
 
-To operate CQLReplicator on AWS Glue, you need to use `--state run` command, followed by a series of parameters. The
+To operate CQLReplicator on AWS Glue, you need to use `--cmd run` command, followed by a series of parameters. The
 precise configuration of these is primarily determined by your unique migration requirements. For instance, these
 settings may vary if you choose to replicate TTLs, updates, or offloading objects exceeding 1MB to Amazon S3.
 
@@ -101,7 +101,7 @@ The CQLReplicator offers three options for operation:
 3. For custom configurations:
    * Use the command: --tiles 12 (without specifying --max-wcu-traffic)
    * This allows you to set a custom number of tiles with your preferred worker type
-   * Note: Changing the number of tiles requires rerunning the CQLReplicator with the --cr flag
+   * Note: Changing the number of tiles requires to resize the migration process
 4. When estimating tile requirements:
    * Each tile (concurrent Glue job) can process up to 74 million primary keys
    * This is achieved using 299 DPUs (G.025X) maximum
@@ -113,8 +113,11 @@ These guidelines help optimize the CQLReplicator's performance based on your spe
 
 Let's run the following command to replicate the workload from the Cassandra cluster to Amazon Keyspaces with the write traffic 20000 WCUs per second:
 
+Note: The following command is going to capture only "insert" or "delete". In order, to capture "update" you need to add an arbitrary column from you table
+that is constantly updated, for example, add `--writetime-column your-column` to the following command line. 
+
 ```shell
-   cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-9234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-9234567890-us-east-1-ver5 --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
                  --env ver5
@@ -133,7 +136,7 @@ example with 8 tiles and one cassandra row is under 2KB, the traffic is going to
 minutes. At peak traffic, it can reach up to 6,300 WCUs per second.
 
 ```shell
-   cqlreplicator --state run --max-wcu-traffic 6000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 6000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
                  --env ver5 --inc-traffic
@@ -146,7 +149,7 @@ However, when dealing with large partitions, you may want to disable batching an
 This can help ensure smoother migration of large partitions.
 
 ```shell
-   cqlreplicator --state run --max-wcu-traffic 6000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 6000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
                  --env ver5 --inc-traffic --json-mapping '{"keyspaces": {"writeConfiguration": { "maxStatementsPerBatch": 1}}}’
@@ -157,7 +160,7 @@ If you want to replicate only the historical workload and release Glue resources
 `--workload-type batch` to the command line, for example:
 
 ```shell
-   cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
                  --env ver5 --inc-traffic --env ver5 --workload-type batch
@@ -168,7 +171,7 @@ If you want to replicate only the historical workload and release Glue resources
 the TTL feature should be [enabled](https://docs.aws.amazon.com/keyspaces/latest/devguide/TTL-how-it-works.html#ttl-howitworks_enabling) 
 on the target table before running the following command
 ```shell
-   cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --ttl-column col3 \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic --env ver5
 ```
@@ -178,7 +181,7 @@ on the target table before running the following command
 the Client-Side Timestamps feature should be [enabled](https://docs.aws.amazon.com/keyspaces/latest/devguide/client-side-timestamps.html) 
 on the target table before running the following command
 ```shell
-   cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --writetime-column col3 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5 \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator  \
                  --json-mapping '
@@ -202,7 +205,7 @@ LZ4DecompressorWithLength and is NOT compatible with any other decompressors in 
 This class deliberately does not extend LZ4Compressor because they are not interchangeable.
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --src-keyspace ks_test_cql_replicator \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --src-keyspace ks_test_cql_replicator \
                 --src-table test_cql_replicator --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --env ver5 \
                 --region us-east-1 --ttl-column col3 --json-mapping '
                 {
@@ -262,28 +265,28 @@ To replay failed rows:
 To stop migration process gracefully run the following command for all tiles:
 
 ```shell
-   cqlreplicator --state request-stop --landing-zone s3://cql-replicator-6234567890-us-east-1 --region us-east-1-ver5 \
+   cqlreplicator --cmd request-stop --landing-zone s3://cql-replicator-6234567890-us-east-1 --region us-east-1-ver5 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5
 ```
 
 To stop migration process gracefully run the following command for a single tile:
 
 ```shell
-   cqlreplicator --state request-single-stop --tile 1 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd request-single-stop --tile 1 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5
 ```
 
 To start migration process for a single tile:
 
 ```shell
-   cqlreplicator --state run-single --tile 1 --tiles 8 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run-single --tile 1 --tiles 8 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic --env ver5
 ```
 
 To force an immediate termination of the CQLReplicator:
 ```shell
-   cqlreplicator --state kill --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd kill --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5
 ```
 
@@ -306,7 +309,7 @@ if you want to stop it and run it again.
 To obtain the number of replicated rows during the back filling phase, run the following command:
 
 ```shell
-   cqlreplicator --state stats --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 \ 
+   cqlreplicator --cmd stats --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 \ 
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
                  --region us-east-1 --env ver5
 ```
@@ -314,7 +317,7 @@ To obtain the number of replicated rows during the back filling phase, run the f
 To obtain the number of replicated rows after the back filling phase, run the following command:
 
 ```shell
-cqlreplicator --state stats --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 \
+cqlreplicator --cmd stats --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 \
               --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
               --region us-east-1 --replication-stats-enabled --env ver5
 ```
@@ -342,8 +345,8 @@ cqlreplicator --state stats --landing-zone s3://cql-replicator-6234567890-us-eas
 +------------------------------------------------------------------------+
 | 1        | 2        | 2        | 1        | "2024-02-02T21:50:25.454"  |
 +------------------------------------------------------------------------+
-[2024-02-02T16:50:39-05:00] Discovered rows in ks_test_cql_replicator.test_cql_replicator is 70270
-[2024-02-02T16:50:39-05:00] Replicated rows in ks_test_cql_replicator.test_cql_replicator is 70270
+[2024-02-02T16:50:39-05:00] Discovered rows in ks_test_cql_replicator.test_cql_replicator is 70,270
+[2024-02-02T16:50:39-05:00] Replicated rows in ks_test_cql_replicator.test_cql_replicator is 70,270
 ```
 ## Monitor incoming traffic with Amazon CloudWatch 
 
@@ -376,7 +379,7 @@ if you want to replicate your data from a timestamp simply add the flag `--start
 the timestamp to your command line:
 
 ```shell
-   cqlreplicator --state --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5  \
+   cqlreplicator --cmd --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5  \
                  --writetime-column col1 --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
@@ -405,7 +408,7 @@ and is NOT compatible with any other decompressors in lz4-java or any other lz4 
 LZ4Compressor because they are not interchangeable.
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
                                       --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_compressed_columns --env ver5 \
                                       --json-mapping '{
@@ -431,7 +434,7 @@ list `columns`:`["col1","col2"]`
 in the json mapping during the `run`, for example,
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
                                       --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_compressed_columns --env ver5 \
                                       --json-mapping '{
@@ -451,7 +454,7 @@ in the json mapping during the `run`, for example,
 ```
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
                                       --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns --env ver5 \
                                       --json-mapping '{
@@ -474,7 +477,7 @@ in the json mapping during the `run`, for example,
 There are use-cases when you need to filter out some certain keys during the migration phase, for example: 
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
                                       --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns --env ver5 \
                                       --json-mapping '{
@@ -488,7 +491,7 @@ There are use-cases when you need to filter out some certain keys during the mig
 ```
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
                                       --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns --env ver5 \
                                       --json-mapping '{
@@ -507,7 +510,7 @@ Note: You can use only primary key columns in the `filterExpression` a the `filt
 
 In order to preserve existing records during the bulk migration phase set `readBeforeWrite` to `true` in the `json-mapping`, for example:
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
                                       --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns --env ver5 \
                                       --json-mapping '{
@@ -523,7 +526,7 @@ This enhancement provides a seamless way to transform UDTs into a more universal
 facilitating easier integration with other NoSQL databases.
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
                                       --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns --env ver5 \
                                       --json-mapping '{
@@ -538,7 +541,7 @@ The CQLReplicator relies on Cassandra JSON encoding/decoding that has been intro
 older Cassandra version you must enable the custom JSON Serialization on the client side:
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \
                                       --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns --env ver5 \
                                       --json-mapping '{
@@ -563,38 +566,84 @@ and `useCustomSerializer`:`true`.
 
 ## Cost optimization
 
+### Use Batch Mode for historical workload
 In order to reduce AWS Glue costs after the historical workload moved to the target storage:
 
 1. Stop the migration process: 
     ```shell
-    cqlreplicator --state request-stop --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+    cqlreplicator --cmd request-stop --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5
     ```
 2. Restart the migration process with the same number of tiles but with lower number of
    DPUs:
    ```shell
-   cqlreplicator --state run --tiles 8 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 5000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
    --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
-   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --override-rows-per-worker 2000000 --env ver5`
+   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --env ver5
    ```
 
-### Limitations
+### Use scheduled run
+
+1. Stop the migration process:
+    ```shell
+    cqlreplicator --cmd request-stop --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5
+    ```
+2. Schedule the migration process to run it every 30 minutes:
+
+   ```shell
+   ./cqlreplicator --cmd scheduled-run --max-wcu-traffic 5000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+                   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                   --env ver5 --schedule "30 * * * *"
+   ```
+   Note: Use only EC2 or ECS to run scheduled jobs
+
+### Monitor your Migration costs 
+
+- Monitor costs by reviewing the automated estimation displayed when CQLReplicator initializes, which provides output such as: 
+  `The total cost of running CQLReplicator is XX.YY USD per hour`
+- Use Cost Dashboard and AWS Cost Explorer to calculate and track cost savings from optimization efforts
+
+## Resize the replication process
+
+To modify the number of tiles during the replication process:
+- Safely stop the current migration process: Do not force-stop any running jobs to prevent data inconsistency,
+- Ensure system state: Verify all Glue jobs show "COMPLETED" status and Check that no replication processes are actively running
+- After confirmation of complete shutdown, proceed with your desired tile count modifications using the appropriate commands:
+
+    a. Reduce the number of tiles:
+    ```shell 
+      ./cqlreplicator --cmd resize --tiles 4 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \ 
+                      --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5
+    ```
+    Increase the number of tiles:
+    ```shell 
+      ./cqlreplicator --cmd resize --tiles 12 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+                      --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env ver5
+    ```
+    b. After the resizing job is completed you can start the CQLReplicator again with the new number of tiles `--tiles 12`
+
+After confirming the resizing job has successfully completed, restart CQLReplicator with the updated number of tiles. 
+Before restarting, verify that all system components are in a stable state.
+
+## Limitations
 
 The custom JSON serializer supports the following data types: boolean, int, text, ascii, bigint, blob, counter, date,
 decimal, double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
 
 ## Know issues
 
-| Error Message/Issue                                                                                                           | CW Discovery logs | CW Replication logs | Work around                                                                                                                                                                                                     | Requires the ledger cleanup |
-|-------------------------------------------------------------------------------------------------------------------------------|-------------------|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------|
-| 1. No space left on device                                                                                                    | Yes               | No                  | Scale out the replication process by increasing the number of tiles                                                                                                                                             | Yes                         |
-| 2. No space left on device                                                                                                    | Yes               | No                  | Add the following parameter `--discovery-worker-type G.2X` to scale up the the DPU for the discovery glue job by replacing 1.X to 2.X                                                                           | No                          |
-| 3. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Create a new Glue connection with the new subnet and attach the CQLReplicator Glue Job                                                                                                                          | No                          |
-| 4. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Add the following parameter `--override-rows-per-worker 500000` to reduce the number of DPUs/IPs                                                                                                                | No                          |
-| 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    | No                          |
-| 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> | No                          |
-| 7. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       | No                          |
-| 8. java.lang.OutOfMemoryError: GC overhead limit exceeded                                                                     | Yes               | No                  | Increase the number of DPUs for the discovery job by using the parameter, e.g. `--override-discovery-workers 12`                                                                                                |                             |
+| Error Message/Issue                                                                                                           | CW Discovery logs | CW Replication logs | Work around                                                                                                                                                                                                     |
+|-------------------------------------------------------------------------------------------------------------------------------|-------------------|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1. No space left on device                                                                                                    | Yes               | No                  | Scale out the replication process by increasing the number of DPUs per discovery Glue job, for example, add `--odw 15`                                                                                          |
+| 2. No space left on device                                                                                                    | Yes               | No                  | Add the following parameter `--discovery-worker-type G.2X` to scale up the the DPU for the discovery glue job by replacing 1.X to 2.X                                                                           |
+| 3. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Create a new Glue connection with the new subnet and attach the CQLReplicator Glue Job                                                                                                                          |
+| 4. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Add the following parameter `--override-rows-per-worker 500000` to reduce the number of DPUs/IPs                                                                                                                |
+| 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    |
+| 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> |
+| 7. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       |
+| 8. java.lang.OutOfMemoryError: GC overhead limit exceeded                                                                     | Yes               | No                  | Increase the number of DPUs for the discovery job by using the parameter, e.g. `--override-discovery-workers 12`                                                                                                |
 
 ### Work around for `Cassandra timeout during read query at consistency ONE` with Cassandra materialized view
 
@@ -604,7 +653,7 @@ decimal, double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
 3. Add the json mapping to the run command, e.g.
 
 ```shell 
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \ 
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --writetime-column col2 \ 
                                       --ttl-column reg_column --region us-east-1 --src-keyspace ks_test_cql_replicator \ 
                                       --src-table ks_test_cql_replicator --trg-keyspace ks_test_cql_replicator --env ver5 \ 
                                       --trg-table ks_test_cql_replicator --json-mapping '{
@@ -633,7 +682,7 @@ decimal, double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
 The following command will delete the Glue job, connector, the S3 bucket, and the ledger table:
 
 ```shell
-   cqlreplicator --state cleanup --landing-zone s3://cql-replicator-6234567890-us-east-1 --region "us-east-1"
+   cqlreplicator --cmd cleanup --landing-zone s3://cql-replicator-6234567890-us-east-1 --region "us-east-1"
 ```
 
 ## Replicate data to other targets
@@ -647,7 +696,7 @@ You can use the CQLReplicator to replicate the workload from Amazon Keyspaces to
 deploys the CQLReplicator for Amazon S3.
 
 ```shell
-cqlreplicator --state init --sg '"sg-1"' \
+cqlreplicator --cmd init --sg '"sg-1"' \
                            --subnet "subnet-XXXXXXX" 
                            --region "us-east-1" \ 
                            --az "us-east-1a" \
@@ -659,7 +708,7 @@ The following run command starts 8 tiles, and replicate the source table `test_c
 to `s3://cql-replicator-backup/snapshots/keyspace_prefix/table_prefix/[0-7]/[insert|update|delete]/YYYY-MM-HHTMM:SS:ss.sss`.
 
 ```shell
-./cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --env parquet \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --env parquet \
                 --ttl-column col2 --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --trg-keyspace keyspace_prefix  --trg-table table_prefix --writetime-column col1 --json-mapping '
                 {"replication": {
                         "allColumns": true,
@@ -692,7 +741,7 @@ You can specify the S3 bucket name and prefix to store the parquet files. Moreov
 In order to connect to Amazon MemoryDB you need configure `/conf/RedisConnector.conf` and after run the following command:
 
 ```shell
-cqlreplicator --state init --sg '"sg-1"' \
+cqlreplicator --cmd init --sg '"sg-1"' \
                            --subnet "subnet-XXXXXXX" 
                            --region "us-east-1" \ 
                            --az "us-west-1a" \
@@ -705,7 +754,7 @@ cqlreplicator --state init --sg '"sg-1"' \
 ```
 
 ```shell
-   cqlreplicator --state run --max-wcu-traffic 6000 --landing-zone s3://cql-replicator-6234567890-us-east-1-memorydb --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 6000 --landing-zone s3://cql-replicator-6234567890-us-east-1-memorydb --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --env memorydb
 ```
@@ -717,7 +766,7 @@ The following command will create Glue connector to C* (optional for Amazon Keys
 Glue connector to Amazon OpenSearch Service uses `subnet-YYYYYY`, `sg-2`, and `us-east-1a`:
 
 ```shell
-cqlreplicator --state init --sg '"sg-1"' \
+cqlreplicator --cmd init --sg '"sg-1"' \
                            --subnet "subnet-XXXXXXX" 
                            --region "us-east-1" \ 
                            --az "us-east-1a" \
@@ -732,7 +781,7 @@ cqlreplicator --state init --sg '"sg-1"' \
 After the init phase is completed you can run the following command to start the replication process:
 
 ```shell
-   cqlreplicator --state run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-opensearch --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-opensearch --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
                  --writetime-column col2 \

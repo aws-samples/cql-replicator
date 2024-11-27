@@ -397,14 +397,17 @@ function Usage_Exit {
   echo "  --skip-discovery, --sd           Skip discovery job"
   echo "  --cqlreplicator-enviroment, --env ENV  Set CQLReplicator environment"
   echo "  --cleanup-requested, --cr        Request cleanup"
+  echo "  --schedule                       Set the cron schedule, for example, 0 * * * *"
   echo
-  echo "States:"
+  echo "Commands:"
   echo "  init        Deploy CQLReplicator Glue job and download jars"
   echo "  run         Start migration process"
   echo "  stats       Upload progress (only for historical workload)"
   echo "  request-stop  Stop migration process gracefully"
   echo "  cleanup     Delete all CQLReplicator artifacts"
   echo "  kill        Stop migration process forcefully"
+  echo "  resize      Resize the number of tiles"
+  echo "  scheduled-run  Schedule CQLReplicator with as a cron job on EC2 instance"
   exit 1
 }
 

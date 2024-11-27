@@ -47,11 +47,9 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
 ```shell
     cqlreplicator --cmd init --sg '"sg-1","sg-2"' \ 
                   --subnet "subnet-XXXXXXXXXXXX" --az us-east-1a --region us-east-1 \
-                  # Optional
-                  --env ver5 \ 
+                  --env ver5 \  # Optional 
                   --glue-iam-role glue-cassandra-migration \
-                  # Optional 
-                  --landing-zone s3://your-s3-bucket
+                  --landing-zone s3://your-s3-bucket  # Optional 
 ```
 ![](init-CQLReplicator.png "Init")
 

@@ -7,7 +7,7 @@
 # Recovery parameters
 declare -A params=(
     [MIGRATOR_VERSION]="1.0"
-    [DESCRIPTION]="Recover after stopping the CQLReplicator via AWS Glue Console"
+    [DESCRIPTION]="CQLReplicator Helper"
     [TILES]=8
     [S3_LANDING_ZONE]=""
     [SOURCE_KS]=""
@@ -110,42 +110,43 @@ function Recovery {
     local cnt_head=${#head[@]}
     local cnt_tail=${#tail[@]}
 
-    if ((cnt_head == params[TILES] && cnt_tail == params[TILES])); then
-        log_info "Heads=$cnt_head and tails=$cnt_tail are equal in $s3_path. Nothing to recover."
-    fi
+   if [[ $cnt_head -eq ${params[TILES]} && $cnt_tail -eq 0 ]] || [[ $cnt_head -eq 0 && $cnt_tail -eq ${params[TILES]} ]]; then
+       log_info "Heads=$cnt_head and tails=$cnt_tail are equal in $s3_path. Nothing to recover."
+       # Let the discovery job to reconcile ledger before starting
+   else
+     if ((cnt_head < params[TILES] || cnt_tail < params[TILES])); then
+          log_warn "Detected inconsistency in $s3_path"
 
-    if ((cnt_head < params[TILES] || cnt_tail < params[TILES])); then
-        log_warn "Detected inconsistency in $s3_path"
+          # First, recover missing tiles that exist in the opposite set
+          for ((i=0; i<params[TILES]; i++)); do
+              # If head exists but tail doesn't, copy from head to tail
+              if [[ -n ${head[$i]} && -z ${tail[$i]} ]]; then
+                  log_warn "Recovering tail from head for tile_$i"
+                  src="${s3_path}tile_${i}.head/"
+                  dst="${s3_path}tile_${i}.tail/"
+                  aws s3 cp "$src" "$dst" --recursive > /dev/null
+                  ((recovered_cnt_tail++))
+              # If tail exists but head doesn't, copy from tail to head
+              elif [[ -z ${head[$i]} && -n ${tail[$i]} ]]; then
+                  log_warn "Recovering head from tail for tile_$i"
+                  src="${s3_path}tile_${i}.tail/"
+                  dst="${s3_path}tile_${i}.head/"
+                  aws s3 cp "$src" "$dst" --recursive > /dev/null
+                  ((recovered_cnt_head++))
+              fi
+          done
 
-        # First, recover missing tiles that exist in the opposite set
-        for ((i=0; i<params[TILES]; i++)); do
-            # If head exists but tail doesn't, copy from head to tail
-            if [[ -n ${head[$i]} && -z ${tail[$i]} ]]; then
-                log_warn "Recovering tail from head for tile_$i"
-                src="${s3_path}tile_${i}.head/"
-                dst="${s3_path}tile_${i}.tail/"
-                aws s3 cp "$src" "$dst" --recursive > /dev/null
-                ((recovered_cnt_tail++))
-            # If tail exists but head doesn't, copy from tail to head
-            elif [[ -z ${head[$i]} && -n ${tail[$i]} ]]; then
-                log_warn "Recovering head from tail for tile_$i"
-                src="${s3_path}tile_${i}.tail/"
-                dst="${s3_path}tile_${i}.head/"
-                aws s3 cp "$src" "$dst" --recursive > /dev/null
-                ((recovered_cnt_head++))
-            fi
-        done
+          local recovered_head=$(( cnt_head + recovered_cnt_head ))
+          local recovered_tail=$(( cnt_tail + recovered_cnt_tail ))
 
-        local recovered_head=$(( cnt_head + recovered_cnt_head ))
-        local recovered_tail=$(( cnt_tail + recovered_cnt_tail ))
-
-        if ((recovered_head == params[TILES] && recovered_tail == params[TILES])); then
-            log_info "Recovery completed successfully"
-            return 0
-        else
-            log_warn "Some tiles could not be recovered. Manual intervention required or use --cr flag"
-            return 0
-        fi
+          if ((recovered_head == params[TILES] && recovered_tail == params[TILES])); then
+              log_info "Recovery completed successfully"
+              return 0
+          else
+              log_warn "Some tiles could not be recovered. Manual intervention required or use --cr flag"
+              return 0
+          fi
+      fi
     fi
     code=$?
     return $code

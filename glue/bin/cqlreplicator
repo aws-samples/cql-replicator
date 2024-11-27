@@ -40,7 +40,8 @@ declare -A params=(
     [GLUE_TYPE]=gluestreaming
     [WCU_TRAFFIC]=0
     [DEFAULT_ROWS_PER_SECOND]=600
-    [SAMPLER_RUNNING]=false
+    [PROCESS_RUNNING]=false
+    [TIME_SCHEDULE]=""
 )
 
 # Dynamic variables
@@ -88,10 +89,26 @@ command -v curl -V >/dev/null 2>&1 || { echo >&2 "curl requires but it's not ins
 command -v jq -V >/dev/null 2>&1 || { echo >&2 "jq requires but it's not installed. Aborting."; exit 1; }
 command -v bc -v >/dev/null 2>&1 || { echo >&2 "bc requires but it's not installed. Aborting. You could try to run: sudo yum install bc -y"; exit 1; }
 
+format_number() {
+    local n=$1
+    local formatted=""
+    local len=${#n}
+
+    for (( i=$len-1; i>=0; i-- )); do
+        if [ $(( ($len-$i-1) % 3 )) -eq 0 ] && [ $i -lt $(($len-1)) ]; then
+            formatted=",${formatted}"
+        fi
+        formatted="${n:$i:1}${formatted}"
+    done
+    echo "$formatted"
+}
+
 # Define color codes
 LIGHT_GREEN='\033[1;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
+
+CMD_PARAMS="$@"
 
 log_info() { echo -e "${LIGHT_GREEN}INFO [$(date -Iseconds)]${NC} $*"; }
 log_error() { echo -e "${RED}ERROR [$(date -Iseconds)]${NC} $*"; }
@@ -153,6 +170,22 @@ print_stat_table() {
   # Print the table data with a border
   printf "| %-8d | %-8d | %-8d | %-8d | %-20s  |\n" $tile $inserts $updates $deletes "$timestamp"
   echo "+------------------------------------------------------------------------+"
+}
+
+check_cloudshell() {
+    # Method 2: Check for CloudShell user
+    if [[ "$(whoami)" == "cloudshell-user" ]]; then
+        log_info "Running in AWS CloudShell"
+        return 0
+    fi
+
+    if [[ -d "/home/cloudshell-user" ]]; then
+        log_info "Running in AWS CloudShell"
+        return 0
+    fi
+
+    log_info "Not running in AWS CloudShell"
+    return 1
 }
 
 function check_discovery_runs() {
@@ -327,7 +360,7 @@ function Usage_Exit {
   echo "Script version: ${params[MIGRATOR_VERSION]}"
   echo
   echo "Options:"
-  echo "  --state STATE                    Set the state (init/run/request-stop/stats/cleanup/kill"
+  echo "  --state/--cmd STATE/COMMAND      Set the state (init/run/request-stop/stats/cleanup/kill/resize"
   echo "  --tiles, --t NUMBER              Set the number of tiles"
   echo "  --tile, --tl NUMBER              Set the tile number"
   echo "  --worker-type, --wt TYPE         Set the worker type"
@@ -728,14 +761,11 @@ log_info "Deploy is completed"
 }
 
 function check_sampler_runs() {
+   local process_type="$1"
    local rs
-   rs=$(aws glue get-job-runs --job-name "CQLReplicator${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}"  \
-    --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`sampler`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
-   if [ "$rs" = "true" ]; then
-       params[SAMPLER_RUNNING]=true
-     else
-       params[SAMPLER_RUNNING]=false
-   fi
+   rs=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
+      --region "${params[AWS_REGION]}" --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`'"$process_type"'`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
+   params[PROCESS_RUNNING]=$rs
 }
 
 function Start_Sampler {
@@ -745,10 +775,10 @@ function Start_Sampler {
   check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
   log_info "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"
   log_info "LANDING ZONE:" "${params[S3_LANDING_ZONE]}"
-  log_info "WORKER_TYPE: ${params[WORKER_TYPE]}"
-  check_sampler_runs
-  if [ "${params[SAMPLER_RUNNING]}" = false ]; then
-    rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "G.025X" --number-of-workers 10 --region "${params[AWS_REGION]}" --arguments '{
+  check_sampler_runs sampler
+  if [ "${params[PROCESS_RUNNING]}" = false ]; then
+    rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
+          --worker-type "G.025X" --number-of-workers 10 --region "${params[AWS_REGION]}" --arguments '{
           "--PROCESS_TYPE":"'${params[PROCESS_TYPE_SAMPLER]}'",
           "--TILE":"0",
           "--TOTAL_TILES":"1",
@@ -765,16 +795,17 @@ function Start_Sampler {
           "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
           "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
           "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
-    check_sampler_runs
+    params[PROCESS_RUNNING]=true
     local delay=0.1
     local spinstr='|/-\'
     output="Glue job $rs is running"
-    while [ "${params[SAMPLER_RUNNING]}" = true ]; do
+    sleep 20
+    while [ "${params[PROCESS_RUNNING]}" = true ]; do
       local temp=${spinstr#?}
       printf "\r%s [%c]  " "$output" "$spinstr"
       local spinstr=$temp${spinstr%"$temp"}
       sleep $delay
-      check_sampler_runs
+      check_sampler_runs sampler
     done
     printf "\r%s    \n" "$output"
     sampled_result=$(aws s3 cp "${params[S3_LANDING_ZONE]}"/"${params[SOURCE_KS]}"/"${params[SOURCE_TBL]}"/columnStats/stats.json --region "${params[AWS_REGION]}" -)
@@ -844,6 +875,69 @@ function Start_Discovery {
     DISCOVERY_RUNNING_ID=$rs
     JOBS+=("$rs")
   fi
+}
+
+function Resize_Cluster {
+  check_input "${params[SOURCE_KS]}" "Error: source keyspace name is empty, must be provided"
+    check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
+    check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
+    check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
+    check_input "${params[TILES]}" "Error: new number of tiles should be provided"
+    log_info "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"
+    log_info "LANDING ZONE:" "${params[S3_LANDING_ZONE]}"
+    log_info "WORKER_TYPE: ${params[WORKER_TYPE]}"
+    log_info "Resizing the tiles. The new size is ${params[TILES]}"
+    check_sampler_runs resize
+    if [ "${params[PROCESS_RUNNING]}" = false ]; then
+      aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
+                    "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy" \
+                    --recursive --region "${params[AWS_REGION]}" >/dev/null
+      # Check if primaryKeysCopy exists if the prefix doesn't exists return error and exit
+      if aws s3 ls "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy/" --region "${params[AWS_REGION]}" > /dev/null; then
+        log_info "The copy has been created"
+      else
+        log_error "No copy found in ${params[S3_LANDING_ZONE]}"
+        exit 1
+      fi
+      log_info "Removing the primary keys and stats"
+      aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
+                    --recursive --region "${params[AWS_REGION]}" >/dev/null
+      aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats" \
+                    --recursive --region "${params[AWS_REGION]}" >/dev/null
+      rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "G.1X" --number-of-workers $(( ${params[TILES]} + 1 )) --region "${params[AWS_REGION]}" --arguments '{
+            "--PROCESS_TYPE":"resize",
+            "--TILE":"0",
+            "--TOTAL_TILES":"'${params[TILES]}'",
+            "--S3_LANDING_ZONE":"'${params[S3_LANDING_ZONE]}'",
+            "--SOURCE_KS":"'${params[SOURCE_KS]}'",
+            "--SOURCE_TBL":"'${params[SOURCE_TBL]}'",
+            "--TARGET_KS":"'${params[SOURCE_KS]}'",
+            "--TARGET_TBL":"'${params[SOURCE_TBL]}'",
+            "--WRITETIME_COLUMN":"'${params[WRITETIME_COLUMN]}'",
+            "--SAFE_MODE":"'${params[SAFE_MODE]}'",
+            "--REPLICATION_POINT_IN_TIME":"'${params[REPLICATION_POINT_IN_TIME]}'",
+            "--CLEANUP_REQUESTED":"'${params[CLEANUP_REQUESTED]}'",
+            "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
+            "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
+            "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
+            "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
+      params[PROCESS_RUNNING]=true
+      local delay=0.1
+      local spinstr='|/-\'
+      output="Glue job $rs is running. Resizing in progress..."
+      sleep 20
+      while [ "${params[PROCESS_RUNNING]}" = true ]; do
+        local temp=${spinstr#?}
+        printf "\r%s [%c]  " "$output" "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        check_sampler_runs resize
+      done
+      printf "\r%s    \n" "$output"
+      log_info "Removing copy of the primary keys"
+      aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy" \
+                    --recursive --region "${params[AWS_REGION]}" >/dev/null
+    fi
 }
 
 function Kill_Replication {
@@ -1034,7 +1128,7 @@ calculate_resources() {
 
 while (( "$#" )); do
   case "$1" in
-    --state)
+    --state|--cmd)
       params[STATE]="$2"
       shift 2
       ;;
@@ -1217,6 +1311,10 @@ while (( "$#" )); do
       log_info "The workers per tile is ${params[DEFAULT_WORKERS]}"
       shift 2
       ;;
+     --schedule)
+       params[TIME_SCHEDULE]="$2"
+       shift 2
+       ;;
     --)
       shift
       break
@@ -1257,6 +1355,10 @@ if [[ ${params[STATE]} == sample ]]; then
   Start_Sampler
 fi
 
+if [[ ${params[STATE]} == resize ]]; then
+  Resize_Cluster
+fi
+
 if [[ ${params[STATE]} == run-single ]]; then
   check_input "${params[TILE]}" "Error: tile parameter is empty, must be provided"
   Start_Single_Replication
@@ -1275,6 +1377,36 @@ fi
 if [[ ${params[STATE]} == kill ]]; then
   Kill_Replication discovery
   Kill_Replication replication
+fi
+
+if [[ ${params[STATE]} == scheduled-run ]]; then
+  if check_cloudshell; then
+    log_error "You can't run cron in CloudShell, please use an EC2 instance"
+    exit 1
+  else
+    log_info "Scheduling CQLReplicator..."
+    CMD_PARAMS="${CMD_PARAMS% --cr}"
+    CMD_PARAMS="${CMD_PARAMS/scheduled-run/run}"
+    if [[ "${params[WORKLOAD_TYPE]}" = "" ]]; then
+      CMD_PARAMS="$CMD_PARAMS --workload-type batch"
+    fi
+    cqlreplicator_home="$(pwd)"
+    cqlreplicator_bin="$cqlreplicator_home/cqlreplicator"
+    cmd_final="$cqlreplicator_bin $CMD_PARAMS >> $cqlreplicator_home/cron.log 2>&1"
+    # Examples with different minutes:
+    # 0 * * * *     # Runs at minute 0 of every hour (1:00, 2:00, 3:00, etc.)
+    # 30 * * * *    # Runs at minute 30 of every hour (1:30, 2:30, 3:30, etc.)
+    # 15 * * * *    # Runs at minute 15 of every hour (1:15, 2:15, 3:15, etc.)
+    # eval "$(crontab -l | sed -n '1p' | tr -s ' ' | cut -d' ' -f 6-)"
+    log_info "The cron schedule: ${params[TIME_SCHEDULE]}"
+    if (crontab -l 2>/dev/null; echo "${params[TIME_SCHEDULE]} $cmd_final") | crontab -; then
+              log_info "Successfully scheduled cron job"
+          else
+              log_error "Failed to schedule cron job"
+              exit 1
+          fi
+    exit 0
+  fi
 fi
 
 function Gather_Stats() {
@@ -1313,7 +1445,6 @@ function Gather_Stats() {
   fi
 }
 
-
 if [[ ${params[STATE]} == init ]]; then
  Init
 fi
@@ -1332,8 +1463,6 @@ if [[ ${params[STATE]} == stats ]]; then
   check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
   check_input "${params[TARGET_TBL]}" "Error: target table name is empty, must be provided"
   check_input "${params[TARGET_KS]}" "Error: target keyspace name is empty, must be provided"
-  # the barrier without checking if the discovery job is running
-  barrier "false"
   tile=0
   while [ $tile -lt "${params[TILES]}" ]
     do
@@ -1341,8 +1470,8 @@ if [[ ${params[STATE]} == stats ]]; then
       Gather_Stats $tile "${params[PROCESS_TYPE_REPLICATION]}"
       ((tile++))
     done
-  log_info "Discovered rows in" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}" is "${params[DISCOVERED_TOTAL]}"
-  log_info "Replicated rows in" "${params[TARGET_KS]}"."${params[TARGET_TBL]}" is "${params[REPLICATED_TOTAL]}"
+  log_info "Discovered rows in" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}" is "$(format_number ${params[DISCOVERED_TOTAL]})"
+  log_info "Replicated rows in" "${params[TARGET_KS]}"."${params[TARGET_TBL]}" is "$(format_number ${params[REPLICATED_TOTAL]})"
   if [[ ${params[REPLICATION_STATS_ENABLED]} == true ]]; then
     t=0
     while [ $t -lt "${params[TILES]}" ]

@@ -51,6 +51,7 @@ JSON_MAPPING_B64=$(echo "None" | base64)
 JOBS=()
 S3_PATH_LIBS=""
 DISCOVERY_RUNNING_ID=""
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Progress bar configuration
 PS=40
@@ -848,7 +849,7 @@ function Start_Discovery {
   fi
   # TCO
   total_dpu=$(( workers + ( params[DEFAULT_WORKERS] * params[TILES] )))
-  ./helper --state get-tco --total-dpu $total_dpu --region ${params[AWS_REGION]}
+  "$SCRIPT_DIR"/helper --state get-tco --total-dpu $total_dpu --region ${params[AWS_REGION]}
   log_info "Checking if the discovery job is already running..."
   if [[ ${params[CLEANUP_REQUESTED]} == "true" ]]; then
     log_info "The ledger is going to be cleaned up"
@@ -1336,7 +1337,7 @@ eval set -- "$PARAMS"
 
 if [[ ${params[STATE]} == run ]]; then
   if [[ ${params[CLEANUP_REQUESTED]} != "true" ]]; then
-    ./helper --state recovery --tiles "${params[TILES]}" \
+    "$SCRIPT_DIR"/helper --state recovery --tiles "${params[TILES]}" \
     --landing-zone "${params[S3_LANDING_ZONE]}" --region "${params[AWS_REGION]}" \
     --src-keyspace "${params[SOURCE_KS]}" --src-table "${params[SOURCE_TBL]}"
     RETURN_CODE=$?
@@ -1394,12 +1395,13 @@ if [[ ${params[STATE]} == scheduled-run ]]; then
       CMD_PARAMS="$CMD_PARAMS --workload-type batch"
     fi
     cqlreplicator_home="$(pwd)"
-    cqlreplicator_bin="$cqlreplicator_home/cqlreplicator"
+    cqlreplicator_bin="/bin/bash $cqlreplicator_home/cqlreplicator"
     cmd_final="$cqlreplicator_bin $CMD_PARAMS >> $cqlreplicator_home/cron.log 2>&1"
     # Examples with different minutes:
     # 0 * * * *     # Runs at minute 0 of every hour (1:00, 2:00, 3:00, etc.)
     # 30 * * * *    # Runs at minute 30 of every hour (1:30, 2:30, 3:30, etc.)
     # 15 * * * *    # Runs at minute 15 of every hour (1:15, 2:15, 3:15, etc.)
+    # 0/15 * * * *  # Runs every 15 minutes
     # eval "$(crontab -l | sed -n '1p' | tr -s ' ' | cut -d' ' -f 6-)"
     log_info "The cron schedule: ${params[TIME_SCHEDULE]}"
     if (crontab -l 2>/dev/null; echo "${params[TIME_SCHEDULE]} $cmd_final") | crontab -; then

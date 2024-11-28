@@ -44,6 +44,29 @@ By implementing these configurations, you ensure that AWS Glue components can co
 The following command initializes the CQLReplicator environment, which involves the copying JAR artifacts, creation a Glue connector, 
 a S3 bucket, a Glue job, migration keyspace, and ledger table. 
 
+Note: If you run the CQLReplicator on EC2 you should attach the following inline policy:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetContextKeysForPrincipalPolicy",
+        "iam:SimulatePrincipalPolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:PassRole",
+        "glue:*",
+        "pricing:GetProducts",
+        "pricing:DescribeServices",
+        "pricing:GetAttributeValues"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
 ```shell
     cqlreplicator --cmd init --sg '"sg-1","sg-2"' \ 
                   --subnet "subnet-XXXXXXXXXXXX" --az us-east-1a --region us-east-1 \
@@ -593,7 +616,7 @@ In order to reduce AWS Glue costs after the historical workload moved to the tar
    ./cqlreplicator --cmd scheduled-run --max-wcu-traffic 5000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                    --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
                    --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
-                   --env ver5 --schedule "30 * * * *"
+                   --env ver5 --schedule "*/30 * * * *"
    ```
    Note: Use only EC2 or ECS to run scheduled jobs
 

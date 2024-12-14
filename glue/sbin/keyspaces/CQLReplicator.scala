@@ -496,6 +496,7 @@ object GlueApp {
 
     val SAMPLE_SIZE = 100000
     val SAMPLE_FRACTION = 0.2
+    val KEYS_PER_PARQUET_FILE = 10500000
     val cachingMode = safeMode match {
       case "true" => StorageLevel.DISK_ONLY
       case _ => StorageLevel.MEMORY_AND_DISK_SER
@@ -1451,6 +1452,7 @@ object GlueApp {
       df.coalesce( scala.math.max(1, cores * instances) )
         .write
         .mode("overwrite")
+        .option("maxRecordsPerFile", KEYS_PER_PARQUET_FILE)
         .option("compression", "snappy")
         .save(path)
     }

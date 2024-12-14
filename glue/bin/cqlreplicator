@@ -39,7 +39,7 @@ declare -A params=(
     [DEFAULT_WORKLOAD_TYPE]=continuous
     [GLUE_TYPE]=gluestreaming
     [WCU_TRAFFIC]=0
-    [DEFAULT_ROWS_PER_SECOND]=600
+    [DEFAULT_ROWS_PER_SECOND]=900
     [PROCESS_RUNNING]=false
     [TIME_SCHEDULE]=""
 )
@@ -194,9 +194,22 @@ function check_discovery_runs() {
     local mode
     # mode = true, if discovery job is not running return 0
     # mode = false, if discovery job is not running return 1
-    mode=$1
+    local mode=$1
+    local wait_time=30
+    waiting_state=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" \
+            --query 'JobRuns[?JobRunState==`WAITING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
+
+    if [[ $waiting_state == true ]]; then
+      while [[ $waiting_state == true ]]; do
+        sleep $wait_time
+        waiting_state=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" \
+                    --query 'JobRuns[?JobRunState==`WAITING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
+      done
+    fi
+
     rs=$(aws glue get-job-runs --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" \
         --query 'JobRuns[?JobRunState==`RUNNING`] | [].Arguments | [?"--PROCESS_TYPE"==`discovery`] | [?"--SOURCE_KS"==`'"${params[SOURCE_KS]}"'`] | [?"--SOURCE_TBL"==`'"${params[SOURCE_TBL]}"'`]' | jq 'length != 0')
+
     if [[ $rs == "$mode" ]]; then
         log_error "Error: The discovery job ${params[JOB_NAME]}${params[DEFAULT_ENV]} has failed, check AWS Glue logs"
         error_message=$(aws glue get-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --run-id "$DISCOVERY_RUNNING_ID" | jq '.JobRun | {ErrorMessage}')
@@ -650,6 +663,8 @@ function Init {
   # Create Glue Connector
   local glue_conn_name
   local enhanced_monitoring=""
+  local spark_conf="spark.files=${params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=400 --conf spark.default.parallelism=400 --conf spark.locality.wait=0"
+
   if [[ "${params[GLUE_MONITORING]}" == true ]]; then
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
   fi
@@ -696,6 +711,8 @@ function Init {
            --role "${params[GLUE_IAM_ROLE]}" \
            --description "${params[DESCRIPTION]} for ${params[TARGET_TYPE]}" \
            --glue-version "4.0" \
+#          Requires to review enabling job-run-queuing-enabled. Handle WAITING status for Discovery Glue job
+#           ---job-run-queuing-enabled "true" \
            --number-of-workers 2 \
            --worker-type "${params[WORKER_TYPE]}" \
            --connections "Connections=$glue_conn_name${params[DEFAULT_ENV]}" \
@@ -706,7 +723,7 @@ function Init {
            --default-arguments '{
                "--job-language":"scala",
                "--extra-jars":"'$S3_PATH_LIBS'",
-               "--conf":"spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
+               "--conf":'"$spark_conf"',
                "--class":"GlueApp"
                '$enhanced_monitoring'
            }' > /dev/null
@@ -719,6 +736,8 @@ function Init {
             --role "${params[GLUE_IAM_ROLE]}" \
             --description "${params[DESCRIPTION]} -> ${params[TARGET_TYPE]}" \
             --glue-version "4.0" \
+#           Requires to review enabling job-run-queuing-enabled. Handle WAITING status for Discovery Glue job
+#            ---job-run-queuing-enabled "true" \
             --number-of-workers 2 \
             --worker-type "${params[WORKER_TYPE]}" \
             --command "Name=${params[GLUE_TYPE]},ScriptLocation=$glue_bucket_artifacts/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala" \
@@ -728,7 +747,7 @@ function Init {
             --default-arguments '{
                 "--job-language":"scala",
                 "--extra-jars":"'$S3_PATH_LIBS'",
-                "--conf":"spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64",
+                "--conf":'"$spark_conf"',
                 "--class":"GlueApp"
                 '${params[enhanced_monitoring]}'
                 }' > /dev/null

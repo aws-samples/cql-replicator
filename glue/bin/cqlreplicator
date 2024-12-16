@@ -9,7 +9,7 @@ declare -A params=(
     [MIGRATOR_VERSION]="1.0"
     [DESCRIPTION]="Migration Toolbox"
     [JOB_NAME]="CQLReplicator"
-    [TILES]=8
+    [TILES]=4
     [WORKER_TYPE]="G.2X"
     [DISCOVERY_WORKER_TYPE]="G.1X"
     [PROCESS_TYPE_DISCOVERY]="discovery"
@@ -39,7 +39,7 @@ declare -A params=(
     [DEFAULT_WORKLOAD_TYPE]=continuous
     [GLUE_TYPE]=gluestreaming
     [WCU_TRAFFIC]=0
-    [DEFAULT_ROWS_PER_SECOND]=1000
+    [DEFAULT_ROWS_PER_SECOND]=1500
     [PROCESS_RUNNING]=false
     [TIME_SCHEDULE]=""
 )
@@ -663,7 +663,7 @@ function Init {
   # Create Glue Connector
   local glue_conn_name
   local enhanced_monitoring=""
-  local spark_conf="spark.files=${params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=400 --conf spark.default.parallelism=400 --conf spark.locality.wait=0"
+  local spark_conf="spark.files=${params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=200 --conf spark.default.parallelism=200 --conf spark.locality.wait=0"
 
   if [[ "${params[GLUE_MONITORING]}" == true ]]; then
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
@@ -861,7 +861,7 @@ function Start_Discovery {
   local workers=0
   if [[ ${params[OVERRIDE_DISCOVERY_WORKERS]} == 0 ]]; then
     max_value2=2
-    max_value1=$((1 + ${params[TILES]}))
+    max_value1=$((2 * ${params[TILES]} + 1))
     workers=$(max_value $max_value1 $max_value2)
   else
     workers=${params[OVERRIDE_DISCOVERY_WORKERS]}

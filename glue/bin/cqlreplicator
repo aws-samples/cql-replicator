@@ -721,7 +721,7 @@ function Init {
            --default-arguments '{
                "--job-language":"scala",
                "--extra-jars":"'$S3_PATH_LIBS'",
-               "--conf":"'$spark_conf'",
+               "--conf":'$spark_conf',
                "--class":"GlueApp"
                '$enhanced_monitoring'
            }' > /dev/null
@@ -743,7 +743,7 @@ function Init {
             --default-arguments '{
                 "--job-language":"scala",
                 "--extra-jars":"'$S3_PATH_LIBS'",
-                "--conf":"'$spark_conf'",
+                "--conf":'$spark_conf',
                 "--class":"GlueApp"
                 '$enhanced_monitoring'
                 }' > /dev/null

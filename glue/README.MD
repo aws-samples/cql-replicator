@@ -1,7 +1,7 @@
 # CQLReplicator with AWS Glue
 
 The objective of this project is to support customers in seamlessly migrating from self-managed Cassandra clusters to Amazon Keyspaces.
-This migration approach ensures zero downtime, no code compilation, predictable incremental traffic, and reduced migration costs.
+This migration approach ensures near zero downtime, no code compilation, predictable incremental traffic, and reduced migration costs.
 
 ## Architecture
 

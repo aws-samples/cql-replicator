@@ -745,7 +745,7 @@ function Init {
                 "--extra-jars":"'$S3_PATH_LIBS'",
                 "--conf":"'$spark_conf'",
                 "--class":"GlueApp"
-                '${params[enhanced_monitoring]}'
+                '$enhanced_monitoring'
                 }' > /dev/null
     fi
 

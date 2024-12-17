@@ -1,7 +1,7 @@
 # CQLReplicator with AWS Glue
 
 The objective of this project is to support customers in seamlessly migrating from self-managed Cassandra clusters to Amazon Keyspaces.
-This migration approach ensures zero downtime, no code compilation, predictable incremental traffic, and reduced migration costs.
+This migration approach ensures near zero downtime, no code compilation, predictable incremental traffic, and reduced migration costs.
 
 ## Architecture
 
@@ -115,7 +115,7 @@ settings may vary if you choose to replicate TTLs, updates, or offloading object
 The CQLReplicator offers three options for operation:
 1. For high-volume traffic exceeding 5000 Write Capacity Units (WCU) per second:
    * Use the command: `--max-wcu-traffic 20000`
-   *  This setting uses the default of 8 tiles
+   *  This setting uses the default of 4 tiles
 2. For lower-volume traffic below 5000 WCU per second:
    * Use the command:` --max-wcu-traffic 4000 --tiles 1`
    * This setting customizes the number of tiles to 1
@@ -153,7 +153,7 @@ Your source keyspace and table `ks_test_cql_replicator.test_cql_replicator` in t
 Your target keyspace and table `ks_test_cql_replicator.test_cql_replicator` in Amazon Keyspaces.
 Parameter `--inc-traffic` - enables incremental traffic to not overload the Cassandra Cluster and Amazon Keyspaces
 with high number of requests. CQLReplicator is going to increase traffic every 4 minutes. In the following
-example with 8 tiles and one cassandra row is under 2KB, the traffic is going to be gradually increased every 4
+example with 4 tiles and one cassandra row is under 2KB, the traffic is going to be gradually increased every 4
 minutes. At peak traffic, it can reach up to 6,300 WCUs per second.
 
 ```shell
@@ -300,7 +300,7 @@ To stop migration process gracefully run the following command for a single tile
 To start migration process for a single tile:
 
 ```shell
-   cqlreplicator --cmd run-single --tile 1 --tiles 8 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run-single --tile 1 --tiles 4 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --inc-traffic --env ver5
 ```
@@ -725,7 +725,7 @@ cqlreplicator --cmd init --sg '"sg-1"' \
                            --target-type parquet \
                            --env parquet
 ```
-The following run command starts 8 tiles, and replicate the source table `test_cql_replicator`
+The following run command starts 4 tiles, and replicate the source table `test_cql_replicator`
 to `s3://cql-replicator-backup/snapshots/keyspace_prefix/table_prefix/[0-7]/[insert|update|delete]/YYYY-MM-HHTMM:SS:ss.sss`.
 
 ```shell

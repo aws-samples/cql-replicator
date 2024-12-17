@@ -711,8 +711,6 @@ function Init {
            --role "${params[GLUE_IAM_ROLE]}" \
            --description "${params[DESCRIPTION]} for ${params[TARGET_TYPE]}" \
            --glue-version "4.0" \
-#          Requires to review enabling job-run-queuing-enabled. Handle WAITING status for Discovery Glue job
-#           ---job-run-queuing-enabled "true" \
            --number-of-workers 2 \
            --worker-type "${params[WORKER_TYPE]}" \
            --connections "Connections=$glue_conn_name${params[DEFAULT_ENV]}" \
@@ -736,8 +734,6 @@ function Init {
             --role "${params[GLUE_IAM_ROLE]}" \
             --description "${params[DESCRIPTION]} -> ${params[TARGET_TYPE]}" \
             --glue-version "4.0" \
-#           Requires to review enabling job-run-queuing-enabled. Handle WAITING status for Discovery Glue job
-#            ---job-run-queuing-enabled "true" \
             --number-of-workers 2 \
             --worker-type "${params[WORKER_TYPE]}" \
             --command "Name=${params[GLUE_TYPE]},ScriptLocation=$glue_bucket_artifacts/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala" \

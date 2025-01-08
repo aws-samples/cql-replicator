@@ -221,31 +221,33 @@ function check_discovery_runs() {
 
 function check_target_table_req() {
     local current_mode
-    if ! current_mode=$(aws keyspaces get-table --keyspace-name "${params[TARGET_KS]}" --table-name "${params[TARGET_TBL]}" \
-        --query 'capacitySpecification' --output json 2>&1); then
-        if [[ $current_mode == *"ResourceNotFoundException"* ]]; then
-            log_error "Error: Keyspaces or Table ${params[TARGET_KS]}.${params[TARGET_TBL]} not found."
-            exit 1
-        else
-            log_error "Error: Failed to get table information: $current_mode"
-            exit 1
-        fi
-    fi
+    local target_type=$1
 
-    if [[ $(jq -r '.throughputMode' <<< "$current_mode") == "PROVISIONED" ]]; then
-        local provisioned_to
-        provisioned_to=$(jq -r '.writeCapacityUnits' <<< "$current_mode")
-        if [[ $provisioned_to -ge ${params[WCU_TRAFFIC]} ]]; then
-            log_info "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is provisioned to $provisioned_to WCUs per second"
-            log_info "The requested traffic is ${params[WCU_TRAFFIC]}"
-        else
-            log_warn "Warn: The incoming traffic exceeds the provisioned capacity"
+    if [[ "$target_type" == "dynamodb" ]]; then
+        if ! current_mode=$(aws dynamodb describe-table --table-name "${params[TARGET_TBL]}" \
+            --query 'Table.TableStatus' --output text 2>&1); then
+            if [[ $current_mode == *"ResourceNotFoundException"* ]]; then
+                log_error "Error: DynamoDB Table ${params[TARGET_TBL]} not found."
+                exit 1
+            else
+                log_error "Error: Failed to get DynamoDB table information: $current_mode"
+                exit 1
+            fi
         fi
-    else
-        log_info "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is on-demand mode"
+   fi
+   if [[ "$target_type" == "keyspaces" ]]; then
+        if ! current_mode=$(aws keyspaces get-table --keyspace-name "${params[TARGET_KS]}" --table-name "${params[TARGET_TBL]}" \
+            --query 'capacitySpecification' --output json 2>&1); then
+            if [[ $current_mode == *"ResourceNotFoundException"* ]]; then
+                log_error "Error: Keyspaces or Table ${params[TARGET_KS]}.${params[TARGET_TBL]} not found."
+                exit 1
+            else
+                log_error "Error: Failed to get table information: $current_mode"
+                exit 1
+            fi
+        fi
     fi
 }
-
 
 function check_replication_runs() {
    local tile
@@ -448,12 +450,14 @@ validate_iam_role_permissions() {
     local role_arn
     local region="$2"
     local account="$3"
+    local target="$4"
     role_arn=$(aws iam get-role --role-name "$role_name" --query 'Role.Arn' --output text)
     if [ -z "$role_arn" ]; then
         log_error "Error: Unable to find role $role_name"
         return 1
     fi
     local keyspaces_actions=("cassandra:Insert" "cassandra:Update" "cassandra:Select" "cassandra:Delete")
+    local dynamodb_actions=("dynamodb:PutItem" "dynamodb:UpdateItem" "dynamodb:BatchWriteItem" "dynamodb:DeleteItem")
     local s3_actions=("s3:ListBucket" "s3:PutObject" "s3:DeleteObject" "s3:GetObject")
 
     check_permissions() {
@@ -462,6 +466,9 @@ validate_iam_role_permissions() {
         local actions=("$@")
         local resource_arn
         if [[ $service == "cassandra" ]]; then
+          resource_arn="arn:aws:$service:$region:$account:*"
+        fi
+        if [[ $service == "dynamodb" ]]; then
           resource_arn="arn:aws:$service:$region:$account:*"
         fi
         if [[ $service == "s3" ]]; then
@@ -485,7 +492,19 @@ validate_iam_role_permissions() {
         done
     }
 
-    check_permissions "cassandra" "${keyspaces_actions[@]}"
+    if [ "$target" = "keyspaces" ]; then
+      check_permissions "cassandra" "${keyspaces_actions[@]}"
+    fi
+
+    if [ "$target" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == false ]; then
+      check_permissions "dynamodb" "${dynamodb_actions[@]}"
+      check_permissions "cassandra" "${keyspaces_actions[@]}"
+    fi
+
+    if [ "$target" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == true ]; then
+          check_permissions "dynamodb" "${dynamodb_actions[@]}"
+    fi
+
     check_permissions "s3" "${s3_actions[@]}"
     check_glue_service_role
 }
@@ -600,7 +619,7 @@ function Init {
     uploader_jars "${ARTIFACTS_KEYSPACES[@]}"
     S3_PATH_LIBS+=","
     join_array "${S3_PATH_KEYSPACES[@]}"
-    validate_iam_role_permissions "${params[GLUE_IAM_ROLE]}" "${params[AWS_REGION]}" "$AWS_ACCOUNT"
+    validate_iam_role_permissions "${params[GLUE_IAM_ROLE]}" "${params[AWS_REGION]}" "$AWS_ACCOUNT" "$TARGET_TYPE"
     security_group_id=$(echo "${params[SG]}" | tr -d "'\"")
     check_security_group_self_referencing "$security_group_id"
   fi
@@ -663,7 +682,6 @@ function Init {
   # Create Glue Connector
   local glue_conn_name
   local enhanced_monitoring=""
-  local spark_conf="spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=200 --conf spark.default.parallelism=200 --conf spark.locality.wait=0"
   if [[ "${params[GLUE_MONITORING]}" == true ]]; then
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
   fi
@@ -838,7 +856,7 @@ function Start_Discovery {
   check_input "${params[TARGET_TBL]}" "Error: target table name is empty, must be provided"
   check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
   check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
-  check_target_table_req
+  check_target_table_req "${params[TARGET_TYPE]}"
   check_num_tiles
   check_glue_job_connection "${params[JOB_NAME]}${params[DEFAULT_ENV]}" "${params[AWS_REGION]}"
 
@@ -973,7 +991,13 @@ function Start_Replication {
   cnt=0
   KEYS_PER_TILE=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/discovery/$cnt/count.json" --region "${params[AWS_REGION]}" - | head | jq '.primaryKeys')
   log_info "Sampled primary keys per tile is $KEYS_PER_TILE"
-  local workers=$(( 2 + KEYS_PER_TILE/${params[ROWS_PER_WORKER]} ))
+  local workers
+  if [ "${params[WCU_TRAFFIC]}" -gt 0 ]; then
+      workers=${params[DEFAULT_WORKERS]}
+    else
+      workers=$(( 2 + KEYS_PER_TILE/${params[ROWS_PER_WORKER]} ))
+  fi
+
   if [[ workers -gt 299 ]]; then
     log_info "=== The total number of Glue workers are over 299 per each tile (glue job), you have two options:                  ==="
     log_info "=== [1] Increase the number of tiles. In order to rerun with the higher number of tiles                            ==="

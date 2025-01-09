@@ -866,6 +866,7 @@ function Start_Discovery {
   check_input "${params[TARGET_TBL]}" "Error: target table name is empty, must be provided"
   check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
   check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
+  check_input "${params[TARGET_TYPE]}" "Error: target type must be provided"
   check_target_table_req "${params[TARGET_TYPE]}"
   check_num_tiles
   check_glue_job_connection "${params[JOB_NAME]}${params[DEFAULT_ENV]}" "${params[AWS_REGION]}"

@@ -52,6 +52,8 @@ JOBS=()
 S3_PATH_LIBS=""
 DISCOVERY_RUNNING_ID=""
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+INT_KS_NAME=migration
+INT_TBL_NAME=ledger
 
 # Progress bar configuration
 PS=40
@@ -450,7 +452,6 @@ validate_iam_role_permissions() {
     local role_arn
     local region="$2"
     local account="$3"
-    local target="$4"
     role_arn=$(aws iam get-role --role-name "$role_name" --query 'Role.Arn' --output text)
     if [ -z "$role_arn" ]; then
         log_error "Error: Unable to find role $role_name"
@@ -492,17 +493,17 @@ validate_iam_role_permissions() {
         done
     }
 
-    if [ "$target" = "keyspaces" ]; then
+    if [ "${params[TARGET_TYPE]}" = "keyspaces" ]; then
       check_permissions "cassandra" "${keyspaces_actions[@]}"
     fi
 
-    if [ "$target" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == false ]; then
+    if [ "${params[TARGET_TYPE]}" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == false ]; then
       check_permissions "dynamodb" "${dynamodb_actions[@]}"
       check_permissions "cassandra" "${keyspaces_actions[@]}"
     fi
 
-    if [ "$target" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == true ]; then
-          check_permissions "dynamodb" "${dynamodb_actions[@]}"
+    if [ "${params[TARGET_TYPE]}" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == true ]; then
+      check_permissions "dynamodb" "${dynamodb_actions[@]}"
     fi
 
     check_permissions "s3" "${s3_actions[@]}"
@@ -564,7 +565,7 @@ function Clean_Up {
   aws glue delete-connection --connection-name "cql-replicator-opensearch-integration${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null 2>&1
   aws glue delete-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}"
   if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
-    aws keyspaces delete-keyspace --keyspace-name migration --region "${params[AWS_REGION]}"
+    aws keyspaces delete-keyspace --keyspace-name "$INT_KS_NAME" --region "${params[AWS_REGION]}"
   fi
 }
 
@@ -619,10 +620,19 @@ function Init {
     uploader_jars "${ARTIFACTS_KEYSPACES[@]}"
     S3_PATH_LIBS+=","
     join_array "${S3_PATH_KEYSPACES[@]}"
-    validate_iam_role_permissions "${params[GLUE_IAM_ROLE]}" "${params[AWS_REGION]}" "$AWS_ACCOUNT" "$TARGET_TYPE"
+    validate_iam_role_permissions "${params[GLUE_IAM_ROLE]}" "${params[AWS_REGION]}" "$AWS_ACCOUNT"
     security_group_id=$(echo "${params[SG]}" | tr -d "'\"")
     check_security_group_self_referencing "$security_group_id"
   fi
+
+  if [[ ${params[TARGET_TYPE]} == "dynamodb" ]]; then
+      uploader_jars "${ARTIFACTS_KEYSPACES[@]}"
+      S3_PATH_LIBS+=","
+      join_array "${S3_PATH_KEYSPACES[@]}"
+      validate_iam_role_permissions "${params[GLUE_IAM_ROLE]}" "${params[AWS_REGION]}" "$AWS_ACCOUNT"
+      security_group_id=$(echo "${params[SG]}" | tr -d "'\"")
+      check_security_group_self_referencing "$security_group_id"
+    fi
 
   if [[ ${params[TARGET_TYPE]} == "memorydb" ]]; then
     uploader_jars "${ARTIFACTS_MEMORYDB[@]}"
@@ -774,11 +784,11 @@ function Init {
   if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
     progress 4 5 "Creating CQLReplicator's internal resources         "
     # Create a keyspace - migration
-    aws keyspaces create-keyspace --keyspace-name migration --region "${params[AWS_REGION]}" > /dev/null
+    aws keyspaces create-keyspace --keyspace-name "$INT_KS_NAME" --region "${params[AWS_REGION]}" > /dev/null
     sleep 20
 
     # Create a table - ledger
-    aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{
+    aws keyspaces create-table --keyspace-name "$INT_KS_NAME" --table-name "$INT_TBL_NAME" --schema-definition '{
     "allColumns": [ { "name": "ks", "type": "text" },
     { "name": "tbl", "type": "text" },
     { "name": "tile", "type": "int" },

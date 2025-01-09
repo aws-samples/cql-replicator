@@ -355,12 +355,30 @@ case class FlushingSet(flushingClient: AmazonDynamoDB,internalConfig: WriteConfi
     }
   }
 
-  def executeSinglePut(writeRequest: WriteRequest): PutItemResult = {
+  def executeSinglePut(writeRequest: WriteRequest, readBeforeWrite: Boolean = false, attributeCondExpression: (String, Map[String, String])): Unit = {
     val putRequest = writeRequest.getPutRequest
-    val request = new PutItemRequest()
-      .withTableName(targetTable)
-      .withItem(putRequest.getItem)
-    flushingClient.putItem(request)
+
+    if (!readBeforeWrite) {
+      val request = new PutItemRequest()
+        .withTableName(targetTable)
+        .withItem(putRequest.getItem)
+
+      flushingClient.putItem(request)
+    }
+    else {
+      try {
+        val request = new PutItemRequest()
+          .withTableName(targetTable)
+          .withItem(putRequest.getItem)
+          .withConditionExpression(attributeCondExpression._1)
+          .withExpressionAttributeNames(attributeCondExpression._2.asJava)
+
+        Some(flushingClient.putItem(request))
+      } catch {
+        case _: ConditionalCheckFailedException =>
+        case e: Exception => throw DynamoDbOperationException(s"Error executing put request: $e", e)
+      }
+    }
   }
 
   def executeSingleDelete(writeRequest: WriteRequest): DeleteItemResult = {
@@ -395,19 +413,9 @@ object GlueApp {
   def main(sysArgs: Array[String]): Unit = {
     val patternWhereClauseToMap: Regex = """(\w+)=['"]?(.*?)['"]?(?: and |$)""".r
 
+
     def convertCassandraKeyToGenericKey(input: String, separator: String): String = {
       patternWhereClauseToMap.findAllIn(input).matchData.map { m => s"${m.group(2)}" }.mkString(separator)
-    }
-
-    def cleanupLedger(cc: CqlSession,
-                      logger: GlueLogger,
-                      ks: String, tbl: String,
-                      cleanUpRequested: Boolean,
-                      pt: String): Unit = {
-      if (pt.equals("discovery") && cleanUpRequested) {
-        cc.execute(s"DELETE FROM migration.ledger WHERE ks='$ks' and tbl='$tbl'")
-        logger.info("Cleaned up the migration.ledger")
-      }
     }
 
     def readReplicationStatsObject(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String): ReplicationStats = {
@@ -673,6 +681,14 @@ object GlueApp {
       case JsonMapping(Replication(true, _, _, _, _, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
     }
+    val internalMigrationKeyspace="migration"
+    val internalMigrationTable="ledger"
+    val attrCondExpressionCAS = if (jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyName.isEmpty)
+      ("attribute_not_exists(#pk)", Map("#pk" -> jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyName))
+    else
+      ("attribute_not_exists(#pk) AND attribute_not_exists(#sk)",
+        Map("#pk" -> jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyName,
+          "#sk" -> jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyName))
 
     def getDDBConnection(endpoint: String, region: String): AmazonDynamoDB = {
 
@@ -703,6 +719,16 @@ object GlueApp {
       clientBuilder.build()
     }
 
+    def cleanupLedger(cc: CqlSession,
+                      logger: GlueLogger,
+                      ks: String, tbl: String,
+                      cleanUpRequested: Boolean,
+                      pt: String): Unit = {
+      if (pt.equals("discovery") && cleanUpRequested) {
+        cc.execute(s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$ks' and tbl='$tbl'")
+        logger.info(s"Cleaned up the $internalMigrationKeyspace.$internalMigrationTable")
+      }
+    }
 
     val excludedColumns = if (jsonMapping4s.dynamodb.largeObjectsConfig.enabled) {
       jsonMapping4s.dynamodb.largeObjectsConfig.columns
@@ -777,8 +803,8 @@ object GlueApp {
     }
 
     def getLedgerQueryBuilder(ks: String, tbl: String, tile: Int, ver: String): String = {
-      s"SELECT ks, tbl, tile, offload_status, dt_offload, location, ver, load_status, dt_load FROM migration.ledger " +
-        s"WHERE ks='$ks' and tbl='$tbl' and tile=$tile and ver='$ver'"
+      s"SELECT ks, tbl, tile, offload_status, dt_offload, location, ver, load_status, dt_load FROM $internalMigrationKeyspace.$internalMigrationTable" +
+        s" WHERE ks='$ks' and tbl='$tbl' and tile=$tile and ver='$ver'"
     }
 
     def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
@@ -1231,7 +1257,7 @@ object GlueApp {
         lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition)
         lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
         lazy val dynamodbCnnParPar = getDDBConnection(jsonMapping4s.dynamodb.dynamoDBConnection.endpoint, jsonMapping4s.dynamodb.dynamoDBConnection.region)
-        lazy val fl = FlushingSet(dynamodbCnnParPar, jsonMapping4s.dynamodb.writeConfiguration,logger, trgTableName)
+        lazy val fl = FlushingSet(dynamodbCnnParPar, jsonMapping4s.dynamodb.writeConfiguration, logger, trgTableName)
         lazy val maxStatementsPerBatch = jsonMapping4s.dynamodb.writeConfiguration.maxStatementsPerBatch
         lazy val rowConverter = new RowConverter
         lazy val ddbPartitionKey = jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyName
@@ -1355,13 +1381,21 @@ object GlueApp {
             ddbSortKey
           )
 
-          if (maxStatementsPerBatch > 1 && !jsonMapping4s.dynamodb.largeObjectsConfig.enabled) {
+          val isLargeObjects = jsonMapping4s.dynamodb.largeObjectsConfig.enabled
+          val isReadBeforeWrite = jsonMapping4s.dynamodb.readBeforeWrite
+
+          if (!isLargeObjects && !isReadBeforeWrite && maxStatementsPerBatch > 1) {
+            // Batch processing for normal-sized objects
             fl.add(ddbRequest)
-          } else if ( (maxStatementsPerBatch > 1 || maxStatementsPerBatch == 1) && jsonMapping4s.dynamodb.largeObjectsConfig.enabled) {
-            fl.executeSinglePut(ddbRequest)
+          } else if (isLargeObjects) {
+            // Handle large objects - always single put + S3 offload
+            fl.executeSinglePut(ddbRequest, isReadBeforeWrite, attrCondExpressionCAS)
             offloadToS3(backToJsonRow, s3ClientOnPartition, whereClause)
-          } else if (maxStatementsPerBatch == 1 && !jsonMapping4s.dynamodb.largeObjectsConfig.enabled) {
-            fl.executeSinglePut(ddbRequest)
+          } else {
+            // Single put for either:
+            // - maxStatementsPerBatch == 1 with normal-sized objects
+            // - readBeforeWrite is true
+            fl.executeSinglePut(ddbRequest, isReadBeforeWrite, attrCondExpressionCAS)
           }
         }
 
@@ -1393,8 +1427,8 @@ object GlueApp {
     def dataReplicationProcess(): Unit = {
       val ledger = internalConnectionToTarget.execute(
         s"""SELECT location,tile,ver
-           |FROM migration.ledger
-           |WHERE ks='$srcKeyspaceName'
+           |FROM $internalMigrationKeyspace.$internalMigrationTable
+           | WHERE ks='$srcKeyspaceName'
            |AND tbl='$srcTableName'
            |AND tile=$currentTile
            |AND load_status=''
@@ -1428,7 +1462,7 @@ object GlueApp {
 
             persist(sourceDfV2, columns, columnsPos, tile, "insert")
 
-            ledgerConnection.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
+            ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
             val cnt = sourceDfV2.count()
 
             val content = ReplicationStats(tile, cnt, 0, 0, 0, org.joda.time.LocalDateTime.now().toString)
@@ -1542,8 +1576,8 @@ object GlueApp {
           dfHead.unpersist()
 
           internalConnectionToTarget.execute(s"BEGIN UNLOGGED BATCH " +
-            s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'tail','SUCCESS', toTimestamp(now()), '');" +
-            s"INSERT INTO migration.ledger(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'head','SUCCESS', toTimestamp(now()), '');" +
+            s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'tail','SUCCESS', toTimestamp(now()), '');" +
+            s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'head','SUCCESS', toTimestamp(now()), '');" +
             s"APPLY BATCH;")
 
         }
@@ -1753,7 +1787,7 @@ object GlueApp {
             .persist(cachingMode)
 
           // Clear existing ledger entries
-          ledgerConnection.execute(s"DELETE FROM migration.ledger WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName'")
+          ledgerConnection.execute(s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName'")
 
           // Process tiles in parallel
           val results = (0 until totalTiles).toList.par.map { tile =>
@@ -1771,7 +1805,7 @@ object GlueApp {
 
               // Update ledger
               ledgerConnection.execute(
-                s"""INSERT INTO migration.ledger(
+                s"""INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(
                    |ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load
                    |) VALUES(
                    |'$srcKeyspaceName','$srcTableName',$tile,'SUCCESS',toTimestamp(now()),
@@ -1865,7 +1899,7 @@ object GlueApp {
           logger.info("Loading a head")
           val staged = primaryKeysDf.where(col("group") === tile)
           writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
-          ledgerConnection.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
+          ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
           val content = DiscoveryStats(tile, staged.count(), org.joda.time.LocalDateTime.now().toString)
           putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
         }
@@ -1877,7 +1911,7 @@ object GlueApp {
             logger.info("Loading a tail but keeping the head")
             val staged = primaryKeysDf.where(col("group") === tile)
             writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail")
-            ledgerConnection.execute(s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','')")
+            ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','')")
           }
         }
 
@@ -1899,8 +1933,8 @@ object GlueApp {
 
           ledgerConnection.execute(
             s"BEGIN UNLOGGED BATCH " +
-              s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','');" +
-              s"INSERT INTO migration.ledger(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','');" +
+              s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','');" +
+              s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','');" +
               s"APPLY BATCH;"
           )
         }

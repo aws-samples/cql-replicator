@@ -124,7 +124,7 @@ class RowConverter {
 
       // Cassandra format: colName=value
       targetValue.foreach { case (key, value) =>
-        attributes.put(key, value)  // Use put to maintain insertion order
+        attributes.put(key, value) // Use put to maintain insertion order
       }
 
       whereStmt
@@ -200,9 +200,11 @@ class RowConverter {
           s"Error converting column $colName of type $colType: $e, position: $position, row: ${row.json}", e)
     }
   }
+
   private def formatString(value: String): String = {
     s"'${value.replace("'", "''")}'"
   }
+
   private def handleTimestamp(row: Row, position: Int): String = {
     row.get(position).getClass.getName match {
       case "java.sql.Timestamp" =>
@@ -217,6 +219,7 @@ class RowConverter {
         zonedDateTime.toInstant.toEpochMilli.toString
     }
   }
+
   private def normalizeTimestamp(ts: String): String = {
     val dotIndex = ts.indexOf('.')
     if (dotIndex != -1 && ts.length - dotIndex < 4) {
@@ -225,6 +228,7 @@ class RowConverter {
       ts
     }
   }
+
   private def getNumericValue(row: Row, position: Int, colType: String): String = {
     colType match {
       case "int" => row.getInt(position).toString
@@ -237,6 +241,7 @@ class RowConverter {
       case "varint" => row.getAs[java.math.BigDecimal](position).toString
     }
   }
+
   private def formatBlob(row: Row, colName: String): String = {
     s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
   }
@@ -302,7 +307,7 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
 }
 
 class SupportFunctions {
-  def correctValues(binColumns: List[String] = List(), utdColumns: List[String] = List(), input: String): String = {
+  def correctValues(binColumns: List[String] = List(), utdColumns: List[String] = List(), input: String): JValue = {
     implicit val formats: DefaultFormats.type = DefaultFormats
 
     @tailrec
@@ -330,12 +335,12 @@ class SupportFunctions {
     }
 
     val transformedResult = if (binColumns.isEmpty && utdColumns.isEmpty) {
-      input
+      parse(input)
     } else {
       val json = parse(input)
       val correctedBins = if (binColumns.nonEmpty) correctEmptyBin(json, binColumns) else json
       val convertedUdt = if (utdColumns.nonEmpty) convertUDTtoText(correctedBins, utdColumns) else correctedBins
-      compact(render(convertedUdt))
+      convertedUdt
     }
     transformedResult
   }
@@ -681,8 +686,8 @@ object GlueApp {
       case JsonMapping(Replication(true, _, _, _, _, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
     }
-    val internalMigrationKeyspace="migration"
-    val internalMigrationTable="ledger"
+    val internalMigrationKeyspace = "migration"
+    val internalMigrationTable = "ledger"
     val attrCondExpressionCAS = if (jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyName.isEmpty)
       ("attribute_not_exists(#pk)", Map("#pk" -> jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyName))
     else
@@ -918,9 +923,9 @@ object GlueApp {
       }
     }
 
-    def compressValues(json: String): String = {
+    def compressValues(json: JValue): JValue = {
       if (jsonMapping4s.dynamodb.compressionConfig.enabled) {
-        val jPayload = parse(json)
+        val jPayload = json
 
         val compressColumns = jsonMapping4s.dynamodb.compressionConfig.compressAllNonPrimaryKeysColumns match {
           case true => {
@@ -945,7 +950,7 @@ object GlueApp {
           }
           case _ => throw CompressionException("Compressed payload is empty")
         }
-        compact(render(updatedJson))
+        updatedJson
       } else {
         json
       }
@@ -1369,7 +1374,7 @@ object GlueApp {
         def executePut(rs: String, whereClause: String): Unit = {
           val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
           val jsonRow = compressValues(jsonRowEscaped)
-          val json4sRow = parse(jsonRow)
+          val json4sRow = jsonRow
           val backToJsonRow = backToCQLStatementWithoutTs(json4sRow)
 
           val ddbRequest = createPutRequest(backToJsonRow,
@@ -1409,7 +1414,7 @@ object GlueApp {
 
     def shuffleDfV2(df: DataFrame): DataFrame = {
       val saltColumnName = java.util.UUID.randomUUID().toString
-      val shuffledDf = df.withColumn(s"salt-$saltColumnName",rand())
+      val shuffledDf = df.withColumn(s"salt-$saltColumnName", rand())
         .repartition(defaultPartitions, col(s"salt-$saltColumnName"))
         .drop(s"salt-$saltColumnName")
       logger.info(s"Shuffle partitions: ${shuffledDf.rdd.getNumPartitions}")
@@ -1864,7 +1869,7 @@ object GlueApp {
       }
     }
     def writeWithSizeControl(df: DataFrame, path: String): Unit = {
-      df.coalesce( scala.math.max(1, cores * instances) )
+      df.coalesce(scala.math.max(1, cores * instances))
         .write
         .mode("overwrite")
         .option("maxRecordsPerFile", KEYS_PER_PARQUET_FILE)

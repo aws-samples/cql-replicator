@@ -82,7 +82,7 @@ settings may vary if you choose to replicate TTLs, updates, or offloading object
 The CQLReplicator offers three options for operation:
 1. For high-volume traffic exceeding 5000 Write Capacity Units (WCU) per second:
     * Use the command: `--max-wcu-traffic 20000`
-    *  This setting uses the default of 4 tiles
+    *  This setting uses the default of 4 tiles (Glue jobs)
 2. For lower-volume traffic below 5000 WCU per second:
     * Use the command:` --max-wcu-traffic 4000 --tiles 1`
     * This setting customizes the number of tiles to 1

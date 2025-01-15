@@ -33,7 +33,12 @@ This self-referencing rule restricts the source to the same security group withi
 It's worth noting that your VPC's default security group may already include such a self-referencing inbound rule for all traffic.
 By implementing these configurations, you ensure that AWS Glue components can communicate effectively while maintaining a secure network environment.
 
+## Primary Migration Path
+Direct migration to Amazon Keyspaces, offering a fully managed, serverless Cassandra-compatible experience: 
 - [Apache Cassandra to Amazon Keyspaces](docs/keyspaces/README.MD)
+
+## Complementary Solutions 
+Additional connectors for specific use cases including data lakes (S3), search capabilities (OpenSearch), and in-memory performance (MemoryDB):
 - [Apache Cassandra to Amazon S3](docs/s3/README.MD)
 - [Apache Cassandra to Amazon Opensearch](docs/oss/README.MD)
 - [Apache Cassandra to Amazon MemoryDB](docs/memorydb/README.MD)

@@ -9,6 +9,23 @@ in ../conf accordingly to the environment.
 The following command initializes the CQLReplicator environment, which involves the copying JAR artifacts, creation a Glue connector,
 a S3 bucket, a Glue job, migration keyspace, and ledger table.
 
+```shell
+    cd cql-replicator/glue/bin &&
+    cqlreplicator --cmd init --sg '"sg-1","sg-2"' \ 
+                  --subnet "subnet-XXXXXXXXXXXX" --az us-east-1a --region us-east-1 \
+                  --env ver5 \  # Optional 
+                  --glue-iam-role glue-cassandra-migration \
+                  --landing-zone s3://your-s3-bucket \
+                  --target-type keyspaces
+```
+After running the below command, you should find in the AWS account:
+
+1. CQLReplicator-ver5 glue job and Glue connector in AWS Glue console
+2. Amazon S3 bucket that stores the artifacts
+3. Keyspace `migration` and `ledger` table in Amazon Keyspaces
+
+![](../images/init-CQLReplicator.png "Init")
+
 Note: If you run the CQLReplicator on EC2 you should attach the following inline policy:
 ```json
 {
@@ -31,18 +48,6 @@ Note: If you run the CQLReplicator on EC2 you should attach the following inline
   ]
 }
 ```
-
-```shell
-    cd cql-replicator/glue/bin &&
-    cqlreplicator --cmd init --sg '"sg-1","sg-2"' \ 
-                  --subnet "subnet-XXXXXXXXXXXX" --az us-east-1a --region us-east-1 \
-                  --env ver5 \  # Optional 
-                  --glue-iam-role glue-cassandra-migration \
-                  --landing-zone s3://your-s3-bucket \
-                  --target-type keyspaces
-```
-
-![](../images/init-CQLReplicator.png "Init")
 
 - `--sg` - these security group(s) which allow access to the Cassandra cluster from AWS Glue and includes the
   self-referencing inbound rule for all traffic
@@ -67,12 +72,6 @@ Note: If you run the CQLReplicator on EC2 you should attach the following inline
   Keyspaces migration.ledger)
 - `--main-script-landing` - use this flag if you want to store the main script in the `s3://your-landing-zone/script/CQLReplicator.scala`
 - `--env` - use to create multiple environments, e.g. dev/test/prod
-
-After running the below command, you should find in the AWS account:
-
-1. CQLReplicator Glue job and Glue connector in AWS Glue
-2. Amazon S3 bucket that stores the artifacts
-3. Keyspace `migration` and `ledger` table in Amazon Keyspaces
 
 ## Start migration process
 To operate CQLReplicator on AWS Glue, you need to use `--cmd run` command, followed by a series of parameters. The

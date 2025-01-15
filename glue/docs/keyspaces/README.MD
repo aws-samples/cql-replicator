@@ -478,7 +478,7 @@ There are use-cases when you need to filter out some certain keys during the mig
                                           }
                                         }'
 ```
-Note: You can use only primary key columns in the `filterExpression` a the `filterExpression` should be defined as [the Spark SQL Expression](https://spark.apache.org/docs/3.3.0/api/sql/index.html).
+Note: You can use only primary key columns in the `filterExpression` and it should be defined as [the Spark SQL Expression](https://spark.apache.org/docs/3.3.0/api/sql/index.html).
 
 ## Not overwriting existing records in Amazon Keyspaces
 In order to preserve existing records during the bulk migration phase set `readBeforeWrite` to `true` in the `json-mapping`, for example:
@@ -530,6 +530,9 @@ older Cassandra version you must enable the custom JSON Serialization on the cli
                                           }}
                                         }'
 ```
+### Limitations
+The custom JSON serializer supports the following data types: boolean, int, text, ascii, bigint, blob, counter, date,
+decimal, double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
 
 The following parameters must be
 set `allColumns`:`false`, `columns` : ["partitionKey", "clusteringKey","regularColumn"],
@@ -575,7 +578,7 @@ In order to reduce AWS Glue costs after the historical workload moved to the tar
 - Use Cost Dashboard and AWS Cost Explorer to calculate and track cost savings from optimization efforts
 
 ## Resize the replication process
-To modify the number of tiles during the replication process:
+To modify the number of tiles (Glue jobs) during the replication process:
 - Safely stop the current migration process: Do not force-stop any running jobs to prevent data inconsistency,
 - Ensure system state: Verify all Glue jobs show "COMPLETED" status and Check that no replication processes are actively running
 - After confirmation of complete shutdown, proceed with your desired tile count modifications using the appropriate commands:
@@ -594,10 +597,6 @@ To modify the number of tiles during the replication process:
 
 After confirming the resizing job has successfully completed, restart CQLReplicator with the updated number of tiles.
 Before restarting, verify that all system components are in a stable state.
-
-## Limitations
-The custom JSON serializer supports the following data types: boolean, int, text, ascii, bigint, blob, counter, date,
-decimal, double,float,timestamp,smallint,timeuuid,uuid, and tinyint.
 
 ## Know issues
 | Error Message/Issue                                                                                                           | CW Discovery logs | CW Replication logs | Work around                                                                                                                                                                                                     |

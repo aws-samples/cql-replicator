@@ -103,7 +103,7 @@ Note: The following command is going to capture only "insert" or "delete". In or
 that is constantly updated, for example, add `--writetime-column your-column` to the following command line.
 
 ```shell
-   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-9234567890-us-east-1-ver5 --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-ver5 --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
                  --env ver5 --target-type keyspaces

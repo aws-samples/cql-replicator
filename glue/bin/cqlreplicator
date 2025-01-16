@@ -52,6 +52,8 @@ JOBS=()
 S3_PATH_LIBS=""
 DISCOVERY_RUNNING_ID=""
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+INT_KS_NAME=migration
+INT_TBL_NAME=ledger
 
 # Progress bar configuration
 PS=40
@@ -60,25 +62,18 @@ PCU="-"
 PPS=2
 
 set +x
+
 # The Art
 GREEN='\033[1;32m'
 NC='\033[0m' # No Color
-cat <(echo -e "${GREEN}") - <(echo -e "${NC}") << "EOF"
-    ___ ___  _     ____            _ _           _
-  / ___/ _ \| |   |  _ \ ___ _ __ | (_) ___ __ _| |_ ___  _ __
- | |  | | | | |   | |_) / _ \ '_ \| | |/ __/ _` | __/ _ \| '__|
- | |__| |_| | |___|  _ <  __/ |_) | | | (_| (_| | || (_) | |
-  \____\__\_\_____|_| \_\___| .__/|_|_|\___\__,_|\__\___/|_|
-                            |_|
-·······································································
-:     __          _______   _____           _____                     :
-:    /\ \        / / ____| |  __ \         / ____|                    :
-:   /  \ \  /\  / / (___   | |__) | __ ___| (___   ___ _ ____   _____ :
-:  / /\ \ \/  \/ / \___ \  |  ___/ '__/ _ \\___ \ / _ \ '__\ \ / / _ \:
-: / ____ \  /\  /  ____) | | |   | | | (_) |___) |  __/ |   \ V /  __/:
-:/_/    \_\/  \/  |_____/  |_|   |_|  \___/_____/ \___|_|    \_/ \___|:
-·······································································
-EOF
+BANNER_FILE="banner.txt"
+if [ ! -f "$BANNER_FILE" ]; then
+    echo "Error: Banner file not found!"
+    exit 1
+fi
+BANNER=$(cat "$BANNER_FILE" || echo "Default Banner")
+echo -e "${GREEN}${BANNER}${NC}"
+
 # Preflight checks
 # Check Bash version
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
@@ -221,31 +216,33 @@ function check_discovery_runs() {
 
 function check_target_table_req() {
     local current_mode
-    if ! current_mode=$(aws keyspaces get-table --keyspace-name "${params[TARGET_KS]}" --table-name "${params[TARGET_TBL]}" \
-        --query 'capacitySpecification' --output json 2>&1); then
-        if [[ $current_mode == *"ResourceNotFoundException"* ]]; then
-            log_error "Error: Keyspaces or Table ${params[TARGET_KS]}.${params[TARGET_TBL]} not found."
-            exit 1
-        else
-            log_error "Error: Failed to get table information: $current_mode"
-            exit 1
-        fi
-    fi
+    local target_type=$1
 
-    if [[ $(jq -r '.throughputMode' <<< "$current_mode") == "PROVISIONED" ]]; then
-        local provisioned_to
-        provisioned_to=$(jq -r '.writeCapacityUnits' <<< "$current_mode")
-        if [[ $provisioned_to -ge ${params[WCU_TRAFFIC]} ]]; then
-            log_info "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is provisioned to $provisioned_to WCUs per second"
-            log_info "The requested traffic is ${params[WCU_TRAFFIC]}"
-        else
-            log_warn "Warn: The incoming traffic exceeds the provisioned capacity"
+    if [[ "$target_type" == "dynamodb" ]]; then
+        if ! current_mode=$(aws dynamodb describe-table --table-name "${params[TARGET_TBL]}" \
+            --query 'Table.TableStatus' --output text 2>&1); then
+            if [[ $current_mode == *"ResourceNotFoundException"* ]]; then
+                log_error "Error: DynamoDB Table ${params[TARGET_TBL]} not found."
+                exit 1
+            else
+                log_error "Error: Failed to get DynamoDB table information: $current_mode"
+                exit 1
+            fi
         fi
-    else
-        log_info "The ${params[TARGET_KS]}.${params[TARGET_TBL]} is on-demand mode"
+   fi
+   if [[ "$target_type" == "keyspaces" ]]; then
+        if ! current_mode=$(aws keyspaces get-table --keyspace-name "${params[TARGET_KS]}" --table-name "${params[TARGET_TBL]}" \
+            --query 'capacitySpecification' --output json 2>&1); then
+            if [[ $current_mode == *"ResourceNotFoundException"* ]]; then
+                log_error "Error: Keyspaces or Table ${params[TARGET_KS]}.${params[TARGET_TBL]} not found."
+                exit 1
+            else
+                log_error "Error: Failed to get table information: $current_mode"
+                exit 1
+            fi
+        fi
     fi
 }
-
 
 function check_replication_runs() {
    local tile
@@ -454,6 +451,7 @@ validate_iam_role_permissions() {
         return 1
     fi
     local keyspaces_actions=("cassandra:Insert" "cassandra:Update" "cassandra:Select" "cassandra:Delete")
+    local dynamodb_actions=("dynamodb:PutItem" "dynamodb:UpdateItem" "dynamodb:BatchWriteItem" "dynamodb:DeleteItem")
     local s3_actions=("s3:ListBucket" "s3:PutObject" "s3:DeleteObject" "s3:GetObject")
 
     check_permissions() {
@@ -462,6 +460,9 @@ validate_iam_role_permissions() {
         local actions=("$@")
         local resource_arn
         if [[ $service == "cassandra" ]]; then
+          resource_arn="arn:aws:$service:$region:$account:*"
+        fi
+        if [[ $service == "dynamodb" ]]; then
           resource_arn="arn:aws:$service:$region:$account:*"
         fi
         if [[ $service == "s3" ]]; then
@@ -485,7 +486,19 @@ validate_iam_role_permissions() {
         done
     }
 
-    check_permissions "cassandra" "${keyspaces_actions[@]}"
+    if [ "${params[TARGET_TYPE]}" = "keyspaces" ]; then
+      check_permissions "cassandra" "${keyspaces_actions[@]}"
+    fi
+
+    if [ "${params[TARGET_TYPE]}" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == false ]; then
+      check_permissions "dynamodb" "${dynamodb_actions[@]}"
+      check_permissions "cassandra" "${keyspaces_actions[@]}"
+    fi
+
+    if [ "${params[TARGET_TYPE]}" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == true ]; then
+      check_permissions "dynamodb" "${dynamodb_actions[@]}"
+    fi
+
     check_permissions "s3" "${s3_actions[@]}"
     check_glue_service_role
 }
@@ -545,7 +558,7 @@ function Clean_Up {
   aws glue delete-connection --connection-name "cql-replicator-opensearch-integration${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null 2>&1
   aws glue delete-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}"
   if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
-    aws keyspaces delete-keyspace --keyspace-name migration --region "${params[AWS_REGION]}"
+    aws keyspaces delete-keyspace --keyspace-name "$INT_KS_NAME" --region "${params[AWS_REGION]}"
   fi
 }
 
@@ -605,6 +618,15 @@ function Init {
     check_security_group_self_referencing "$security_group_id"
   fi
 
+  if [[ ${params[TARGET_TYPE]} == "dynamodb" ]]; then
+      uploader_jars "${ARTIFACTS_KEYSPACES[@]}"
+      S3_PATH_LIBS+=","
+      join_array "${S3_PATH_KEYSPACES[@]}"
+      validate_iam_role_permissions "${params[GLUE_IAM_ROLE]}" "${params[AWS_REGION]}" "$AWS_ACCOUNT"
+      security_group_id=$(echo "${params[SG]}" | tr -d "'\"")
+      check_security_group_self_referencing "$security_group_id"
+    fi
+
   if [[ ${params[TARGET_TYPE]} == "memorydb" ]]; then
     uploader_jars "${ARTIFACTS_MEMORYDB[@]}"
     S3_PATH_LIBS+=","
@@ -663,7 +685,6 @@ function Init {
   # Create Glue Connector
   local glue_conn_name
   local enhanced_monitoring=""
-  local spark_conf="spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=200 --conf spark.default.parallelism=200 --conf spark.locality.wait=0"
   if [[ "${params[GLUE_MONITORING]}" == true ]]; then
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
   fi
@@ -756,11 +777,11 @@ function Init {
   if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
     progress 4 5 "Creating CQLReplicator's internal resources         "
     # Create a keyspace - migration
-    aws keyspaces create-keyspace --keyspace-name migration --region "${params[AWS_REGION]}" > /dev/null
+    aws keyspaces create-keyspace --keyspace-name "$INT_KS_NAME" --region "${params[AWS_REGION]}" > /dev/null
     sleep 20
 
     # Create a table - ledger
-    aws keyspaces create-table --keyspace-name migration --table-name ledger --schema-definition '{
+    aws keyspaces create-table --keyspace-name "$INT_KS_NAME" --table-name "$INT_TBL_NAME" --schema-definition '{
     "allColumns": [ { "name": "ks", "type": "text" },
     { "name": "tbl", "type": "text" },
     { "name": "tile", "type": "int" },
@@ -838,7 +859,8 @@ function Start_Discovery {
   check_input "${params[TARGET_TBL]}" "Error: target table name is empty, must be provided"
   check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
   check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
-  check_target_table_req
+  check_input "${params[TARGET_TYPE]}" "Error: target type must be provided"
+  check_target_table_req "${params[TARGET_TYPE]}"
   check_num_tiles
   check_glue_job_connection "${params[JOB_NAME]}${params[DEFAULT_ENV]}" "${params[AWS_REGION]}"
 
@@ -897,32 +919,35 @@ function Start_Discovery {
 
 function Resize_Cluster {
   check_input "${params[SOURCE_KS]}" "Error: source keyspace name is empty, must be provided"
-    check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
-    check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
-    check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
-    check_input "${params[TILES]}" "Error: new number of tiles should be provided"
-    log_info "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"
-    log_info "LANDING ZONE:" "${params[S3_LANDING_ZONE]}"
-    log_info "WORKER_TYPE: ${params[WORKER_TYPE]}"
-    log_info "Resizing the tiles. The new size is ${params[TILES]}"
-    check_sampler_runs resize
-    if [ "${params[PROCESS_RUNNING]}" = false ]; then
-      aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
+  check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
+  check_input "${params[S3_LANDING_ZONE]}" "Error: landing zone must be provided"
+  check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
+  check_input "${params[TILES]}" "Error: new number of tiles should be provided"
+  log_info "SOURCE:" "${params[SOURCE_KS]}"."${params[SOURCE_TBL]}"
+  log_info "LANDING ZONE:" "${params[S3_LANDING_ZONE]}"
+  log_info "WORKER_TYPE: ${params[WORKER_TYPE]}"
+  log_warn "The replication process for ${params[SOURCE_KS]}.${params[SOURCE_TBL]} is going to be resized"
+  log_warn "Before proceeding the replication process must be stopped"
+  log_info "Resizing the tiles. The new size is ${params[TILES]}"
+  confirm "<=== Do you want to continue? ===> "
+  check_sampler_runs resize
+  if [ "${params[PROCESS_RUNNING]}" = false ]; then
+    aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
                     "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy" \
                     --recursive --region "${params[AWS_REGION]}" >/dev/null
       # Check if primaryKeysCopy exists if the prefix doesn't exists return error and exit
-      if aws s3 ls "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy/" --region "${params[AWS_REGION]}" > /dev/null; then
-        log_info "The copy has been created"
-      else
-        log_error "No copy found in ${params[S3_LANDING_ZONE]}"
-        exit 1
-      fi
-      log_info "Removing the primary keys and stats"
-      aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
-                    --recursive --region "${params[AWS_REGION]}" >/dev/null
-      aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats" \
-                    --recursive --region "${params[AWS_REGION]}" >/dev/null
-      rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "G.1X" --number-of-workers $(( ${params[TILES]} + 1 )) --region "${params[AWS_REGION]}" --arguments '{
+    if aws s3 ls "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy/" --region "${params[AWS_REGION]}" > /dev/null; then
+      log_info "The copy has been created"
+    else
+      log_error "No copy found in ${params[S3_LANDING_ZONE]}"
+      exit 1
+    fi
+    log_info "Removing the primary keys and stats"
+    aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
+                  --recursive --region "${params[AWS_REGION]}" >/dev/null
+    aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats" \
+                  --recursive --region "${params[AWS_REGION]}" >/dev/null
+    rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "G.1X" --number-of-workers $(( ${params[TILES]} + 1 )) --region "${params[AWS_REGION]}" --arguments '{
             "--PROCESS_TYPE":"resize",
             "--TILE":"0",
             "--TOTAL_TILES":"'${params[TILES]}'",
@@ -939,23 +964,23 @@ function Resize_Cluster {
             "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
             "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
             "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
-      params[PROCESS_RUNNING]=true
-      local delay=0.1
-      local spinstr='|/-\'
-      output="Glue job $rs is running. Resizing in progress..."
-      sleep 20
-      while [ "${params[PROCESS_RUNNING]}" = true ]; do
-        local temp=${spinstr#?}
-        printf "\r%s [%c]  " "$output" "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        check_sampler_runs resize
-      done
+    params[PROCESS_RUNNING]=true
+    local delay=0.1
+    local spinstr='|/-\'
+    output="Glue job $rs is running. Resizing in progress..."
+    sleep 20
+    while [ "${params[PROCESS_RUNNING]}" = true ]; do
+      local temp=${spinstr#?}
+      printf "\r%s [%c]  " "$output" "$spinstr"
+      local spinstr=$temp${spinstr%"$temp"}
+      sleep $delay
+      check_sampler_runs resize
+    done
       printf "\r%s    \n" "$output"
       log_info "Removing copy of the primary keys"
       aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy" \
                     --recursive --region "${params[AWS_REGION]}" >/dev/null
-    fi
+  fi
 }
 
 function Kill_Replication {
@@ -973,7 +998,13 @@ function Start_Replication {
   cnt=0
   KEYS_PER_TILE=$(aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats/discovery/$cnt/count.json" --region "${params[AWS_REGION]}" - | head | jq '.primaryKeys')
   log_info "Sampled primary keys per tile is $KEYS_PER_TILE"
-  local workers=$(( 2 + KEYS_PER_TILE/${params[ROWS_PER_WORKER]} ))
+  local workers
+  if [ "${params[WCU_TRAFFIC]}" -gt 0 ]; then
+      workers=${params[DEFAULT_WORKERS]}
+    else
+      workers=$(( 2 + KEYS_PER_TILE/${params[ROWS_PER_WORKER]} ))
+  fi
+
   if [[ workers -gt 299 ]]; then
     log_info "=== The total number of Glue workers are over 299 per each tile (glue job), you have two options:                  ==="
     log_info "=== [1] Increase the number of tiles. In order to rerun with the higher number of tiles                            ==="

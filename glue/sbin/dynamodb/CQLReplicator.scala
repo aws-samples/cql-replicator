@@ -2,7 +2,34 @@
  * // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * // SPDX-License-Identifier: Apache-2.0
  */
-// Target Amazon DynamoDB
+
+// Target Amazon DynamoDB - Preview
+
+/* Usage:
+
+// Run this command to init to deploy the cqlreplicator
+// The tool is going to deploy an intrenal table for tracking replication process in Amazon Keyspaces "migration.ladger"
+  cqlreplicator --cmd init
+                --subnet "subnet-00a00b00"
+                --sg '"sg-0e0b0a000000d000b"'
+                --az "us-east-1a"
+                --region us-east-1
+                --glue-iam-role GlueRole
+                --env ddbdemo
+                --target-type dynamodb
+
+// Run this command to start the replicator
+  cqlreplicator --cmd run \
+                --target-type dynamodb \
+                --landing-zone s3://cql-replicator-1234567890-us-east-1-ddbdemo \
+                --region us-east-1 --max-wcu-traffic 30000 --src-keyspace ks \
+                --src-table tbl --trg-keyspace ks --trg-table tbl --env ddbdemo \
+                --writetime-column data
+                --json-mapping '{ "replication": {"dynamoDBPrimaryKey":{"partitionKeyName":"pk","sortKeyName": "sk","separator":"#"}},
+                                  "dynamodb":{"readBeforeWrite": false,
+                                              "dynamoDBConnection": { "endpoint": "dynamodb.us-east-1.amazonaws.com","region": "us-east-1"}}}' \
+                --workload-type batch
+ */
 
 import com.amazonaws.ClientConfiguration
 import com.amazonaws.client.builder.AwsClientBuilder.EndpointConfiguration

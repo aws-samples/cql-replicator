@@ -39,7 +39,7 @@ declare -A params=(
     [DEFAULT_WORKLOAD_TYPE]=continuous
     [GLUE_TYPE]=gluestreaming
     [WCU_TRAFFIC]=0
-    [DEFAULT_ROWS_PER_SECOND]=3500
+    [DEFAULT_ROWS_PER_SECOND]=2000
     [PROCESS_RUNNING]=false
     [TIME_SCHEDULE]=""
 )

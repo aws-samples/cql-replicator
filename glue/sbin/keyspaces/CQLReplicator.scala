@@ -2,10 +2,9 @@
  * // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * // SPDX-License-Identifier: Apache-2.0
  */
-// Target Amazon Keyspaces
+// Target Amazon Keyspaces - Glue 5.0 Version
 
 import com.amazonaws.retry.RetryPolicy
-import com.amazonaws.services.cloudwatch.AmazonCloudWatchAsyncClientBuilder
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.{GlueArgParser, Job, JsonOptions}
@@ -20,8 +19,6 @@ import com.datastax.oss.driver.api.core.uuid.Uuids
 import com.datastax.oss.driver.api.core.{AllNodesFailedException, CqlSession, DriverException, NoNodeAvailableException}
 import io.github.resilience4j.core.IntervalFunction
 import io.github.resilience4j.retry.{Retry, RetryConfig}
-import io.micrometer.cloudwatch.{CloudWatchConfig, CloudWatchMeterRegistry}
-import io.micrometer.core.instrument.Clock
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.cassandra._
@@ -39,8 +36,8 @@ import java.time.format.DateTimeFormatter
 import java.time.{Duration, ZoneId, ZonedDateTime}
 import java.util.Base64
 import scala.annotation.tailrec
-import scala.collection.JavaConverters._
 import scala.io.Source
+import scala.jdk.CollectionConverters._
 import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try}
 
@@ -85,8 +82,7 @@ sealed trait Stats
 
 case class WriteConfiguration(batchSize: Int = 1024 * 1024, maxRetryAttempts: Int = 64, expBackoff: Int = 25, maxStatementsPerBatch: Int = 29, preShuffleBeforeWrite: Boolean = true)
 
-case class ReadConfiguration(splitSizeInMB: Int = 64, concurrentReads: Int = 32, consistencyLevel: String = "LOCAL_ONE", fetchSizeInRows: Int = 500, queryRetryCount: Int = 180,
-                             readTimeoutMS: Int = 120000)
+case class ReadConfiguration(splitSizeInMB: Int = 64, concurrentReads: Int = 32, consistencyLevel: String = "LOCAL_ONE", fetchSizeInRows: Int = 500, queryRetryCount: Int = 180, readTimeoutMS: Int = 120000)
 
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
 
@@ -96,10 +92,7 @@ case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
 
 case class PointInTimeReplicationConfig(predicateOp: String = "greaterThan")
 
-case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterializedViewConfig = MaterializedViewConfig(),
-                       replicateWithTimestamp: Boolean = false,
-                       pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig(),
-                       readConfiguration: ReadConfiguration = ReadConfiguration())
+case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterializedViewConfig = MaterializedViewConfig(), replicateWithTimestamp: Boolean = false, pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig(), readConfiguration: ReadConfiguration = ReadConfiguration())
 
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
 
@@ -115,6 +108,7 @@ case class JsonMapping(replication: Replication, keyspaces: Keyspaces)
 
 case class DlqConfig(s3client: AmazonS3, bucketName: String, key: String)
 
+// Updated CustomResultSetSerializer for Glue 5.0
 class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.driver.api.core.cql.Row] {
   implicit val formats: DefaultFormats.type = DefaultFormats
 
@@ -158,14 +152,12 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
 
   def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
     sep match {
-      case None => {
+      case None =>
         val output = bytes.map("%02x".format(_)).mkString
         s"0x$output"
-      }
-      case _ => {
+      case _ =>
         val output = bytes.map("%02x".format(_)).mkString(sep.get)
         s"0x$output"
-      }
     }
   }
 
@@ -174,6 +166,7 @@ class CustomResultSetSerializer extends org.json4s.Serializer[com.datastax.oss.d
   }
 }
 
+// Updated SupportFunctions for Glue 5.0
 class SupportFunctions {
   def correctValues(binColumns: List[String] = List(), utdColumns: List[String] = List(), input: String): JValue = {
     implicit val formats: DefaultFormats.type = DefaultFormats
@@ -182,7 +175,7 @@ class SupportFunctions {
     def correctEmptyBin(json: JValue, cols: Seq[String]): JValue = cols match {
       case Nil => json
       case col :: tail =>
-        val updatedJson = (json \ col) match {
+        val updatedJson = (json \\ col) match {
           case JString("") => json transformField {
             case JField(`col`, _) => JField(col, JString("0x"))
           }
@@ -214,6 +207,7 @@ class SupportFunctions {
   }
 }
 
+// Updated FlushingSet for Glue 5.0
 case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfiguration, dlqConfig: DlqConfig, logger: GlueLogger) {
 
   lazy val retry: Retry = Retry.of("keyspaces", retryConfig)
@@ -244,6 +238,22 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
     }
   }
 
+  private def persistToDlq(dlqConfig: DlqConfig, payload: String): Unit = {
+    val ts = java.time.LocalDateTime.now().toString
+    val key = s"${dlqConfig.key}/log-$ts.msg"
+
+    try {
+      dlqConfig.s3client.putObject(dlqConfig.bucketName, key, payload)
+    } catch {
+      case ase: AmazonServiceException =>
+        logger.error(s"Amazon S3 couldn't process the request: ${ase.getMessage}")
+      case sce: SdkClientException =>
+        logger.error(s"Couldn't contact Amazon S3 or couldn't parse the response: ${sce.getMessage}")
+      case e: Exception =>
+        logger.error(s"Unexpected error while persisting to S3: ${e.getMessage}")
+    }
+  }
+
   final def add(element: String): Unit = this.synchronized {
     val elementSize = element.toString.getBytes.length
     if (size + elementSize >= internalConfig.batchSize || batch.getStatementsCount > internalConfig.maxStatementsPerBatch) {
@@ -270,28 +280,9 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
       case Success(_) =>
       case Failure(exception) =>
         logger.error(s"Failed to execute CQL batch statement after retries: ${exception.getMessage}")
-        batchStatement.asScala.foreach {
-          stmt =>
-            persistToDlq(dlqConfig, stmt.asInstanceOf[SimpleStatement].getQuery)
+        batchStatement.asScala.foreach { stmt =>
+          persistToDlq(dlqConfig, stmt.asInstanceOf[SimpleStatement].getQuery)
         }
-    }
-  }
-
-  private def persistToDlq(dlqConfig: DlqConfig, payload: String): Unit = {
-    val ts = org.joda.time.LocalDateTime.now().toString
-    val key = s"${dlqConfig.key}/log-$ts.msg"
-
-    try {
-      dlqConfig.s3client.putObject(dlqConfig.bucketName, key, payload)
-    } catch {
-      case ase: AmazonServiceException =>
-        logger.error(s"Amazon S3 couldn't process the request: ${ase.getMessage}")
-
-      case sce: SdkClientException =>
-        logger.error(s"Couldn't contact Amazon S3 or couldn't parse the response: ${sce.getMessage}")
-
-      case e: Exception =>
-        logger.error(s"Unexpected error while persisting to S3: ${e.getMessage}")
     }
   }
 
@@ -308,11 +299,8 @@ object GlueApp {
       patternWhereClauseToMap.findAllIn(input).matchData.map { m => s"${m.group(2)}" }.mkString(":")
     }
 
-    def isLogObjectPresent(ksName: String,
-                           tblName: String,
-                           bucketName: String,
-                           s3Client: com.amazonaws.services.s3.AmazonS3,
-                           tile: Int, op: String): Option[String] = {
+    // Updated helper functions for Glue 5.0 compatibility
+    def isLogObjectPresent(ksName: String, tblName: String, bucketName: String, s3Client: AmazonS3, tile: Int, op: String): Option[String] = {
       val prefix = s"$ksName/$tblName/dlq/$tile/$op"
       val listObjectsRequest = new ListObjectsV2Request().withBucketName(bucketName).withPrefix(prefix)
       val objectListing = s3Client.listObjectsV2(listObjectsRequest)
@@ -320,37 +308,26 @@ object GlueApp {
       firstObjectKeyOption
     }
 
-    // Strictly Serializable
-    def replayLogs(logger: GlueLogger,
-                   ksName: String,
-                   tblName: String,
-                   bucketName: String,
-                   s3Client: com.amazonaws.services.s3.AmazonS3,
-                   tile: Int,
-                   op: String,
-                   cc: CqlSession): Unit = {
+    def replayLogs(logger: GlueLogger, ksName: String, tblName: String, bucketName: String, s3Client: AmazonS3, tile: Int, op: String, cc: CqlSession): Unit = {
       val session = cc
-      Iterator.continually(isLogObjectPresent(ksName, tblName, bucketName, s3Client, tile, op)).takeWhile(_.nonEmpty).foreach {
-        key => {
-          val keyTmp = key.get
-          val getObjectRequest = new GetObjectRequest(bucketName, keyTmp)
-          val s3Object = s3Client.getObject(getObjectRequest)
-          val objectContent = scala.io.Source.fromInputStream(s3Object.getObjectContent).mkString
-          Try {
-            logger.info(s"Detected a failed $op '$keyTmp' in the dlq. The $op is going to be replayed.")
-            session.execute(s"$objectContent IF NOT EXISTS").all()
-          } match {
-            case Failure(_) => throw new DlqS3Exception(s"Failed to insert $objectContent")
-            case Success(_) => {
-              s3Client.deleteObject(bucketName, keyTmp)
-              logger.info(s"Operation $op '$keyTmp' replayed and removed from the dlq successfully.")
-            }
-          }
+      Iterator.continually(isLogObjectPresent(ksName, tblName, bucketName, s3Client, tile, op)).takeWhile(_.nonEmpty).foreach { key =>
+        val keyTmp = key.get
+        val getObjectRequest = new GetObjectRequest(bucketName, keyTmp)
+        val s3Object = s3Client.getObject(getObjectRequest)
+        val objectContent = scala.io.Source.fromInputStream(s3Object.getObjectContent).mkString
+        Try {
+          logger.info(s"Detected a failed $op '$keyTmp' in the dlq. The $op is going to be replayed.")
+          session.execute(s"$objectContent IF NOT EXISTS").all()
+        } match {
+          case Failure(_) => throw new DlqS3Exception(s"Failed to insert $objectContent")
+          case Success(_) =>
+            s3Client.deleteObject(bucketName, keyTmp)
+            logger.info(s"Operation $op '$keyTmp' replayed and removed from the dlq successfully.")
         }
       }
     }
 
-    def readReplicationStatsObject(s3Client: com.amazonaws.services.s3.AmazonS3, bucket: String, key: String): ReplicationStats = {
+    def readReplicationStatsObject(s3Client: AmazonS3, bucket: String, key: String): ReplicationStats = {
       Try {
         val s3Object = s3Client.getObject(bucket, key)
         val src = Source.fromInputStream(s3Object.getObjectContent)
@@ -358,26 +335,18 @@ object GlueApp {
         src.close()
         json
       } match {
-        case Failure(_) => {
-          ReplicationStats(0, 0, 0, 0, 0, org.joda.time.LocalDateTime.now().toString)
-        }
-        case Success(json) => {
+        case Failure(_) =>
+          ReplicationStats(0, 0, 0, 0, 0, java.time.LocalDateTime.now().toString)
+        case Success(json) =>
           implicit val formats: DefaultFormats.type = DefaultFormats
           parse(json).extract[ReplicationStats]
-        }
       }
     }
 
-    def getDBConnection(connectionConfName: String, bucketName: String, s3client: AmazonS3, cwRegistry: CloudWatchMeterRegistry = null): CqlSession = {
+    def getDBConnection(connectionConfName: String, bucketName: String, s3client: AmazonS3): CqlSession = {
       val connectorConf = s3client.getObjectAsString(bucketName, s"artifacts/$connectionConfName")
-      val metricsEnabled: Boolean = connectorConf.contains("MicrometerMetricsFactory")
-      val connection = if (cwRegistry != null && metricsEnabled)
-        CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
-          .withMetricRegistry(cwRegistry)
-          .build()
-      else
-        CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
-          .build()
+      val connection = CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
+        .build()
       connection
     }
 
@@ -403,16 +372,23 @@ object GlueApp {
     }
 
     def parseJSONMapping(s: String): JsonMapping = {
-      Option(s) match {
-        case Some("None") => JsonMapping(Replication(),
-          Keyspaces(CompressionConfig(),
-            LargeObjectsConfig(),
-            Transformation(),
-            readBeforeWrite = false,
-            UdtConversion(), WriteConfiguration()))
-        case _ =>
-          implicit val formats: DefaultFormats.type = DefaultFormats
-          parse(s).extract[JsonMapping]
+      val trimmedString = Option(s).map(_.trim).getOrElse("")
+      trimmedString match {
+        case "" | "None" | "null" => JsonMapping(Replication(),
+          Keyspaces(CompressionConfig(), LargeObjectsConfig(), Transformation(), readBeforeWrite = false, UdtConversion(), WriteConfiguration()))
+        case jsonString =>
+          Try {
+            implicit val formats: DefaultFormats.type = DefaultFormats
+            parse(jsonString).extract[JsonMapping]
+          } match {
+            case Success(mapping) => mapping
+            case Failure(ex) =>
+              println(s"Failed to parse JSON mapping: ${ex.getMessage}")
+              println(s"Input string: '$jsonString'")
+              // Return default mapping on parse failure
+              JsonMapping(Replication(), Keyspaces(CompressionConfig(), LargeObjectsConfig(), Transformation(), readBeforeWrite = false,
+                UdtConversion(), WriteConfiguration()))
+          }
       }
     }
 
@@ -425,35 +401,27 @@ object GlueApp {
       Try {
         val c1 = Option(connection)
         c1.isEmpty match {
-          case false => {
+          case false =>
             c1.get.getMetadata.getKeyspace(keyspace).isPresent match {
-              case true => {
+              case true =>
                 c1.get.getMetadata.getKeyspace(keyspace).get.getTable(table).isPresent match {
-                  case true => {
+                  case true =>
                     logger.info(s"the $dir table $table exists")
-                  }
-                  case false => {
+                  case false =>
                     logErrorAndExit(s"ERROR: the $dir table $table does not exist", -1)
-                  }
                 }
-              }
-              case false => {
+              case false =>
                 logErrorAndExit(s"ERROR: the $dir keyspace $keyspace does not exist", -2)
-              }
             }
-          }
-          case _ => {
-            logErrorAndExit(s"ERROR: The job was not able to connecto to the $dir", -3)
-          }
+          case _ =>
+            logErrorAndExit(s"ERROR: The job was not able to connect to the $dir", -3)
         }
       } match {
-        case Failure(r) => {
+        case Failure(r) =>
           val err = s"ERROR: Detected a connectivity issue. Check the conf file. Glue connection for the $dir, the job was aborted"
           logErrorAndExit(s"$err ${r.toString}", -4)
-        }
-        case Success(_) => {
+        case Success(_) =>
           logger.info(s"Connected to the $dir")
-        }
       }
     }
 
@@ -465,6 +433,7 @@ object GlueApp {
 
     val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG", "WORKLOAD_TYPE").toArray)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
+
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
     val totalTiles = args("TOTAL_TILES").toInt
@@ -483,8 +452,8 @@ object GlueApp {
       case _ => 0
     }
 
-    val internalMigrationKeyspace="migration"
-    val internalMigrationTable="ledger"
+    val internalMigrationKeyspace = "migration"
+    val internalMigrationTable = "ledger"
     val SAMPLE_SIZE = 100000
     val SAMPLE_FRACTION = 0.2
     val KEYS_PER_PARQUET_FILE = 10500000
@@ -492,6 +461,7 @@ object GlueApp {
       case "true" => StorageLevel.DISK_ONLY
       case _ => StorageLevel.MEMORY_AND_DISK_SER
     }
+
     sparkSession.conf.set(s"spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
     sparkSession.conf.set("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
 
@@ -514,7 +484,7 @@ object GlueApp {
       case _ => true
     }
 
-    //AmazonS3Client to check if a stop request was issued
+    // AmazonS3Client to check if a stop request was issued
     val s3ClientConf = new ClientConfiguration().withRetryPolicy(RetryPolicy.builder().withMaxErrorRetry(5).build())
     val s3client = AmazonS3ClientBuilder.standard().withClientConfiguration(s3ClientConf).build()
 
@@ -541,7 +511,7 @@ object GlueApp {
     val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
     val columns = inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap
     val columnsPos = scala.collection.immutable.TreeSet(columns.keys.toArray: _*).zipWithIndex
-    val jsonMappingRaw = new String(Base64.getDecoder.decode(jsonMapping.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
+    val jsonMappingRaw = new String(Base64.getDecoder.decode(jsonMapping.replaceAll("\\\\r\\\\n|\\\\r|\\\\n", "")), StandardCharsets.UTF_8)
     val cores: Int = sparkSession.sparkContext.getConf.get("spark.executor.cores").toInt
     val instances: Int = sparkSession.sparkContext.getConf.get("spark.executor.instances").toInt
     val defPar: Int = sparkSession.sparkContext.getConf.get("spark.default.parallelism").toInt
@@ -549,7 +519,7 @@ object GlueApp {
     logger.info(s"Json mapping: $jsonMappingRaw")
     logger.info(s"Compute resources: Instances $instances, Cores: $cores")
 
-    val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\r\\n|\\r|\\n", ""))
+    val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\\\r\\\\n|\\\\r|\\\\n", ""))
     val replicatedColumns = jsonMapping4s match {
       case JsonMapping(Replication(true, _, _, _, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
@@ -841,11 +811,6 @@ object GlueApp {
 
     def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(partition => {
-        lazy val cloudWatchSourceConfig = new CloudWatchConfig() {
-          override def get(s: String): String = null
-
-          override def namespace = s"CQLReplicator-$srcKeyspaceName-$srcTableName"
-        }
         lazy val customFormat = if (jsonMapping4s.replication.useCustomSerializer) {
           DefaultFormats + new CustomResultSetSerializer
         } else {
@@ -853,9 +818,7 @@ object GlueApp {
         }
         lazy val supportFunctions = new SupportFunctions()
         lazy val s3ClientOnPartition = AmazonS3ClientBuilder.defaultClient()
-        lazy val cw = AmazonCloudWatchAsyncClientBuilder.defaultClient()
-        lazy val meterSourceRegistry = new CloudWatchMeterRegistry(cloudWatchSourceConfig, Clock.SYSTEM, cw)
-        lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition, meterSourceRegistry)
+        lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition)
         lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
         lazy val dlqConfig = DlqConfig(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op")
         lazy val fl = FlushingSet(keyspacesConnPerPar, jsonMapping4s.keyspaces.writeConfiguration, dlqConfig, logger)
@@ -1020,7 +983,7 @@ object GlueApp {
 
     def shuffleDfV2(df: DataFrame): DataFrame = {
       val saltColumnName = java.util.UUID.randomUUID().toString
-      val shuffledDf = df.withColumn(s"salt-$saltColumnName",rand())
+      val shuffledDf = df.withColumn(s"salt-$saltColumnName", rand())
         .repartition(defaultPartitions, col(s"salt-$saltColumnName"))
         .drop(s"salt-$saltColumnName")
       logger.info(s"Shuffle partitions: ${shuffledDf.rdd.getNumPartitions}")
@@ -1449,8 +1412,9 @@ object GlueApp {
         ledgerConnection.close()
       }
     }
+
     def writeWithSizeControl(df: DataFrame, path: String): Unit = {
-      df.coalesce( scala.math.max(1, cores * instances) )
+      df.coalesce(scala.math.max(1, cores * instances))
         .write
         .mode("overwrite")
         .option("maxRecordsPerFile", KEYS_PER_PARQUET_FILE)

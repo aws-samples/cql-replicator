@@ -42,6 +42,7 @@ declare -A params=(
     [DEFAULT_ROWS_PER_SECOND]=2000
     [PROCESS_RUNNING]=false
     [TIME_SCHEDULE]=""
+    [GLUE_VERSION]="5.0"
 )
 
 # Dynamic variables
@@ -591,18 +592,13 @@ function Init {
     fi
 
   # Uploading the jars
-  ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar"
-  "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
-  "/com/datastax/oss/java-driver-metrics-micrometer/4.13.0/java-driver-metrics-micrometer-4.13.0.jar"
-  "/io/micrometer/micrometer-commons/1.10.4/micrometer-commons-1.10.4.jar"
-  "/io/micrometer/micrometer-core/1.10.4/micrometer-core-1.10.4.jar"
-  "/io/micrometer/micrometer-observation/1.10.4/micrometer-observation-1.10.4.jar"
-  "/io/micrometer/micrometer-registry-cloudwatch/1.10.4/micrometer-registry-cloudwatch-1.10.4.jar")
+  ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.5.1/spark-cassandra-connector-assembly_2.12-3.5.1.jar"
+  "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
   ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar" "/org/opensearch/driver/opensearch-sql-jdbc/1.4.0.1/opensearch-sql-jdbc-1.4.0.1.jar")
-  S3_PATH_BASE=("${params[S3_LANDING_ZONE]}/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
-  S3_PATH_KEYSPACES=("${params[S3_LANDING_ZONE]}/artifacts/vavr-0.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-retry-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-core-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/java-driver-metrics-micrometer-4.13.0.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-commons-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-core-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-observation-1.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/micrometer-registry-cloudwatch-1.10.4.jar")
+  S3_PATH_BASE=("${params[S3_LANDING_ZONE]}/artifacts/spark-cassandra-connector-assembly_2.12-3.5.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  S3_PATH_KEYSPACES=("${params[S3_LANDING_ZONE]}/artifacts/vavr-0.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-retry-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-core-1.7.1.jar")
   S3_PATH_MEMORYDB=("${params[S3_LANDING_ZONE]}/artifacts/jedis-4.4.6.jar")
   S3_PATH_OSS=("${params[S3_LANDING_ZONE]}/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
 
@@ -730,7 +726,7 @@ function Init {
            --name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
            --role "${params[GLUE_IAM_ROLE]}" \
            --description "${params[DESCRIPTION]} for ${params[TARGET_TYPE]}" \
-           --glue-version "4.0" \
+           --glue-version "${params[GLUE_VERSION]}" \
            --number-of-workers 2 \
            --worker-type "${params[WORKER_TYPE]}" \
            --connections "Connections=$glue_conn_name${params[DEFAULT_ENV]}" \
@@ -753,7 +749,7 @@ function Init {
             --name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
             --role "${params[GLUE_IAM_ROLE]}" \
             --description "${params[DESCRIPTION]} -> ${params[TARGET_TYPE]}" \
-            --glue-version "4.0" \
+            --glue-version "${params[GLUE_VERSION]}" \
             --number-of-workers 2 \
             --worker-type "${params[WORKER_TYPE]}" \
             --command "Name=${params[GLUE_TYPE]},ScriptLocation=$glue_bucket_artifacts/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala" \

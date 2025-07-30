@@ -890,11 +890,11 @@ object GlueApp {
             val rs = getSourceRow(selectStmtWithTs, whereClause, cassandraConnPerPar, customFormat)
             if (rs.nonEmpty) {
               processRowWithTimestamp(row, whereClause, rs)
-            } else {
-              val rs = getSourceRow(selectStmtWithTTL, whereClause, cassandraConnPerPar, customFormat)
-              if (rs.nonEmpty) {
-                processRowWithTTL(row, whereClause, rs)
-              }
+            }
+          } else {
+            val rs = getSourceRow(selectStmtWithTTL, whereClause, cassandraConnPerPar, customFormat)
+            if (rs.nonEmpty) {
+              processRowWithTTL(row, whereClause, rs)
             }
           }
         }
@@ -931,7 +931,7 @@ object GlueApp {
             case false =>
               val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
               val ttlVal = getTTLvalue(json4sRow)
-              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
+              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow'$cas USING TTL $ttlVal"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
               else
@@ -940,7 +940,7 @@ object GlueApp {
               val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
               val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
               val ttlVal = getTTLvalue(json4sRow)
-              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
+              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow'$cas USING TTL $ttlVal"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
               else

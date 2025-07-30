@@ -336,9 +336,14 @@ object GlueApp {
           val getObjectRequest = new GetObjectRequest(bucketName, keyTmp)
           val s3Object = s3Client.getObject(getObjectRequest)
           val objectContent = scala.io.Source.fromInputStream(s3Object.getObjectContent).mkString
+          val finalQuery =
+            if (jsonMapping4s.keyspaces.readBeforeWrite)
+              objectContent
+            else
+              s"$objectContent IF NOT EXISTS"
           Try {
             logger.info(s"Detected a failed $op '$keyTmp' in the dlq. The $op is going to be replayed.")
-            session.execute(s"$objectContent IF NOT EXISTS").all()
+            session.execute(finalQuery).all()
           } match {
             case Failure(_) => throw new DlqS3Exception(s"Failed to insert $objectContent")
             case Success(_) => {
@@ -890,11 +895,11 @@ object GlueApp {
             val rs = getSourceRow(selectStmtWithTs, whereClause, cassandraConnPerPar, customFormat)
             if (rs.nonEmpty) {
               processRowWithTimestamp(row, whereClause, rs)
-            } else {
-              val rs = getSourceRow(selectStmtWithTTL, whereClause, cassandraConnPerPar, customFormat)
-              if (rs.nonEmpty) {
-                processRowWithTTL(row, whereClause, rs)
-              }
+            }
+          } else {
+            val rs = getSourceRow(selectStmtWithTTL, whereClause, cassandraConnPerPar, customFormat)
+            if (rs.nonEmpty) {
+              processRowWithTTL(row, whereClause, rs)
             }
           }
         }
@@ -931,7 +936,7 @@ object GlueApp {
             case false =>
               val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
               val ttlVal = getTTLvalue(json4sRow)
-              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
+              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow'$cas USING TTL $ttlVal"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
               else
@@ -940,7 +945,7 @@ object GlueApp {
               val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
               val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
               val ttlVal = getTTLvalue(json4sRow)
-              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' USING TTL $ttlVal$cas"
+              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow'$cas USING TTL $ttlVal"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
               else

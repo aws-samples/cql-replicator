@@ -242,6 +242,8 @@ Best practises:
 To replay failed rows:
 1. Stop the CQLReplicator with `request-stop`
 2. Run it again with `--replay-log` - this option allows you to replay failed operations during the replication phase.
+   If the the original run included the `--json-mapping '{"keyspaces": { "readBeforeWrite": true }}'` parameter ensure 
+   that this is included in the run.
 
 ## Stop migration process
 To stop migration process gracefully run the following command for all tiles:

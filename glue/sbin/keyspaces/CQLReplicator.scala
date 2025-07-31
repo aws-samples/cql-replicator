@@ -1149,7 +1149,7 @@ object GlueApp {
             deleted = newDeletesDF.count()
           }
 
-          if (!(updated != 0 && inserted != 0 && deleted != 0)) {
+          if (updated != 0 || inserted != 0 || deleted != 0) {
             val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, org.joda.time.LocalDateTime.now().toString)
             putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
           }

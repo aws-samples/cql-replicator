@@ -1163,12 +1163,12 @@ calculate_resources() {
     k=-1
     params[WORKER_TYPE]="G.025X"
     f=$(( drps * tiles ))
-    workers=$(( (wcu + f - 1) / f - k ))
+    workers=$(( (wcu + f - 1) / (f - k) ))
   elif [ "${params[WCU_TRAFFIC]}" -ge 10000 ]; then
     k=1
     params[WORKER_TYPE]="G.1X"
     f=$(( drps * tiles ))
-    workers=$(( (wcu + f - 1) / f - k ))
+    workers=$(( (wcu + f - 1) / (f - k) ))
   fi
   params[DEFAULT_WORKERS]=$workers
 }

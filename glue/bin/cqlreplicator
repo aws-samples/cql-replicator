@@ -1170,6 +1170,11 @@ calculate_resources() {
     f=$(( drps * tiles ))
     workers=$(( (wcu + f - 1) / f - k ))
   fi
+
+  if [ $workers -lt 2 ]; then
+      workers=$((workers + 1))
+  fi
+
   params[DEFAULT_WORKERS]=$workers
 }
 

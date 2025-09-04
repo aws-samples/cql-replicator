@@ -43,6 +43,7 @@ import scala.collection.JavaConverters._
 import scala.io.Source
 import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try}
+import org.apache.spark.sql.types.StructType
 
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
@@ -1007,6 +1008,16 @@ object GlueApp {
           case "boolean" => row.getBoolean(position)
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
           case colType if colType.startsWith("list") => listWithSingleQuotes(row.getList[String](position), colType)
+          case colType if colType.startsWith("tuple") => {
+            val tupleData = row.getAs[org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema](position)
+            val elements = (0 until tupleData.length).map { i =>
+              tupleData.get(i) match {
+                case s: String => s"'${s.replace("'", "''")}'"
+                case _ => tupleData.get(i).toString
+              }
+            }.mkString(",")
+            s"($elements)"
+          }
           case _ => throw new CassandraTypeException(s"Unrecognized data type $colType")
         }
         whereStmt.append(s"$colName=$v")
@@ -1303,7 +1314,18 @@ object GlueApp {
             .withColumn("counter_hash", xxhash64(counterColumns.map(c => col(c)): _*))
       }
 
-      val groupingExpr = abs(xxhash64(concat(pkFinalWithoutTs.map(col): _*))) % totalTiles
+      val groupingExpr = abs(xxhash64(concat(
+        pkFinalWithoutTs.map { colName =>
+          baseDF.schema(colName).dataType match {
+            case struct: StructType =>
+              // For tuple types, extract fields and concatenate
+              val fields = struct.fieldNames.map(field => col(colName).getField(field).cast("string"))
+              concat(lit("("), concat_ws(",", fields: _*), lit(")"))
+            case _ =>
+              col(colName).cast("string")
+          }
+        }: _*
+      ))) % totalTiles
 
       val finalDf = primaryKeysDf
         .withColumn("group", groupingExpr)

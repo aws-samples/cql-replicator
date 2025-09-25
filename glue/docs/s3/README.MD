@@ -12,10 +12,10 @@ cqlreplicator --cmd init --sg '"sg-1"' \
                            --env parquet
 ```
 The following run command starts 4 tiles, and replicate the source table `test_cql_replicator`
-to `s3://cql-replicator-backup/snapshots/keyspace_prefix/table_prefix/[0-7]/[insert|update|delete]/YYYY-MM-HHTMM:SS:ss.sss`.
+to `s3://cql-replicator-your-backup/snapshots/keyspace_prefix/table_prefix/[0-7]/[insert|update|delete]/YYYY-MM-HHTMM:SS:ss.sss`.
 
 ```shell
-./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://cql-replicator-6234567890-us-east-1-ver5" --env parquet \
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone "s3://your-bucket-ver5" --env parquet \
                 --ttl-column col2 --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --trg-keyspace keyspace_prefix  --trg-table table_prefix --writetime-column col1 --json-mapping '
                 {"replication": {
                         "allColumns": true,

@@ -21,7 +21,7 @@ cqlreplicator --cmd init --sg '"sg-1"' \
 After the init phase is completed you can run the following command to start the replication process:
 
 ```shell
-   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://cql-replicator-6234567890-us-east-1-opensearch --region us-east-1 \
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://your-s3-bucket --region us-east-1 \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
                  --writetime-column col2 \

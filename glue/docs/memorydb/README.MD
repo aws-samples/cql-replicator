@@ -47,7 +47,7 @@ To operate CQLReplicator on AWS Glue, you need to use `--cmd run` command, follo
 precise configuration of these is primarily determined by your unique migration requirements.
 
 ```shell
-   cqlreplicator --cmd run --max-wcu-traffic 6000 --landing-zone s3://your-s3-bucket \ 
+   cqlreplicator --cmd run --max-wcu-traffic 6000 --landing-zone s3://<PROVIDED_BUCKET_NAME> \ 
                  --region us-east-1 --target-type memorydb \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --env memorydb
@@ -56,7 +56,7 @@ precise configuration of these is primarily determined by your unique migration 
 To stop migration process gracefully run the following command for all tiles:
 
 ```shell
-   cqlreplicator --cmd request-stop --landing-zone s3://your-s3-bucket \ 
+   cqlreplicator --cmd request-stop --landing-zone s3://<PROVIDED_BUCKET_NAME> \ 
                  --region us-east-1 --target-type memorydb \
                  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \ 
                  --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --env memorydb

@@ -931,7 +931,10 @@ object GlueApp {
           jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
             case false =>
               val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
-              val ttlVal = getTTLvalue(json4sRow)
+              val ttlVal = {
+                val rawTtl = getTTLvalue(json4sRow)
+                if (rawTtl == null) 0 else rawTtl
+              }
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow'$cas USING TTL $ttlVal"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
@@ -940,7 +943,10 @@ object GlueApp {
             case _ =>
               val updatedJsonRow = offloadToS3(json4sRow, s3ClientOnPartition, whereClause)
               val backToJsonRow = backToCQLStatementWithoutTTL(updatedJsonRow)
-              val ttlVal = getTTLvalue(json4sRow)
+              val ttlVal = {
+                val rawTtl = getTTLvalue(json4sRow)
+                if (rawTtl == null) 0 else rawTtl
+              }
               val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow'$cas USING TTL $ttlVal"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)

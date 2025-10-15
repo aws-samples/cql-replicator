@@ -541,6 +541,8 @@ object GlueApp {
       case _ => inferKeys(internalConnectionToSource, "primaryKeysWithTS", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
     }
 
+    val pkFinalTarget = inferKeys(internalConnectionToTarget, "primaryKeys", trgKeyspaceName, trgTableName, columnTs).flatten.toMap.keys.toSeq
+
     val partitionKeys = inferKeys(internalConnectionToSource, "partitionKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
     val allColumnsFromSource = getAllColumns(internalConnectionToSource, srcKeyspaceName, srcTableName)
     val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
@@ -866,27 +868,27 @@ object GlueApp {
         lazy val xxHash64: XXHash64 = xxHashFactory.hash64()
         lazy val seedXxHash64 = 42L
 
+        def hashValue(value: String, rule: String): Any = {
+          rule.toLowerCase match {
+            case "murmurhash3" => MurmurHash3.stringHash(value)
+            case "md5" =>
+              val md = MessageDigest.getInstance("MD5")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "sha-1" | "sha1" =>
+              val md = MessageDigest.getInstance("SHA-1")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "sha-2" | "sha2" | "sha-256" | "sha256" =>
+              val md = MessageDigest.getInstance("SHA-256")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "xxhash64" =>
+              val bytes = value.getBytes("UTF-8")
+              xxHash64.hash(bytes, 0, bytes.length, seedXxHash64)
+            case _ => value
+          }
+        }
+
         def valueTransformer(inputJson: JValue, rules: List[TransformExpression]): JValue = {
           if (rules.isEmpty) return inputJson
-
-          def hashValue(value: String, rule: String): Any = {
-            rule.toLowerCase match {
-              case "murmurhash3" => MurmurHash3.stringHash(value)
-              case "md5" =>
-                val md = MessageDigest.getInstance("MD5")
-                md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
-              case "sha-1" | "sha1" =>
-                val md = MessageDigest.getInstance("SHA-1")
-                md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
-              case "sha-2" | "sha2" | "sha-256" | "sha256" =>
-                val md = MessageDigest.getInstance("SHA-256")
-                md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
-              case "xxhash64" =>
-                val bytes = value.getBytes("UTF-8")
-                xxHash64.hash(bytes, 0, bytes.length, seedXxHash64)
-              case _ => value
-            }
-          }
 
           rules.foldLeft(inputJson) { (currentJson, rule) =>
             (currentJson \ rule.columnName) match {
@@ -927,7 +929,47 @@ object GlueApp {
                   processNonCounterRow(row, whereClause)
                 }
               case "delete" =>
-                val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause"
+                val deleteWhereClause = if (jsonMapping4s.keyspaces.transformation.enabled && jsonMapping4s.keyspaces.transformation.transformExpressions.nonEmpty) {
+                  val whereConditions = scala.collection.mutable.ListBuffer[String]()
+
+                  columnsPos.foreach { el =>
+                    val originalColName = el._1
+                    if (pkFinalTarget.contains(originalColName)) {
+                      val position = row.fieldIndex(originalColName)
+                      val originalValue = row.get(position).toString
+                      val colType = columns.getOrElse(originalColName, "none")
+                      val formattedValue = colType match {
+                        case "string" | "text" | "inet" | "varchar" | "ascii" => s"'${originalValue.replace("'", "''")}'"
+                        case _ => originalValue
+                      }
+                      whereConditions += s"$originalColName=$formattedValue"
+                    }
+                  }
+
+                  jsonMapping4s.keyspaces.transformation.transformExpressions.foreach { rule =>
+                    val originalColName = rule.columnName
+                    val aliasColName = rule.alias
+
+                    if (columnsPos.exists(_._1 == originalColName) && pkFinalTarget.contains(aliasColName)) {
+                      val position = row.fieldIndex(originalColName)
+                      val originalValue = row.get(position).toString
+                      val hashedValue = hashValue(originalValue, rule.rule).toString
+
+                      val formattedValue = rule.rule.toLowerCase match {
+                        case "murmurhash3" => hashedValue // int - no quotes
+                        case "xxhash64" => hashedValue // bigint - no quotes
+                        case "md5" | "sha-1" | "sha1" | "sha-2" | "sha2" | "sha-256" | "sha256" => s"'${hashedValue.replace("'", "''")}'" // text - with quotes
+                        case _ => s"'${hashedValue.replace("'", "''")}'" // default to text
+                      }
+                      whereConditions += s"$aliasColName=$formattedValue"
+                    }
+                  }
+
+                  whereConditions.mkString(" and ")
+                } else {
+                  whereClause
+                }
+                val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $deleteWhereClause"
                 if (maxStatementsPerBatch > 1)
                   fl.add(cqlStatement)
                 else

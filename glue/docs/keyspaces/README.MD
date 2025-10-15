@@ -327,18 +327,6 @@ cqlreplicator --cmd stats --landing-zone s3://<PROVIDED_BUCKET_NAME> \
 [2024-02-02T16:50:39-05:00] Discovered rows in ks_test_cql_replicator.test_cql_replicator is 70,270
 [2024-02-02T16:50:39-05:00] Replicated rows in ks_test_cql_replicator.test_cql_replicator is 70,270
 ```
-## Monitor incoming traffic with Amazon CloudWatch
-You can monitor CQLReplicator incoming traffic from the source Cassandra cluster. It automatically creates a CloudWatch
-dashboard for each source table,for example,`CQLReplicator-ks_test_cql_replicator-test_cql_replicator`.
-
-To enable CQLReplicator telemetry in Amazon CloudWatch follow these steps:
-1. Add the IAM policy `CloudWatchFullAccessV2` to your Glue Role.
-2. Modify the `CassandraConnector.conf` file and upload it back to the artifacts folder in the landing S3 bucket with the
-   following settings:
-   `advanced.metrics.factory.class = MicrometerMetricsFactory`
-   `advanced.metrics.session.enabled = [cql-requests,cql-client-timeouts]`
-3. You might need to restart the CQLReplicator by running`request-stop`, then start it again.
-
 ## AWS Glue Monitoring
 You can profile and monitor CQLReplicator operations using AWS Glue job profiler. It collects and processes raw data
 from AWS Glue jobs into readable, near real-time metrics stored in Amazon CloudWatch.

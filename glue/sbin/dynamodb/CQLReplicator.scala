@@ -21,7 +21,7 @@
 // Run this command to start the replicator
   cqlreplicator --cmd run \
                 --target-type dynamodb \
-                --landing-zone s3://cql-replicator-1234567890-us-east-1-ddbdemo \
+                --landing-zone s3://<BUCKET_NAME> \
                 --region us-east-1 --max-wcu-traffic 30000 --src-keyspace ks \
                 --src-table tbl --trg-keyspace ks --trg-table tbl --env ddbdemo \
                 --writetime-column data

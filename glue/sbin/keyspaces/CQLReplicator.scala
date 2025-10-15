@@ -5,7 +5,6 @@
 // Target Amazon Keyspaces
 
 import com.amazonaws.retry.RetryPolicy
-import com.amazonaws.services.cloudwatch.AmazonCloudWatchAsyncClientBuilder
 import com.amazonaws.services.glue.GlueContext
 import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.{GlueArgParser, Job, JsonOptions}
@@ -20,8 +19,6 @@ import com.datastax.oss.driver.api.core.uuid.Uuids
 import com.datastax.oss.driver.api.core.{AllNodesFailedException, CqlSession, DriverException, NoNodeAvailableException}
 import io.github.resilience4j.core.IntervalFunction
 import io.github.resilience4j.retry.{Retry, RetryConfig}
-import io.micrometer.cloudwatch.{CloudWatchConfig, CloudWatchMeterRegistry}
-import io.micrometer.core.instrument.Clock
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.cassandra._
@@ -35,15 +32,17 @@ import org.json4s.jackson.Serialization
 import org.json4s.jackson.Serialization.write
 
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.time.format.DateTimeFormatter
 import java.time.{Duration, ZoneId, ZonedDateTime}
 import java.util.Base64
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.io.Source
+import scala.util.hashing.MurmurHash3
 import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try}
-import org.apache.spark.sql.types.StructType
+import net.jpountz.xxhash.{XXHashFactory, XXHash64}
 
 class LargeObjectException(s: String) extends RuntimeException {
   println(s)
@@ -106,7 +105,12 @@ case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns
 
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
 
-case class Transformation(enabled: Boolean = false, addNonPrimaryKeyColumns: List[String] = List(), filterExpression: String = "")
+case class TransformExpression(columnName: String, rule: String, alias: String = "", keepSource: Boolean = false)
+
+case class Transformation(enabled: Boolean = false, addNonPrimaryKeyColumns: List[String] = List(),
+                          filterExpression: String = "",
+                          transformExpressions: List[TransformExpression] = List()
+                         )
 
 case class UdtConversion(enabled: Boolean = false, columns: List[String] = List(""))
 
@@ -217,7 +221,6 @@ class SupportFunctions {
 
 case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfiguration, dlqConfig: DlqConfig, logger: GlueLogger) {
 
-  lazy val retry: Retry = Retry.of("keyspaces", retryConfig)
   private val batch: BatchStatementBuilder = BatchStatement.builder(DefaultBatchType.UNLOGGED)
   private val retryConfig = RetryConfig.custom
     .maxAttempts(internalConfig.maxRetryAttempts)
@@ -232,6 +235,17 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
       classOf[DriverException]
     )
     .build()
+
+  lazy val retry: Retry = {
+    val r = Retry.of("keyspaces", retryConfig)
+    r.getEventPublisher.onError(event => {
+      // The result should be in the output logs
+      println(s"FINAL FAILURE after ${event.getNumberOfRetryAttempts} attempts. " +
+        s"Exception: ${event.getLastThrowable.getMessage}")
+    })
+    r
+  }
+
   private var size: Int = 0
 
   def executeCQLStatement(statement: String): Unit = {
@@ -369,16 +383,10 @@ object GlueApp {
       }
     }
 
-    def getDBConnection(connectionConfName: String, bucketName: String, s3client: AmazonS3, cwRegistry: CloudWatchMeterRegistry = null): CqlSession = {
+    def getDBConnection(connectionConfName: String, bucketName: String, s3client: AmazonS3): CqlSession = {
       val connectorConf = s3client.getObjectAsString(bucketName, s"artifacts/$connectionConfName")
-      val metricsEnabled: Boolean = connectorConf.contains("MicrometerMetricsFactory")
-      val connection = if (cwRegistry != null && metricsEnabled)
-        CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
-          .withMetricRegistry(cwRegistry)
-          .build()
-      else
-        CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
-          .build()
+      val connection = CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
+        .build()
       connection
     }
 
@@ -532,6 +540,8 @@ object GlueApp {
       case "None" => inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
       case _ => inferKeys(internalConnectionToSource, "primaryKeysWithTS", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
     }
+
+    val pkFinalTarget = inferKeys(internalConnectionToTarget, "primaryKeys", trgKeyspaceName, trgTableName, columnTs).flatten.toMap.keys.toSeq
 
     val partitionKeys = inferKeys(internalConnectionToSource, "partitionKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
     val allColumnsFromSource = getAllColumns(internalConnectionToSource, srcKeyspaceName, srcTableName)
@@ -842,11 +852,6 @@ object GlueApp {
 
     def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
       df.rdd.foreachPartition(partition => {
-        lazy val cloudWatchSourceConfig = new CloudWatchConfig() {
-          override def get(s: String): String = null
-
-          override def namespace = s"CQLReplicator-$srcKeyspaceName-$srcTableName"
-        }
         lazy val customFormat = if (jsonMapping4s.replication.useCustomSerializer) {
           DefaultFormats + new CustomResultSetSerializer
         } else {
@@ -854,13 +859,61 @@ object GlueApp {
         }
         lazy val supportFunctions = new SupportFunctions()
         lazy val s3ClientOnPartition = AmazonS3ClientBuilder.defaultClient()
-        lazy val cw = AmazonCloudWatchAsyncClientBuilder.defaultClient()
-        lazy val meterSourceRegistry = new CloudWatchMeterRegistry(cloudWatchSourceConfig, Clock.SYSTEM, cw)
-        lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition, meterSourceRegistry)
+        lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition)
         lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
         lazy val dlqConfig = DlqConfig(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op")
         lazy val fl = FlushingSet(keyspacesConnPerPar, jsonMapping4s.keyspaces.writeConfiguration, dlqConfig, logger)
         lazy val maxStatementsPerBatch = jsonMapping4s.keyspaces.writeConfiguration.maxStatementsPerBatch
+        lazy val xxHashFactory = XXHashFactory.fastestInstance()
+        lazy val xxHash64: XXHash64 = xxHashFactory.hash64()
+        lazy val seedXxHash64 = 42L
+
+        def hashValue(value: String, rule: String): Any = {
+          rule.toLowerCase match {
+            case "murmurhash3" => MurmurHash3.stringHash(value)
+            case "md5" =>
+              val md = MessageDigest.getInstance("MD5")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "sha-1" | "sha1" =>
+              val md = MessageDigest.getInstance("SHA-1")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "sha-2" | "sha2" | "sha-256" | "sha256" =>
+              val md = MessageDigest.getInstance("SHA-256")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "xxhash64" =>
+              val bytes = value.getBytes("UTF-8")
+              xxHash64.hash(bytes, 0, bytes.length, seedXxHash64)
+            case _ => value
+          }
+        }
+
+        def valueTransformer(inputJson: JValue, rules: List[TransformExpression]): JValue = {
+          if (rules.isEmpty) return inputJson
+
+          rules.foldLeft(inputJson) { (currentJson, rule) =>
+            (currentJson \ rule.columnName) match {
+              case JNothing => currentJson
+              case value =>
+                val stringValue = value.values.toString
+                val hashedValue = hashValue(stringValue, rule.rule)
+                val newValue = hashedValue match {
+                  case s: String => JString(s)
+                  case i: Int => JInt(i)
+                  case l: Long => JLong(l)
+                  case other => JString(other.toString)
+                }
+                if (rule.alias.nonEmpty) {
+                  if (rule.keepSource) {
+                    currentJson merge JObject(rule.alias -> newValue)
+                  } else {
+                    currentJson.removeField { case (k, _) => k == rule.columnName } merge JObject(rule.alias -> newValue)
+                  }
+                } else {
+                  currentJson.transformField { case (k, _) if k == rule.columnName => (k, newValue) }
+                }
+            }
+          }
+        }
 
         def processRow(row: Row): Unit = {
           val whereClause = rowToStatement(row, columns, columnsPos)
@@ -876,7 +929,47 @@ object GlueApp {
                   processNonCounterRow(row, whereClause)
                 }
               case "delete" =>
-                val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $whereClause"
+                val deleteWhereClause = if (jsonMapping4s.keyspaces.transformation.enabled && jsonMapping4s.keyspaces.transformation.transformExpressions.nonEmpty) {
+                  val whereConditions = scala.collection.mutable.ListBuffer[String]()
+
+                  columnsPos.foreach { el =>
+                    val originalColName = el._1
+                    if (pkFinalTarget.contains(originalColName)) {
+                      val position = row.fieldIndex(originalColName)
+                      val originalValue = row.get(position).toString
+                      val colType = columns.getOrElse(originalColName, "none")
+                      val formattedValue = colType match {
+                        case "string" | "text" | "inet" | "varchar" | "ascii" => s"'${originalValue.replace("'", "''")}'"
+                        case _ => originalValue
+                      }
+                      whereConditions += s"$originalColName=$formattedValue"
+                    }
+                  }
+
+                  jsonMapping4s.keyspaces.transformation.transformExpressions.foreach { rule =>
+                    val originalColName = rule.columnName
+                    val aliasColName = rule.alias
+
+                    if (columnsPos.exists(_._1 == originalColName) && pkFinalTarget.contains(aliasColName)) {
+                      val position = row.fieldIndex(originalColName)
+                      val originalValue = row.get(position).toString
+                      val hashedValue = hashValue(originalValue, rule.rule).toString
+
+                      val formattedValue = rule.rule.toLowerCase match {
+                        case "murmurhash3" => hashedValue // int - no quotes
+                        case "xxhash64" => hashedValue // bigint - no quotes
+                        case "md5" | "sha-1" | "sha1" | "sha-2" | "sha2" | "sha-256" | "sha256" => s"'${hashedValue.replace("'", "''")}'" // text - with quotes
+                        case _ => s"'${hashedValue.replace("'", "''")}'" // default to text
+                      }
+                      whereConditions += s"$aliasColName=$formattedValue"
+                    }
+                  }
+
+                  whereConditions.mkString(" and ")
+                } else {
+                  whereClause
+                }
+                val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $deleteWhereClause"
                 if (maxStatementsPerBatch > 1)
                   fl.add(cqlStatement)
                 else
@@ -903,7 +996,7 @@ object GlueApp {
         def processRowWithTimestamp(row: Row, whereClause: String, rs: String): Unit = {
           val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
           val jsonRow = compressValues(jsonRowEscaped)
-          val json4sRow = jsonRow
+          val json4sRow = if (jsonMapping4s.keyspaces.transformation.enabled) valueTransformer(jsonRow, jsonMapping4s.keyspaces.transformation.transformExpressions) else jsonRow
           val tsValue = getTsValue(json4sRow)
           val tsSuffix = if (tsValue > 0) s"USING TIMESTAMP $tsValue" else ""
           val backToJsonRow = backToCQLStatementWithoutTs(json4sRow)
@@ -927,7 +1020,10 @@ object GlueApp {
         def processRowWithTTL(row: Row, whereClause: String, rs: String): Unit = {
           val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
           val jsonRow = compressValues(jsonRowEscaped)
-          val json4sRow = jsonRow
+          val json4sRow = if (jsonMapping4s.keyspaces.transformation.enabled)
+            valueTransformer(jsonRow, jsonMapping4s.keyspaces.transformation.transformExpressions)
+          else
+            jsonRow
           jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
             case false =>
               val backToJsonRow = backToCQLStatementWithoutTTL(json4sRow)
@@ -1338,7 +1434,9 @@ object GlueApp {
         .repartition(defaultPartitions, col("group"))
         .transform(df =>
           if (!jsonMapping4s.keyspaces.transformation.enabled) df
-          else df.filter(jsonMapping4s.keyspaces.transformation.filterExpression)
+          else if (jsonMapping4s.keyspaces.transformation.enabled && !jsonMapping4s.keyspaces.transformation.filterExpression.isEmpty)
+            df.filter(jsonMapping4s.keyspaces.transformation.filterExpression)
+          else df
         )
       finalDf
     }

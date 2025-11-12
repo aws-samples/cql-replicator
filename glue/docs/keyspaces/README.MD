@@ -327,18 +327,6 @@ cqlreplicator --cmd stats --landing-zone s3://<PROVIDED_BUCKET_NAME> \
 [2024-02-02T16:50:39-05:00] Discovered rows in ks_test_cql_replicator.test_cql_replicator is 70,270
 [2024-02-02T16:50:39-05:00] Replicated rows in ks_test_cql_replicator.test_cql_replicator is 70,270
 ```
-## Monitor incoming traffic with Amazon CloudWatch
-You can monitor CQLReplicator incoming traffic from the source Cassandra cluster. It automatically creates a CloudWatch
-dashboard for each source table,for example,`CQLReplicator-ks_test_cql_replicator-test_cql_replicator`.
-
-To enable CQLReplicator telemetry in Amazon CloudWatch follow these steps:
-1. Add the IAM policy `CloudWatchFullAccessV2` to your Glue Role.
-2. Modify the `CassandraConnector.conf` file and upload it back to the artifacts folder in the landing S3 bucket with the
-   following settings:
-   `advanced.metrics.factory.class = MicrometerMetricsFactory`
-   `advanced.metrics.session.enabled = [cql-requests,cql-client-timeouts]`
-3. You might need to restart the CQLReplicator by running`request-stop`, then start it again.
-
 ## AWS Glue Monitoring
 You can profile and monitor CQLReplicator operations using AWS Glue job profiler. It collects and processes raw data
 from AWS Glue jobs into readable, near real-time metrics stored in Amazon CloudWatch.
@@ -477,7 +465,67 @@ There are use-cases when you need to filter out some certain keys during the mig
                                           }
                                         }'
 ```
-Note: You can use only primary key columns in the `filterExpression` and it should be defined as [the Spark SQL Expression](https://spark.apache.org/docs/3.3.0/api/sql/index.html).
+Note: You can use only primary key columns in the `filterExpression` and it should be defined as [the Spark SQL Expression](https://archive.apache.org/dist/spark/docs/3.3.0/sql-ref-functions-builtin.html).
+
+## Data Transformation
+
+CQLReplicator supports data transformation during migration using various hash functions. This feature is useful for:
+- **Data anonymization**: Hash sensitive data like emails, phone numbers, or personal identifiers
+- **Data obfuscation**: Transform data while maintaining referential integrity
+- **Compliance requirements**: Meet data privacy regulations by hashing PII data
+
+### Supported Hash Functions
+
+- **MurmurHash3**: Fast, non-cryptographic hash function (returns integer)
+- **MD5**: 128-bit cryptographic hash (returns hex string)
+- **SHA-1**: 160-bit cryptographic hash (returns hex string)
+- **SHA-256**: 256-bit cryptographic hash (returns hex string)
+- **XXHASH64**: Fast, 64-bit non-cryptographic hash (returns long integer)
+
+### Transform Expression Parameters
+
+- `columnName`: The source column to transform to hash value 
+- `rule`: Hash function to apply (murmurhash3, md5, sha-1, sha-256, xxhash64)
+- `alias`: Optional new column name (if not provided, replaces original column)
+- `keepSource`: Boolean to keep original column when using alias (default: false)
+
+### Example Usage
+
+```shell
+cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<BUCKET_NAME> \
+              --region us-east-1 --src-keyspace source_ks --src-table users \
+              --trg-keyspace target_ks --trg-table users_transformed --env prod \
+              --target-type keyspaces --json-mapping '{
+                  "keyspaces": {
+                    "transformation": {
+                      "enabled": true,
+                      "transformExpressions": [
+                        {
+                          "columnName": "email",
+                          "rule": "md5",
+                          "alias": "email_hash",
+                          "keepSource": false
+                        },
+                        {
+                          "columnName": "phone",
+                          "rule": "sha-256",
+                          "alias": "phone_hash",
+                          "keepSource": true
+                        },
+                        {
+                          "columnName": "user_id",
+                          "rule": "murmurhash3"
+                        }
+                      ]
+                    }
+                  }
+                }'
+```
+
+This example:
+- Hashes `email` to MD5 and replaces it with `email_hash`
+- Hashes `phone` to SHA-256 as `phone_hash` while keeping original `phone` column
+- Hashes `user_id` in place using MurmurHash3
 
 ## Not overwriting existing records in Amazon Keyspaces
 In order to preserve existing records during the bulk migration phase set `readBeforeWrite` to `true` in the `json-mapping`, for example:
@@ -603,11 +651,11 @@ Before restarting, verify that all system components are in a stable state.
 | 1. No space left on device                                                                                                    | Yes               | No                  | Scale out the replication process by increasing the number of DPUs per discovery Glue job, for example, add `--odw 15`                                                                                          |
 | 2. No space left on device                                                                                                    | Yes               | No                  | Increase the `--max-wcu-traffic`                                                                                                                                                                                |
 | 3. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Create a new Glue connection with the new subnet and attach the CQLReplicator Glue Job                                                                                                                          |
-| 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    |
-| 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> |
-| 7. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       |
-| 8. java.lang.OutOfMemoryError: GC overhead limit exceeded                                                                     | Yes               | No                  | Increase the number of DPUs for the discovery job by using the parameter, e.g. `--override-discovery-workers 12`                                                                                                |
-| 9. Improve update/insert latency after the historical phase                                                                   | No                | No                  | Open the Glue job -> Job Details -> Advanced properties -> Job parameters, and in the Value of the key `--conf` reduce parameters for spark.shuffle.partitions=100 and spark.default.parallelism=100 or less    |
+| 4. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    |
+| 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> |
+| 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       |
+| 7. java.lang.OutOfMemoryError: GC overhead limit exceeded                                                                     | Yes               | No                  | Increase the number of DPUs for the discovery job by using the parameter, e.g. `--override-discovery-workers 12`                                                                                                |
+| 8. Improve update/insert latency after the historical phase                                                                   | No                | No                  | Open the Glue job -> Job Details -> Advanced properties -> Job parameters, and in the Value of the key `--conf` reduce parameters for spark.shuffle.partitions=100 and spark.default.parallelism=100 or less    |
 
 ### Work around for `Cassandra timeout during read query at consistency ONE` with Cassandra materialized view
 1. Create the materialized view `ks_test_cql_replicator_mv` based on the `ks_test_cql_replicator` in the Cassandra

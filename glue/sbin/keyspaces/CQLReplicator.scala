@@ -86,7 +86,7 @@ sealed trait Stats
 case class WriteConfiguration(batchSize: Int = 1024 * 1024, maxRetryAttempts: Int = 64, expBackoff: Int = 25, maxStatementsPerBatch: Int = 29, preShuffleBeforeWrite: Boolean = true)
 
 case class ReadConfiguration(splitSizeInMB: Int = 64, concurrentReads: Int = 32, consistencyLevel: String = "LOCAL_ONE", fetchSizeInRows: Int = 500, queryRetryCount: Int = 180,
-                             readTimeoutMS: Int = 120000)
+                             readTimeoutMS: Int = 120000, useCustomVarintReader: Boolean = false)
 
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
 
@@ -1099,7 +1099,17 @@ object GlueApp {
           }
           case "time" => row.getLong(position)
           case "int" => row.getInt(position)
-          case "varint" => row.getAs[java.math.BigDecimal](position)
+          case "varint" => {
+            // Handle varint - could be BigDecimal or String depending on reader used
+            row.get(position) match {
+              case bd: java.math.BigDecimal => BigInt(bd.toBigInteger)
+              case s: String => s // Already a string representation
+              case bi: java.math.BigInteger => bi.toString
+              case other =>
+                logger.warn(s"Unexpected varint type: ${other.getClass.getName}, value: $other")
+                other.toString
+            }
+          }
           case "smallint" => row.getShort(position)
           case "long" | "bigint" => row.getLong(position)
           case "float" => row.getFloat(position)
@@ -1358,6 +1368,20 @@ object GlueApp {
 
     def sourceScan(): DataFrame = {
       logger.info("Reading the source")
+
+      // Check if we need to use custom varint reader
+      val useCustomVarintReader = jsonMapping4s.replication.readConfiguration.useCustomVarintReader
+
+      if (useCustomVarintReader) {
+        logger.info("Using custom varint reader to handle potential overflow")
+        sourceScanWithCustomVarintReader()
+      } else {
+        sourceScanStandard()
+      }
+    }
+
+    def sourceScanStandard(): DataFrame = {
+      logger.info("Using standard DataFrame reader")
       val cassandraReadConfig = Map(
         "inferSchema" -> "true",
         "spark.cassandra.input.split.sizeInMB" -> jsonMapping4s.replication.readConfiguration.splitSizeInMB.toString,
@@ -1430,6 +1454,194 @@ object GlueApp {
       ))) % totalTiles
 
       val finalDf = primaryKeysDf
+        .withColumn("group", groupingExpr)
+        .repartition(defaultPartitions, col("group"))
+        .transform(df =>
+          if (!jsonMapping4s.keyspaces.transformation.enabled) df
+          else if (jsonMapping4s.keyspaces.transformation.enabled && !jsonMapping4s.keyspaces.transformation.filterExpression.isEmpty)
+            df.filter(jsonMapping4s.keyspaces.transformation.filterExpression)
+          else df
+        )
+      finalDf
+    }
+
+    def sourceScanWithCustomVarintReader(): DataFrame = {
+      import com.datastax.spark.connector._
+      import com.datastax.spark.connector.cql.CassandraConnector
+      import com.datastax.spark.connector.rdd.ReadConf
+      import org.apache.spark.sql.Row
+      import sparkSession.implicits._
+
+      logger.info("Using custom varint reader for primary keys")
+
+      val srcTableForDiscovery = jsonMapping4s.replication.useMaterializedView match {
+        case mv if mv.enabled => mv.mvName
+        case _ => srcTableName
+      }
+
+      val pointInTimePredicate = {
+        val op = jsonMapping4s.replication.pointInTimeReplicationConfig.predicateOp
+        (c: org.apache.spark.sql.ColumnName) =>
+          op match {
+            case "greaterThan" => c > replicationPointInTime
+            case "lessThanOrEqual" => c <= replicationPointInTime
+            case _ => true
+          }
+      }
+
+      val filterColumns = jsonMapping4s.keyspaces.transformation.addNonPrimaryKeyColumns match {
+        case cols if cols.isEmpty => pkFinal
+        case cols => pkFinal ++ cols
+      }
+
+      // Get column metadata from Cassandra
+      val columnMeta = getAllColumns(internalConnectionToSource, srcKeyspaceName, srcTableForDiscovery)
+        .map(colMap => colMap.head) // Extract (columnName, columnType) pairs
+        .filter(col => filterColumns.contains(col._1))
+        .toMap
+
+      logger.info(s"Column metadata: $columnMeta")
+      logger.info(s"Filter columns: $filterColumns")
+
+      // Create schema with varint columns as StringType and writetime as LongType
+      val schema = StructType(filterColumns.map { colName =>
+        // Extract alias for writetime columns
+        val fieldName = if (colName.contains("writetime(") && colName.contains(") as ")) {
+          val writetimePattern = """writetime\(([^)]+)\)\s+as\s+(.+)""".r
+          colName match {
+            case writetimePattern(_, alias) => alias.trim
+            case _ => colName
+          }
+        } else {
+          colName
+        }
+        
+        val colType = columnMeta.getOrElse(colName, "text").toLowerCase
+        val dataType = if (colType == "varint") {
+          StringType // Store varint as string to handle overflow
+        } else if (colName.contains("writetime(") || colName.contains("as ts")) {
+          LongType // Writetime columns return Long values
+        } else {
+          colType match {
+            case "text" | "varchar" | "ascii" => StringType
+            case "int" => IntegerType
+            case "bigint" => LongType
+            case "boolean" => BooleanType
+            case "double" => DoubleType
+            case "float" => FloatType
+            case "timestamp" => TimestampType
+            case "date" => DateType
+            case "uuid" | "timeuuid" => StringType
+            case "blob" => BinaryType
+            case "decimal" => DecimalType(38, 0)
+            case "smallint" => ShortType
+            case "tinyint" => ByteType
+            case _ => LongType // Default to LongType for special columns like writetime
+          }
+        }
+        StructField(fieldName, dataType, nullable = true)
+      }.toArray)
+
+      logger.info(s"Created schema: ${schema.fields.map(f => s"${f.name}:${f.dataType}").mkString(", ")}")
+
+      // Convert filterColumns to use RDD API syntax for writetime
+      val rddSelectColumns = filterColumns.map { colName =>
+        if (colName.contains("writetime(") && colName.contains(") as ")) {
+          // Extract column name from writetime(column) as alias
+          val writetimePattern = """writetime\(([^)]+)\)\s+as\s+(.+)""".r
+          colName match {
+            case writetimePattern(sourceCol, alias) =>
+              logger.info(s"Converting writetime syntax: $colName -> WriteTime($sourceCol) as $alias")
+              // For RDD API, we need to use WriteTime function
+              com.datastax.spark.connector.WriteTime(sourceCol) as alias
+            case _ =>
+              com.datastax.spark.connector.ColumnName(colName)
+          }
+        } else {
+          com.datastax.spark.connector.ColumnName(colName)
+        }
+      }
+
+      logger.info(s"RDD select columns: ${rddSelectColumns.mkString(", ")}")
+
+      // Configure Cassandra connector for RDD API
+      val cassandraConnector = CassandraConnector(
+        sparkContext.getConf
+          .set("spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
+          .set("spark.cassandra.input.consistency.level", jsonMapping4s.replication.readConfiguration.consistencyLevel)
+      )
+      
+      val cassandraRDD = sparkContext.cassandraTable(srcKeyspaceName, srcTableForDiscovery)
+        .withConnector(cassandraConnector)
+        .withReadConf(ReadConf(
+          splitSizeInMB = jsonMapping4s.replication.readConfiguration.splitSizeInMB,
+          fetchSizeInRows = jsonMapping4s.replication.readConfiguration.fetchSizeInRows,
+          taskMetricsEnabled = true
+        ))
+        .select(rddSelectColumns: _*)
+
+      logger.info(s"Created Cassandra RDD for table $srcKeyspaceName.$srcTableForDiscovery with custom connector")
+
+      // Convert CassandraRow to Spark Row, handling varint columns specially
+      val rowRDD = cassandraRDD.map { cassandraRow =>
+        val values = filterColumns.map { colName =>
+          val colType = columnMeta.getOrElse(colName, "text").toLowerCase
+          if (colType == "varint") {
+            // Handle varint as string to avoid overflow using the proper getVarInt method
+            try {
+              cassandraRow.getVarIntOption(colName) match {
+                case Some(varInt) => varInt.toString // Convert to string to avoid overflow and schema mismatch
+                case None => null
+              }
+            } catch {
+              case e: Exception =>
+                logger.warn(s"Error reading varint column $colName: ${e.getMessage}")
+                null
+            }
+          } else {
+            // Handle other column types
+            try {
+              colType match {
+                case "text" | "varchar" | "ascii" => cassandraRow.getStringOption(colName).orNull
+                case "int" => cassandraRow.getIntOption(colName).map(Integer.valueOf).orNull
+                case "bigint" => cassandraRow.getLongOption(colName).map(java.lang.Long.valueOf).orNull
+                case "boolean" => cassandraRow.getBooleanOption(colName).map(java.lang.Boolean.valueOf).orNull
+                case "double" => cassandraRow.getDoubleOption(colName).map(java.lang.Double.valueOf).orNull
+                case "float" => cassandraRow.getFloatOption(colName).map(java.lang.Float.valueOf).orNull
+                case "timestamp" => cassandraRow.getDateOption(colName).orNull
+                case "date" => cassandraRow.getDateOption(colName).orNull
+                case "uuid" | "timeuuid" => cassandraRow.getUUIDOption(colName).map(_.toString).orNull
+                case "blob" => cassandraRow.getBytesOption(colName).map(_.array()).orNull
+                case "decimal" => cassandraRow.getDecimalOption(colName).orNull
+                case "smallint" => cassandraRow.getIntOption(colName).map(Integer.valueOf).orNull
+                case "tinyint" => cassandraRow.getIntOption(colName).map(Integer.valueOf).orNull
+                case _ =>
+                  // Handle special cases like writetime columns that might return BigInteger
+                  val rawValue = cassandraRow.getVarInt(colName)
+                  rawValue match {
+                    case bi: BigInt => bi.longValue() // Convert BigInteger to Long for writetime
+                    case other => other
+                  }
+              }
+            } catch {
+              case e: Exception =>
+                logger.warn(s"Error reading column $colName of type $colType: ${e.getMessage}")
+                null
+            }
+          }
+        }.toSeq
+        Row.fromSeq(values)
+      }
+
+      val df = sparkSession.createDataFrame(rowRDD, schema)
+
+      val groupingExpr = abs(xxhash64(concat(
+        pkFinalWithoutTs.map { colName =>
+          col(colName).cast("string")
+        }: _*
+      ))) % totalTiles
+
+      val finalDf = df
         .withColumn("group", groupingExpr)
         .repartition(defaultPartitions, col("group"))
         .transform(df =>

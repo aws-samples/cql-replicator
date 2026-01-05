@@ -327,6 +327,14 @@ cqlreplicator --cmd stats --landing-zone s3://<PROVIDED_BUCKET_NAME> \
 [2024-02-02T16:50:39-05:00] Discovered rows in ks_test_cql_replicator.test_cql_replicator is 70,270
 [2024-02-02T16:50:39-05:00] Replicated rows in ks_test_cql_replicator.test_cql_replicator is 70,270
 ```
+## Retrieve logs from failed Glue jobs
+To retrieve errors from Glue jobs, you can execute the following command:
+```shell
+cqlreplicator --cmd get-failed-jobs --landing-zone s3://<PROVIDED_BUCKET_NAME> \
+              --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+              --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
+```
+
 ## AWS Glue Monitoring
 You can profile and monitor CQLReplicator operations using AWS Glue job profiler. It collects and processes raw data
 from AWS Glue jobs into readable, near real-time metrics stored in Amazon CloudWatch.

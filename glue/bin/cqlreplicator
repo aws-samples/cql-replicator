@@ -267,6 +267,49 @@ function check_num_tiles() {
   return 0
 }
 
+function analyze_logs() {
+    local job_name="${params[JOB_NAME]}${params[DEFAULT_ENV]}"
+    local region="${params[AWS_REGION]}"
+
+    log_info "Analyzing logs for job: $job_name"
+
+    # Get only FAILED job runs
+    local failed_runs=$(aws glue get-job-runs --job-name "$job_name" --region "$region" --max-items 5 --query 'JobRuns[?JobRunState==`FAILED`] | [0].Id' --output text)
+
+    for run_id in $failed_runs; do
+        log_info "=== FAILED Job: $run_id ==="
+        if [ "$run_id" != "None" ]; then
+          # Check both log groups
+          local log_groups=("/aws-glue/jobs/error" "/aws-glue/jobs/output")
+
+          for log_group in "${log_groups[@]}"; do
+              log_info "Checking log group $log_group:"
+              local streams=$(aws logs describe-log-streams --log-group-name "$log_group" --region "$region" --query "logStreams[?contains(logStreamName, \`$run_id\`)].logStreamName" --output text 2>/dev/null)
+
+              for stream in $streams; do
+                  log_info "$log_group  $stream:"
+
+                  # Try ERROR first
+                  result=$(aws logs get-log-events --log-group-name "$log_group" --log-stream-name "$stream" --region "$region" --no-start-from-head --limit 1000 --output json | jq -r '.events[] | select(.message | test("ERROR|Caused by")) | .message')
+
+                  if [ -n "$result" ]; then
+                      echo "$result"
+                      continue
+                  fi
+
+                  # Try WARN Exception Error if no "Caused by" or "ERROR"
+                  result=$(aws logs get-log-events --log-group-name "$log_group" --log-stream-name "$stream" --region "$region" --no-start-from-head --limit 1000 --output json | jq -r '.events[] | select(.message | test("Exception|Error|WARN|FAILED|Failed")) | .message')
+
+                  if [ -n "$result" ]; then
+                      echo "$result"
+                      continue
+                  fi
+              done
+          done
+        fi
+    done
+}
+
 function progress {
   local current="$1"
   local total="$2"
@@ -419,6 +462,7 @@ function Usage_Exit {
   echo "  kill        Stop migration process forcefully"
   echo "  resize      Resize the number of tiles"
   echo "  scheduled-run  Schedule CQLReplicator with as a cron job on EC2 instance"
+  echo "  get-failed-jobs        Analyze CloudWatch logs for failed Glue jobs"
   exit 1
 }
 
@@ -1530,4 +1574,11 @@ if [[ ${params[STATE]} == stats ]]; then
       ((t++))
     done
   fi
+fi
+
+if [[ ${params[STATE]} == get-failed-jobs ]]; then
+  check_input "${params[AWS_REGION]}" "Error: aws region must be provided"
+  check_input "${params[SOURCE_KS]}" "Error: source keyspace name is empty, must be provided"
+  check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
+  analyze_logs
 fi

@@ -554,6 +554,51 @@ facilitating easier integration with other NoSQL databases.
                                             }}'
 ```
 
+## Handling Large VARINT Values (Over 38 Digits)
+
+### Why Use This Feature
+By default, AWS Glue converts VARINT columns to `decimal(38,0)` during the read operation. 
+This causes values exceeding 38 digits to be implicitly converted to `null`, resulting in data loss during migration. 
+This is a known limitation of Spark's DataFrame API when reading from Cassandra.
+
+### When to Use This Feature
+Enable the custom VARINT reader when:
+- Your source table contains VARINT columns with values exceeding 38 digits
+- You notice VARINT values being converted to `null` in the target table
+- You need to preserve the full precision of arbitrary-precision integers
+- You're migrating financial data, cryptographic keys, or other data requiring exact large integer values
+
+### How It Works
+The custom VARINT reader uses Cassandra's low-level RDD API instead of Spark's DataFrame API. This bypasses Spark's automatic type conversion and reads VARINT values directly as strings, preserving their full precision regardless of size.
+
+### Usage Example
+Enable the custom VARINT reader by setting `useCustomVarintReader` to `true` in the `readConfiguration`:
+
+```shell
+./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<PROVIDED_BUCKET_NAME> \
+                --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator --env ver5 \
+                --writetime-column col2 --target-type keyspaces --json-mapping '{
+                  "replication": {
+                    "readConfiguration": {
+                      "useCustomVarintReader": true,
+                      "concurrentReads": 32,
+                      "consistencyLevel": "LOCAL_ONE",
+                      "fetchSizeInRows": 500
+                    }
+                  }
+                }'
+``
+
+### Configuration Options
+The `readConfiguration` section supports the following parameters:
+- `useCustomVarintReader` (boolean, default: `false`) - Enable custom VARINT handling for values over 38 digits
+
+### Performance Considerations
+- The custom VARINT reader uses the RDD API which may have slightly different performance characteristics than the standard DataFrame reader
+- For tables without large VARINT values, the standard reader (default) is recommended
+- The custom reader is only necessary when VARINT values exceed 38 digits
+
 ## Enable the custom JSON Serializer
 The CQLReplicator relies on Cassandra JSON encoding/decoding that has been introduced in Cassandra 2.2, but if you use
 older Cassandra version you must enable the custom JSON Serialization on the client side:
@@ -646,16 +691,17 @@ After confirming the resizing job has successfully completed, restart CQLReplica
 Before restarting, verify that all system components are in a stable state.
 
 ## Know issues
-| Error Message/Issue                                                                                                           | CW Discovery logs | CW Replication logs | Work around                                                                                                                                                                                                     |
-|-------------------------------------------------------------------------------------------------------------------------------|-------------------|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1. No space left on device                                                                                                    | Yes               | No                  | Scale out the replication process by increasing the number of DPUs per discovery Glue job, for example, add `--odw 15`                                                                                          |
-| 2. No space left on device                                                                                                    | Yes               | No                  | Increase the `--max-wcu-traffic`                                                                                                                                                                                |
-| 3. You have limited IPs in the subnet                                                                                         | Yes               | Yes                 | Create a new Glue connection with the new subnet and attach the CQLReplicator Glue Job                                                                                                                          |
-| 4. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    |
-| 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> |
-| 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       |
-| 7. java.lang.OutOfMemoryError: GC overhead limit exceeded                                                                     | Yes               | No                  | Increase the number of DPUs for the discovery job by using the parameter, e.g. `--override-discovery-workers 12`                                                                                                |
-| 8. Improve update/insert latency after the historical phase                                                                   | No                | No                  | Open the Glue job -> Job Details -> Advanced properties -> Job parameters, and in the Value of the key `--conf` reduce parameters for spark.shuffle.partitions=100 and spark.default.parallelism=100 or less    |
+| Error Message/Issue                                                                                                           |   |   | CW Discovery logs | CW Replication logs | Work around                                                                                                                                                                                                     |
+|-------------------------------------------------------------------------------------------------------------------------------|---|---|-------------------|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1. No space left on device                                                                                                    |   |   | Yes               | No                  | Scale out the replication process by increasing the number of DPUs per discovery Glue job, for example, add `--odw 15`                                                                                          |
+| 2. No space left on device                                                                                                    |   |   | Yes               | No                  | Increase the `--max-wcu-traffic`                                                                                                                                                                                |
+| 3. You have limited IPs in the subnet                                                                                         |   |   | Yes               | Yes                 | Create a new Glue connection with the new subnet and attach the CQLReplicator Glue Job                                                                                                                          |
+| 4. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> |   |   | Yes               | No                  | Reduce page size and increase the request timeout in CassandraConnector.conf                                                                                                                                    |
+| 5. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> |   |   | Yes               | No                  | Create a materialized view in the Cassandra cluster with the same primary keys and one regular column.<br/> Configure the CQLReplicator to use this materialized view as the source for the primary keys. <br/> |
+| 6. Cassandra timeout during read query at consistency ONE <br/>(1 responses were required but only 0 replica responded) <br/> |   |   | Yes               | No                  | Increase `read_request_timeout_in_ms`, `range_request_timeout_in_ms`, and `request_timeout_in_ms` in the cassandra.yaml and run rolling restart of the Cassandra cluster.                                       |
+| 7. java.lang.OutOfMemoryError: GC overhead limit exceeded                                                                     |   |   | Yes               | No                  | Increase the number of DPUs for the discovery job by using the parameter, e.g. `--override-discovery-workers 12`                                                                                                |
+| 8. Improve update/insert latency after the historical phase                                                                   |   |   | No                | No                  | Open the Glue job -> Job Details -> Advanced properties -> Job parameters, and in the Value of the key `--conf` reduce parameters for spark.shuffle.partitions=100 and spark.default.parallelism=100 or less    |
+| 9. The requested number value being inserted exceeds the maximum allowed precision of 38 decimal digits                       |   |   | No                | Yes                 | Add the following `--json-mapping '{"replication": {"readConfiguration": {"useCustomVarintReader": true}}` to enable custom VARINT handling for values over 38 digits                                           |
 
 ### Work around for `Cassandra timeout during read query at consistency ONE` with Cassandra materialized view
 1. Create the materialized view `ks_test_cql_replicator_mv` based on the `ks_test_cql_replicator` in the Cassandra

@@ -36,6 +36,7 @@ By implementing these configurations, you ensure that AWS Glue components can co
 ## Primary Migration Path
 Direct migration to Amazon Keyspaces, offering a fully managed, serverless Cassandra-compatible experience: 
 - [Apache Cassandra to Amazon Keyspaces](docs/keyspaces/README.MD)
+- [AstraDB to Amazon Keyspaces](docs/astra/README.MD)
 
 ## Complementary Solutions 
 Additional connectors for specific use cases including data lakes (S3), search capabilities (OpenSearch), and in-memory performance (MemoryDB):

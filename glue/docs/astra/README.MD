@@ -56,7 +56,7 @@ a S3 bucket, a Glue job, migration keyspace, and ledger table.
                   --glue-iam-role glue-cassandra-migration \
                   --landing-zone s3://<PROVIDED_BUCKET_NAME> \
                   --token AstraCS:<TOKEN> \
-                  --scb your-secure-connect-bundel.zip
+                  --scb your-secure-connect-bundle.zip
 ```
 
 Other functionalities remain unchanged when migrating from Cassandra to Amazon Keyspaces. Please refer to this [guide](../keyspaces/README.MD) for further details.

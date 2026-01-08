@@ -42,6 +42,9 @@ declare -A params=(
     [DEFAULT_ROWS_PER_SECOND]=2000
     [PROCESS_RUNNING]=false
     [TIME_SCHEDULE]=""
+    [DEFAULT_SOURCE]=cassandra
+    [SCB]="None"
+    [TOKEN]="None"
 )
 
 # Dynamic variables
@@ -331,7 +334,7 @@ function progress {
 function check_file_exists() {
   file=$1
   if [ ! -f "$file" ]; then
-    log_error "File $file doesn't exists, please check place files correctly"
+    log_error "File $file doesn't exists, please place files correctly"
     exit 1
   fi
 }
@@ -452,6 +455,9 @@ function Usage_Exit {
   echo "  --cqlreplicator-enviroment, --env ENV  Set CQLReplicator environment"
   echo "  --cleanup-requested, --cr        Request cleanup"
   echo "  --schedule                       Set the cron schedule, for example, 0 * * * *"
+  echo "  --source-type, --cst             Default source type is cassandra, available option is astra"
+  echo "  --token                          Astra token, for example, it starts from AstraCS:..."
+  echo "  --scb                            Astra secure connect bundle is a zip file containing security credentials and certificates required to establish connection to a managed cluster"
   echo
   echo "Commands:"
   echo "  init        Deploy CQLReplicator Glue job and download jars"
@@ -607,12 +613,12 @@ function Clean_Up {
 }
 
 function Init {
-  if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
-        check_input "${params[AZ]}" "Error: availability zone is, must be provided"
-        check_input "${params[SUBNET]}" "Error: subnet is empty, must be provided"
-        check_input "${params[SG]}" "Error: sg is empty, must be provided"
+    if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
+      check_input "${params[AZ]}" "Error: availability zone is empty, must be provided"
+      check_input "${params[SUBNET]}" "Error: subnet is empty, must be provided"
+      check_input "${params[SG]}" "Error: sg is empty, must be provided"
     else
-        log_info "Skipping glue connector creation"
+      log_info "Skipping glue connector creation"
     fi
     check_input "${params[AWS_REGION]}" "Error: region is empty, must be provided"
     log_info "TARGET TYPE: ${params[TARGET_TYPE]}"
@@ -621,17 +627,26 @@ function Init {
     log_info "Starting initialization process for AWS account: $AWS_ACCOUNT"
     # Create S3 bucket
     if [[ -z ${params[S3_LANDING_ZONE]} ]]; then
-        log_info "S3 LANDING ZONE is empty"
-        bucket=$(echo "cql-replicator-$AWS_ACCOUNT-${params[AWS_REGION]}${params[DEFAULT_ENV]}" | tr ' [:upper:]' ' [:lower:]')
-        params[S3_LANDING_ZONE]="s3://$bucket"
-        log_info "Creating a new S3 bucket: ${params[S3_LANDING_ZONE]}"
-        if aws s3 mb "${params[S3_LANDING_ZONE]}" > /dev/null 2>&1
-        then
-          echo "${params[S3_LANDING_ZONE]}" > "working_bucket.dat"
-        else
-          log_error "Error: not able to create a S3 bucket: ${params[S3_LANDING_ZONE]}"
-          exit 1
-        fi
+      log_info "S3 LANDING ZONE is empty"
+      bucket=$(echo "cql-replicator-$AWS_ACCOUNT-${params[AWS_REGION]}${params[DEFAULT_ENV]}" | tr ' [:upper:]' ' [:lower:]')
+      params[S3_LANDING_ZONE]="s3://$bucket"
+      log_info "Creating a new S3 bucket: ${params[S3_LANDING_ZONE]}"
+      if aws s3 mb "${params[S3_LANDING_ZONE]}" > /dev/null 2>&1
+      then
+        echo "${params[S3_LANDING_ZONE]}" > "working_bucket.dat"
+      else
+        log_error "Error: not able to create a S3 bucket: ${params[S3_LANDING_ZONE]}"
+        exit 1
+      fi
+    fi
+
+    local astra_spark_creds=""
+    local astra_path_scb=""
+    if [[ ${params[DEFAULT_SOURCE]} == astra ]]; then
+      check_input "${params[TOKEN]}" "Error: token is empty, must be provided"
+      check_input "${params[SCB]}" "Error: scb file name is empty, must be provided"
+      astra_spark_creds=" --conf spark.cassandra.connection.config.cloud.path=${params[SCB]} --conf spark.cassandra.auth.username=token --conf spark.cassandra.auth.password=${params[TOKEN]}"
+      astra_path_scb=",${params[S3_LANDING_ZONE]}/artifacts/${params[SCB]}"
     fi
 
   # Uploading the jars
@@ -664,7 +679,7 @@ function Init {
       validate_iam_role_permissions "${params[GLUE_IAM_ROLE]}" "${params[AWS_REGION]}" "$AWS_ACCOUNT"
       security_group_id=$(echo "${params[SG]}" | tr -d "'\"")
       check_security_group_self_referencing "$security_group_id"
-    fi
+  fi
 
   if [[ ${params[TARGET_TYPE]} == "memorydb" ]]; then
     uploader_jars "${ARTIFACTS_MEMORYDB[@]}"
@@ -721,12 +736,31 @@ function Init {
     fi
   fi
 
+  # Upload the SCB file if the source is astra
+  if [[ ${params[DEFAULT_SOURCE]} == "astra" ]]; then
+    uploader_helper "${params[SCB]}" 0 1 1
+  fi
+
   # Create Glue Connector
   local glue_conn_name
   local enhanced_monitoring=""
   if [[ "${params[GLUE_MONITORING]}" == true ]]; then
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
   fi
+  local conf_string="spark.files=${params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf${astra_path_scb} --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=200 --conf spark.default.parallelism=200 --conf spark.locality.wait=0${astra_spark_creds}"
+  local default_args=$(jq -n \
+    --arg job_lang "scala" \
+    --arg extra_jars "$S3_PATH_LIBS" \
+    --arg conf "$conf_string" \
+    --arg extra_files "${astra_path_scb:1}" \
+    --arg class "GlueApp" \
+    '{
+      "--job-language": $job_lang,
+      "--extra-jars": $extra_jars,
+      "--conf": $conf,
+      "--extra-files": $extra_files,
+      "--class": $class
+    }')
 
   if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
       progress 3 5 "Creating Glue artifacts                             "
@@ -764,7 +798,6 @@ function Init {
             "AvailabilityZone":"'${params[TRG_AZ]}'"}
           }' --region "${params[AWS_REGION]}" --endpoint https://glue."${params[AWS_REGION]}".amazonaws.com --output json
        fi
-
        aws glue create-job \
            --name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
            --role "${params[GLUE_IAM_ROLE]}" \
@@ -777,13 +810,7 @@ function Init {
            --execution-property '{"MaxConcurrentRuns": 64}' \
            --max-retries 1 \
            --region "${params[AWS_REGION]}" \
-           --default-arguments '{
-               "--job-language":"scala",
-               "--extra-jars":"'$S3_PATH_LIBS'",
-               "--conf":"spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=200 --conf spark.default.parallelism=200 --conf spark.locality.wait=0",
-               "--class":"GlueApp"
-               '$enhanced_monitoring'
-           }' > /dev/null
+           --default-arguments "$default_args" > /dev/null
    fi
 
   if [[ ${params[SKIP_GLUE_CONNECTOR]} == true ]]; then
@@ -799,13 +826,7 @@ function Init {
             --execution-property '{"MaxConcurrentRuns": 64}' \
             --max-retries 1 \
             --region "${params[AWS_REGION]}" \
-            --default-arguments '{
-                "--job-language":"scala",
-                "--extra-jars":"'$S3_PATH_LIBS'",
-                "--conf":"spark.files='${params[S3_LANDING_ZONE]}'/artifacts/KeyspacesConnector.conf,'${params[S3_LANDING_ZONE]}'/artifacts/CassandraConnector.conf --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=200 --conf spark.default.parallelism=200 --conf spark.locality.wait=0",
-                "--class":"GlueApp"
-                '$enhanced_monitoring'
-                }' > /dev/null
+            --default-arguments "$default_args" > /dev/null
     fi
 
   if [[ ${params[SKIP_KEYSPACES_LEDGER]} == true ]]; then
@@ -1391,6 +1412,23 @@ while (( "$#" )); do
       log_info "The ledger is going to be cleaned up"
       params[CLEANUP_REQUESTED]="true"
       shift 1
+      ;;
+    --source-type|--cst)
+      if [[ "$2" != "cassandra" ]]; then
+        params[DEFAULT_SOURCE]="astra"
+      else
+        params[DEFAULT_SOURCE]="cassandra"
+      fi
+      log_info "Source Type: ${params[DEFAULT_SOURCE]}"
+      shift 2
+      ;;
+    --token)
+      params[TOKEN]="$2"
+      shift 2
+      ;;
+    --scb)
+      params[SCB]="$2"
+      shift 2
       ;;
     --replay-log|--rl)
       log_info "The log of failed retries will be replayed, in order: inserts, updates, and deletes"

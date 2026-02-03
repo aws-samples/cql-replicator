@@ -748,19 +748,34 @@ function Init {
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
   fi
   local conf_string="spark.files=${params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf${astra_path_scb} --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=200 --conf spark.default.parallelism=200 --conf spark.locality.wait=0${astra_spark_creds}"
-  local default_args=$(jq -n \
-    --arg job_lang "scala" \
-    --arg extra_jars "$S3_PATH_LIBS" \
-    --arg conf "$conf_string" \
-    --arg extra_files "${astra_path_scb:1}" \
-    --arg class "GlueApp" \
-    '{
-      "--job-language": $job_lang,
-      "--extra-jars": $extra_jars,
-      "--conf": $conf,
-      "--extra-files": $extra_files,
-      "--class": $class
-    }')
+  
+  if [[ -n "${astra_path_scb:1}" ]]; then
+    local default_args=$(jq -n \
+      --arg job_lang "scala" \
+      --arg extra_jars "$S3_PATH_LIBS" \
+      --arg conf "$conf_string" \
+      --arg extra_files "${astra_path_scb:1}" \
+      --arg class "GlueApp" \
+      '{
+        "--job-language": $job_lang,
+        "--extra-jars": $extra_jars,
+        "--conf": $conf,
+        "--extra-files": $extra_files,
+        "--class": $class
+      }')
+  else
+    local default_args=$(jq -n \
+      --arg job_lang "scala" \
+      --arg extra_jars "$S3_PATH_LIBS" \
+      --arg conf "$conf_string" \
+      --arg class "GlueApp" \
+      '{
+        "--job-language": $job_lang,
+        "--extra-jars": $extra_jars,
+        "--conf": $conf,
+        "--class": $class
+      }')
+  fi
 
   if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
       progress 3 5 "Creating Glue artifacts                             "

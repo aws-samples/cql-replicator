@@ -10,7 +10,6 @@ deploy/
 build/
 opt/
 glue-test/
-ecs/docker/CQLReplicator.zip
 probe/
 # Ignore Gradle GUI config
 gradle-app.setting
@@ -19,3 +18,4 @@ gradle-app.setting
 !gradle-wrapper.jar
 # Cache of project
 .gradletasknamecache
+/.kiro/

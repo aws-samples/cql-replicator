@@ -44,33 +44,19 @@ import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try}
 import net.jpountz.xxhash.{XXHashFactory, XXHash64}
 
-class LargeObjectException(s: String) extends RuntimeException {
-  println(s)
-}
+class LargeObjectException(s: String) extends RuntimeException(s)
 
-class ProcessTypeException(s: String) extends RuntimeException {
-  println(s)
-}
+class ProcessTypeException(s: String) extends RuntimeException(s)
 
-class CassandraTypeException(s: String) extends RuntimeException {
-  println(s)
-}
+class CassandraTypeException(s: String) extends RuntimeException(s)
 
-class StatsS3Exception(s: String) extends RuntimeException {
-  println(s)
-}
+class StatsS3Exception(s: String) extends RuntimeException(s)
 
-class CompressionException(s: String) extends RuntimeException {
-  println(s)
-}
+class CompressionException(s: String) extends RuntimeException(s)
 
-class CustomSerializationException(s: String) extends RuntimeException {
-  println(s)
-}
+class CustomSerializationException(s: String) extends RuntimeException(s)
 
-class DlqS3Exception(s: String) extends RuntimeException {
-  println(s)
-}
+class DlqS3Exception(s: String) extends RuntimeException(s)
 
 class PreFlightCheckException(val message: String, val errorCode: Int, val cause: Throwable = null)
   extends Exception(s"[$errorCode] $message", cause) {
@@ -239,8 +225,7 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
   lazy val retry: Retry = {
     val r = Retry.of("keyspaces", retryConfig)
     r.getEventPublisher.onError(event => {
-      // The result should be in the output logs
-      println(s"FINAL FAILURE after ${event.getNumberOfRetryAttempts} attempts. " +
+      logger.error(s"FINAL FAILURE after ${event.getNumberOfRetryAttempts} attempts. " +
         s"Exception: ${event.getLastThrowable.getMessage}")
     })
     r
@@ -472,7 +457,9 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG", "WORKLOAD_TYPE").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG", "WORKLOAD_TYPE", "ICEBERG_CATALOG", "LOGGING").toArray)
+    val logLevel = args.getOrElse("LOGGING", "ERROR").toUpperCase
+    sparkContext.setLogLevel(logLevel)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
@@ -513,6 +500,13 @@ object GlueApp {
     val trgTableName = args("TARGET_TBL")
     val trgKeyspaceName = args("TARGET_KS")
     val landingZone = args("S3_LANDING_ZONE")
+    val icebergCatalog = args("ICEBERG_CATALOG")
+
+    // Iceberg Spark session configuration
+    // Note: spark.sql.extensions and spark.sql.catalog.* are static configs
+    // and must be set via --conf in the Glue job definition, not at runtime.
+    sparkSession.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
     val bcktName = landingZone.replaceAll("s3://", "")
     val columnTs = args("WRITETIME_COLUMN")
     val ttlColumn = args("TTL_COLUMN")
@@ -1110,12 +1104,12 @@ object GlueApp {
                 other.toString
             }
           }
-          case "smallint" => row.getShort(position)
+          case "smallint" => row.get(position).asInstanceOf[Number].shortValue()
           case "long" | "bigint" => row.getLong(position)
           case "float" => row.getFloat(position)
           case "double" => row.getDouble(position)
           case "decimal" => row.getDecimal(position)
-          case "tinyint" => row.getByte(position)
+          case "tinyint" => row.get(position).asInstanceOf[Number].byteValue()
           case "uuid" | "timeuuid" => row.getString(position)
           case "boolean" => row.getBoolean(position)
           case "blob" => s"0${lit(row.getAs[Array[Byte]](colName)).toString.toLowerCase.replaceAll("'", "")}"
@@ -1158,136 +1152,465 @@ object GlueApp {
       }
     }
 
-    def dataReplicationProcess(): Unit = {
-      val ledger = internalConnectionToTarget.execute(
-        s"""SELECT location,tile,ver
-           |FROM $internalMigrationKeyspace.$internalMigrationTable
-           | WHERE ks='$srcKeyspaceName'
-           |AND tbl='$srcTableName'
-           |AND tile=$currentTile
-           |AND load_status=''
-           |AND offload_status='SUCCESS'
-           |AND ver in ('head','tail')
-           |ALLOW FILTERING""".stripMargin).all().asScala
+    // ======================== Iceberg Table Management Functions ========================
 
-      val ledgerList = Option(ledger)
+    /** Fully qualified Iceberg table name in Glue Catalog, per tile. */
+    def icebergTableName(ksName: String, tblName: String, tile: Int): String = {
+      s"$icebergCatalog.${ksName}_db.${tblName}_tile_${tile}_pk_snapshots"
+    }
 
-      if (!ledgerList.isEmpty) {
-        val locations = ledgerList.get.map(c => (c.getString(0), c.getInt(1), c.getString(2))).toList.par
-        val heads = locations.count(_._3 == "head")
-        val tails = locations.count(_._3 == "tail")
+    /** Maps Cassandra types to Spark SQL types for Iceberg table creation. */
+    def cassandraTypeToSparkSql(cassandraType: String): String = {
+      cassandraType.toLowerCase match {
+        case "text" | "varchar" | "ascii" | "inet" | "uuid" | "timeuuid" => "STRING"
+        case "int" | "varint"                                            => "INT"
+        case "bigint" | "counter"                                        => "BIGINT"
+        case "float"                                                     => "FLOAT"
+        case "double"                                                    => "DOUBLE"
+        case "boolean"                                                   => "BOOLEAN"
+        case "timestamp"                                                 => "TIMESTAMP"
+        case "date"                                                      => "DATE"
+        case "decimal"                                                   => "DECIMAL(38,19)"
+        case "smallint"                                                  => "SMALLINT"
+        case "tinyint"                                                   => "TINYINT"
+        case "blob"                                                      => "BINARY"
+        case _                                                           => "STRING"
+      }
+    }
 
-        if (heads > 0 && tails == 0) {
+    /**
+     * Creates the Iceberg table for a specific tile if it doesn't exist.
+     * Schema: primary key columns + ts (bigint)
+     * One table per tile for snapshot isolation.
+     * Location: s3://{landingZone}/{ks}/{tbl}/iceberg/tile_{tile}/
+     */
+    def ensureIcebergTableExists(
+      spark: SparkSession,
+      ksName: String,
+      tblName: String,
+      tile: Int,
+      pkColumns: Seq[Map[String, String]],
+      lz: String
+    ): Unit = {
+      val tableName = icebergTableName(ksName, tblName, tile)
+      val columnDefs = pkColumns.map { c =>
+        val name = c("name")
+        val sparkType = cassandraTypeToSparkSql(c("type"))
+        s"$name $sparkType"
+      }.mkString(", ")
+      val lzPath = lz.stripSuffix("/")
+      val location = s"$lzPath/$ksName/$tblName/iceberg/tile_$tile/"
+      val createSql =
+        s"""CREATE TABLE IF NOT EXISTS $tableName (
+           |  $columnDefs,
+           |  ts BIGINT
+           |) USING iceberg
+           |LOCATION '$location'""".stripMargin
+      spark.sql(createSql)
+    }
 
-          logger.info(s"Historical data load.Processing locations: $locations")
-          locations.foreach(location => {
-            val ledgerConnection = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
+    /**
+     * Runs expire_snapshots to retain only the N most recent snapshots.
+     * Logs and swallows errors to avoid aborting the discovery cycle.
+     */
+    def expireIcebergSnapshots(
+      spark: SparkSession,
+      tableName: String,
+      retainLast: Int = 2
+    ): Unit = {
+      Try {
+        spark.sql(s"CALL $icebergCatalog.system.expire_snapshots(table => '$tableName', retain_last => $retainLast)")
+      } match {
+        case Failure(e) => logger.warn(s"Failed to expire snapshots for $tableName: ${e.getMessage}")
+        case Success(_) => logger.info(s"Successfully expired snapshots for $tableName, retaining last $retainLast")
+      }
+    }
 
-            val loc = location._1
-            val sourcePath = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/$loc"
-            val sourceDf = glueContext.getSourceWithFormat(
-              connectionType = "s3",
-              format = "parquet",
-              options = JsonOptions(s"""{"paths": ["$sourcePath"]}""")
-            ).getDynamicFrame().toDF().persist(cachingMode)
+    /**
+     * Returns the current (latest) snapshot ID of the Iceberg table.
+     * Used after a write to record in the ledger.
+     */
+    def currentIcebergSnapshotId(spark: SparkSession, tableName: String): Option[Long] = {
+      Try {
+        val snapshots = spark.sql(s"SELECT snapshot_id FROM $tableName.snapshots ORDER BY committed_at DESC LIMIT 1")
+        if (snapshots.isEmpty) None
+        else Some(snapshots.first().getLong(0))
+      } match {
+        case Failure(e) =>
+          logger.error(s"Failed to get current snapshot ID for $tableName: ${e.getMessage}")
+          None
+        case Success(result) => result
+      }
+    }
 
-            val sourceDfV2 = sourceDf.drop("group").drop("ts")
-            val tile = location._2
+    /**
+     * Checks whether a specific snapshot ID exists in the Iceberg table.
+     * Used to validate ledger-referenced snapshots before attempting time-travel reads.
+     */
+    def snapshotExists(spark: SparkSession, tableName: String, snapshotId: Long): Boolean = {
+      Try {
+        val result = spark.sql(s"SELECT snapshot_id FROM $tableName.snapshots WHERE snapshot_id = $snapshotId")
+        !result.isEmpty
+      } match {
+        case Failure(e) =>
+          logger.warn(s"Failed to check snapshot existence for $snapshotId in $tableName: ${e.getMessage}")
+          false
+        case Success(exists) => exists
+      }
+    }
 
-            persist(sourceDfV2, columns, columnsPos, tile, "insert")
+    /**
+     * Writes primary keys to the per-tile Iceberg table.
+     * Overwrites the entire table content for this tile.
+     */
+    def writeIcebergTileSnapshot(
+      spark: SparkSession,
+      tileDf: DataFrame,
+      tableName: String
+    ): Unit = {
+      tileDf.writeTo(tableName).overwritePartitions()
+    }
 
-            ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
-            val cnt = sourceDfV2.count()
+    /**
+     * Reads the per-tile Iceberg table at a specific snapshot ID.
+     * Uses Spark's snapshot-id read option for time-travel.
+     */
+    def readIcebergAtSnapshot(
+      spark: SparkSession,
+      tableName: String,
+      snapshotId: Long
+    ): DataFrame = {
+      spark.read
+        .option("snapshot-id", snapshotId.toString)
+        .format("iceberg")
+        .load(tableName)
+    }
 
-            val content = ReplicationStats(tile, cnt, 0, 0, 0, org.joda.time.LocalDateTime.now().toString)
-            putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$tile", "count.json", content)
-            ledgerConnection.close()
-            sourceDf.unpersist()
-          }
+    /**
+     * Computes the change set between two snapshots for a per-tile table.
+     * Returns (inserts, deletes, updates) DataFrames.
+     */
+    def computeIcebergChanges(
+      spark: SparkSession,
+      tableName: String,
+      prevSnapshotId: Long,
+      currSnapshotId: Long,
+      pkColumns: Seq[String],
+      colTs: String
+    ): (DataFrame, DataFrame, DataFrame) = {
+      val prev = readIcebergAtSnapshot(spark, tableName, prevSnapshotId)
+      val curr = readIcebergAtSnapshot(spark, tableName, currSnapshotId)
+
+      val inserts = curr.join(prev, pkColumns, "leftanti")
+      val deletes = prev.join(curr, pkColumns, "leftanti")
+
+      val updates = if (colTs != "None") {
+        val joinCols = pkColumns.toSeq
+        val joined = curr.alias("curr").join(prev.alias("prev"), joinCols, "inner")
+        // Use null-safe comparison: =!= returns null when either side is null,
+        // causing rows to be silently dropped. Cassandra writetime() returns
+        // null when the tracked column was never written, so we must use
+        // NOT (curr.ts <=> prev.ts) to detect null-to-value transitions.
+        val filtered = joined.filter(not(col("curr.ts").eqNullSafe(col("prev.ts"))))
+        logger.info(s"Update detection: colTs=$colTs, joinCols=$joinCols")
+        filtered.select(joinCols.map(c => col(c)) :+ col("curr.ts").alias("ts"): _*)
+      } else {
+        spark.emptyDataFrame
+      }
+
+      (inserts, deletes, updates)
+    }
+
+    /**
+     * Records a new discovery snapshot in the ledger.
+     * Stores the Iceberg snapshot ID in the 'location' field.
+     * Rotates the previous 'curr' entry to 'prev' before writing the new 'curr'.
+     */
+    def recordDiscoverySnapshot(
+      session: CqlSession,
+      ksName: String,
+      tblName: String,
+      tile: Int,
+      snapshotId: Long
+    ): Unit = {
+      val existingCurr = Option(session.execute(
+        s"SELECT location, load_status FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$ksName' and tbl='$tblName' and tile=$tile and ver='curr'"
+      ).one())
+
+      existingCurr match {
+        case Some(row) =>
+          val oldSnapshotId = row.getString("location")
+          val oldLoadStatus = Option(row.getString("load_status")).getOrElse("")
+          session.execute(
+            s"BEGIN UNLOGGED BATCH " +
+              s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$ksName','$tblName',$tile,'SUCCESS',toTimestamp(now()),'$oldSnapshotId','prev','$oldLoadStatus',toTimestamp(now()));" +
+              s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$ksName','$tblName',$tile,'SUCCESS',toTimestamp(now()),'${snapshotId.toString}','curr','','');" +
+              s"APPLY BATCH;"
           )
+        case None =>
+          session.execute(
+            s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$ksName','$tblName',$tile,'SUCCESS',toTimestamp(now()),'${snapshotId.toString}','curr','','')"
+          )
+      }
+    }
+
+    /**
+     * Retrieves the previous and current snapshot IDs for a tile.
+     * Returns (previousSnapshotId, currentSnapshotId) or None if insufficient history.
+     */
+    def getSnapshotIds(
+      session: CqlSession,
+      ksName: String,
+      tblName: String,
+      tile: Int
+    ): Option[(Long, Long)] = {
+      val prev = Option(session.execute(
+        s"SELECT location FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$ksName' and tbl='$tblName' and tile=$tile and ver='prev'"
+      ).one())
+
+      val curr = Option(session.execute(
+        s"SELECT location FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$ksName' and tbl='$tblName' and tile=$tile and ver='curr'"
+      ).one())
+
+      (prev, curr) match {
+        case (Some(prevRow), Some(currRow)) =>
+          Try((prevRow.getString("location").toLong, currRow.getString("location").toLong)).toOption
+        case _ => None
+      }
+    }
+
+    /**
+     * Marks the current replication cycle as complete for a tile.
+     */
+    def markReplicationComplete(
+      session: CqlSession,
+      ksName: String,
+      tblName: String,
+      tile: Int
+    ): Unit = {
+      session.execute(
+        s"BEGIN UNLOGGED BATCH " +
+          s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load) VALUES('$ksName','$tblName',$tile,'prev','SUCCESS',toTimestamp(now()));" +
+          s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load) VALUES('$ksName','$tblName',$tile,'curr','SUCCESS',toTimestamp(now()));" +
+          s"APPLY BATCH;"
+      )
+    }
+
+    /**
+     * Checks if legacy Parquet head/tail directories exist for a table.
+     */
+    def hasLegacyParquetData(
+      s3Client: com.amazonaws.services.s3.AmazonS3,
+      lz: String,
+      ksName: String,
+      tblName: String,
+      numTiles: Int
+    ): Boolean = {
+      val bucket = lz.replaceAll("s3://", "")
+      (0 until numTiles).exists { tile =>
+        val headPrefix = s"$ksName/$tblName/primaryKeys/tile_$tile.head/"
+        val tailPrefix = s"$ksName/$tblName/primaryKeys/tile_$tile.tail/"
+        val headResult = s3Client.listObjectsV2(new ListObjectsV2Request().withBucketName(bucket).withPrefix(headPrefix).withMaxKeys(1))
+        val tailResult = s3Client.listObjectsV2(new ListObjectsV2Request().withBucketName(bucket).withPrefix(tailPrefix).withMaxKeys(1))
+        headResult.getKeyCount > 0 || tailResult.getKeyCount > 0
+      }
+    }
+
+    /**
+     * Migrates the most recent Parquet snapshot (tail preferred, head fallback)
+     * into per-tile Iceberg tables as the initial snapshot.
+     */
+    def migrateParquetToIceberg(
+      spark: SparkSession,
+      gc: GlueContext,
+      s3Client: com.amazonaws.services.s3.AmazonS3,
+      lz: String,
+      ksName: String,
+      tblName: String,
+      numTiles: Int,
+      pkColumns: Seq[Map[String, String]]
+    ): Unit = {
+      val bucket = lz.replaceAll("s3://", "")
+      val ledgerConn = getDBConnection("KeyspacesConnector.conf", bucket, s3Client)
+      try {
+        for (tile <- 0 until numTiles) {
+          Try {
+            val tableName = icebergTableName(ksName, tblName, tile)
+            ensureIcebergTableExists(spark, ksName, tblName, tile, pkColumns, lz)
+
+            val tailPrefix = s"$ksName/$tblName/primaryKeys/tile_$tile.tail/"
+            val headPrefix = s"$ksName/$tblName/primaryKeys/tile_$tile.head/"
+            val tailResult = s3Client.listObjectsV2(new ListObjectsV2Request().withBucketName(bucket).withPrefix(tailPrefix).withMaxKeys(1))
+            val headResult = s3Client.listObjectsV2(new ListObjectsV2Request().withBucketName(bucket).withPrefix(headPrefix).withMaxKeys(1))
+
+            val parquetPath = if (tailResult.getKeyCount > 0) {
+              Some(s"s3://$bucket/$ksName/$tblName/primaryKeys/tile_$tile.tail")
+            } else if (headResult.getKeyCount > 0) {
+              Some(s"s3://$bucket/$ksName/$tblName/primaryKeys/tile_$tile.head")
+            } else {
+              None
+            }
+
+            parquetPath match {
+              case Some(path) =>
+                val parquetDf = spark.read.parquet(path)
+                // Drop 'group' or 'tile' columns — per-tile tables don't need them
+                val icebergDf = parquetDf
+                  .drop("group")
+                  .drop("tile")
+                writeIcebergTileSnapshot(spark, icebergDf, tableName)
+                currentIcebergSnapshotId(spark, tableName) match {
+                  case Some(snapshotId) =>
+                    recordDiscoverySnapshot(ledgerConn, ksName, tblName, tile, snapshotId)
+                    logger.info(s"Migrated Parquet data for tile $tile from $path to Iceberg with snapshot $snapshotId")
+                  case None =>
+                    logger.error(s"Failed to get snapshot ID after migrating tile $tile from $path")
+                }
+              case None =>
+                logger.info(s"No legacy Parquet data found for tile $tile, skipping migration")
+            }
+          } match {
+            case Failure(e) =>
+              logger.error(s"Failed to migrate Parquet data for tile $tile: ${e.getMessage}")
+            case Success(_) =>
+          }
         }
+      } finally {
+        ledgerConn.close()
+      }
+    }
 
-        if ((heads > 0 && tails > 0) || (heads == 0 && tails > 0)) {
-          var inserted: Long = 0
-          var deleted: Long = 0
-          var updated: Long = 0
+    // ======================== End Iceberg Functions ========================
 
-          logger.info("Processing replica...")
-          val pathTail = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail"
-          val dfTail = glueContext.getSourceWithFormat(
-              connectionType = "s3",
-              format = "parquet",
-              options = JsonOptions(s"""{"paths": ["$pathTail"]}""")
-            ).getDynamicFrame()
-            .toDF()
-            .drop("group")
-            .persist(cachingMode)
-            .repartition(defaultPartitions, pks.map(c => col(c)): _*)
+    def dataReplicationProcess(): Unit = {
+      val icebergTblName = icebergTableName(srcKeyspaceName, srcTableName, currentTile)
+      val pkColumnNames = pks
 
-          val pathHead = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head"
-          val dfHead = glueContext.getSourceWithFormat(
-              connectionType = "s3",
-              format = "parquet",
-              options = JsonOptions(s"""{"paths": ["$pathHead"]}""")
-            ).getDynamicFrame()
-            .toDF()
-            .drop("group").persist(cachingMode)
-            .repartition(defaultPartitions, pks.map(c => col(c)): _*)
+      val session = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
+      try {
+        logger.info(s"Starting replication for tile $currentTile, Iceberg table: $icebergTblName")
 
-          val newInsertsDF: DataFrame = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti").persist(cachingMode)
-          val newDeletesDF: DataFrame = dfHead.drop("ts").as("head").join(dfTail.drop("ts").as("tail"), cond, "leftanti").persist(cachingMode)
+        // Read both curr and prev ledger entries
+        val currEntry = Option(session.execute(
+          s"SELECT location, load_status, offload_status FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$currentTile and ver='curr'"
+        ).one())
 
-          columnTs match {
-            case ct if ct == "None" && counterColumns.isEmpty => {
-              if (!newInsertsDF.isEmpty) {
-                persist(newInsertsDF, columns, columnsPos, currentTile, "insert")
-                inserted = newInsertsDF.count()
+        val prevEntry = Option(session.execute(
+          s"SELECT location, load_status, offload_status FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$currentTile and ver='prev'"
+        ).one())
+
+        logger.info(s"Ledger curr for tile $currentTile: ${currEntry.map(r => s"location=${r.getString("location")}, load_status='${r.getString("load_status")}', offload_status='${r.getString("offload_status")}'").getOrElse("NOT FOUND")}")
+        logger.info(s"Ledger prev for tile $currentTile: ${prevEntry.map(r => s"location=${r.getString("location")}, load_status='${r.getString("load_status")}', offload_status='${r.getString("offload_status")}'").getOrElse("NOT FOUND")}")
+
+        currEntry match {
+          case None =>
+            logger.info(s"No pending replication work for tile $currentTile")
+
+          case Some(currRow) =>
+            val currOffloadStatus = Option(currRow.getString("offload_status")).getOrElse("")
+            val currLoadStatus = Option(currRow.getString("load_status")).getOrElse("")
+            val currSnapshotIdOpt = Try(currRow.getString("location").toLong).toOption
+
+            if (currOffloadStatus != "SUCCESS") {
+              logger.info(s"Discovery not completed for tile $currentTile (offload_status='$currOffloadStatus')")
+            } else if (currSnapshotIdOpt.isEmpty) {
+              logger.warn(s"Invalid snapshot ID in ledger for tile $currentTile")
+            } else if (currLoadStatus == "SUCCESS") {
+              // Already replicated this snapshot, nothing to do
+              logger.info(s"Current snapshot already replicated for tile $currentTile")
+            } else {
+              val currSnapshotId = currSnapshotIdOpt.get
+
+              // Check if prev exists with load_status=SUCCESS — that means we already did
+              // an initial load and this is a delta cycle
+              val prevSnapshotIdOpt = prevEntry.flatMap(r => Try(r.getString("location").toLong).toOption)
+              val prevLoadStatus = prevEntry.map(r => Option(r.getString("load_status")).getOrElse("")).getOrElse("")
+
+              prevSnapshotIdOpt match {
+                case Some(prevSnapshotId) if prevLoadStatus == "SUCCESS" =>
+                  // Validate both snapshots exist before attempting delta load
+                  val prevExists = snapshotExists(sparkSession, icebergTblName, prevSnapshotId)
+                  val currExists = snapshotExists(sparkSession, icebergTblName, currSnapshotId)
+
+                  if (!prevExists || !currExists) {
+                    logger.warn(s"Snapshot missing for tile $currentTile (prev=$prevSnapshotId exists=$prevExists, curr=$currSnapshotId exists=$currExists), skipping — waiting for discovery to write a fresh snapshot")
+                  } else {
+                  // Delta load: compute changes between prev and curr snapshots
+                  logger.info(s"Processing delta for tile $currentTile (prev=$prevSnapshotId, curr=$currSnapshotId)")
+                  var inserted: Long = 0
+                  var deleted: Long = 0
+                  var updated: Long = 0
+
+                  val (newInsertsDF, newDeletesDF, newUpdatesDF) = computeIcebergChanges(
+                    sparkSession, icebergTblName, prevSnapshotId, currSnapshotId,
+                    pkColumnNames, columnTs
+                  )
+
+                  val insertsDf = newInsertsDF.drop("ts").persist(cachingMode)
+                  val deletesDf = newDeletesDF.drop("ts").persist(cachingMode)
+
+                  columnTs match {
+                    case ct if ct == "None" && counterColumns.isEmpty => {
+                      if (!insertsDf.isEmpty) {
+                        persist(insertsDf, columns, columnsPos, currentTile, "insert")
+                        inserted = insertsDf.count()
+                      }
+                    }
+                    case _ => {
+                      val updatesDf = newUpdatesDF.drop("ts").persist(cachingMode)
+                      if (!(insertsDf.isEmpty && updatesDf.isEmpty)) {
+                        persist(insertsDf, columns, columnsPos, currentTile, "insert")
+                        persist(updatesDf, columns, columnsPos, currentTile, "update")
+                        inserted = insertsDf.count()
+                        updated = updatesDf.count()
+                      }
+                      updatesDf.unpersist()
+                    }
+                  }
+
+                  if (!deletesDf.isEmpty) {
+                    persist(deletesDf, columns, columnsPos, currentTile, "delete")
+                    deleted = deletesDf.count()
+                  }
+
+                  logger.info(s"Delta completed for tile $currentTile: inserts=$inserted, updates=$updated, deletes=$deleted")
+
+                  if (updated != 0 || inserted != 0 || deleted != 0) {
+                    val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, org.joda.time.LocalDateTime.now().toString)
+                    putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
+                  }
+
+                  insertsDf.unpersist()
+                  deletesDf.unpersist()
+
+                  markReplicationComplete(session, srcKeyspaceName, srcTableName, currentTile)
+                  expireIcebergSnapshots(sparkSession, icebergTblName)
+                  }
+
+                case _ =>
+                  // Initial/historical load: no previous replicated snapshot
+                  if (!snapshotExists(sparkSession, icebergTblName, currSnapshotId)) {
+                    logger.warn(s"Snapshot $currSnapshotId missing for tile $currentTile, skipping — waiting for discovery to write a fresh snapshot")
+                  } else {
+                  logger.info(s"Historical data load for tile $currentTile (snapshot=$currSnapshotId)")
+                  val sourceDf = readIcebergAtSnapshot(sparkSession, icebergTblName, currSnapshotId)
+                  val sourceDfV2 = sourceDf.drop("ts")
+
+                  persist(shuffleDfV2(sourceDfV2), columns, columnsPos, currentTile, "insert")
+                  val cnt = sourceDfV2.count()
+                  logger.info(s"Historical load completed for tile $currentTile: $cnt rows inserted")
+
+                  val content = ReplicationStats(currentTile, cnt, 0, 0, 0, org.joda.time.LocalDateTime.now().toString)
+                  putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
+
+                  markReplicationComplete(session, srcKeyspaceName, srcTableName, currentTile)
+                  expireIcebergSnapshots(sparkSession, icebergTblName)
+                  }
               }
             }
-            case ct if ct == "None" && counterColumns.nonEmpty => {
-              val newCounterUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").
-                filter($"tail.counter_hash" =!= $"head.counter_hash").
-                selectExpr(pks.map(x => s"tail.$x") ++ counterColumns.map(y => s"tail.$y-head.$y as $y"): _*).persist(cachingMode)
-              persist(newInsertsDF, columns, columnsPos, currentTile, "insert")
-              persist(newCounterUpdatesDF, columns, columnsPos, currentTile, "update")
-              inserted = newInsertsDF.count()
-              updated = newCounterUpdatesDF.count()
-            }
-            case _ => {
-              val newUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").
-                filter($"tail.ts" > $"head.ts").
-                selectExpr(pks.map(x => s"tail.$x"): _*).persist(cachingMode)
-              if (!(newInsertsDF.isEmpty && newUpdatesDF.isEmpty)) {
-                persist(newInsertsDF, columns, columnsPos, currentTile, "insert")
-                persist(newUpdatesDF, columns, columnsPos, currentTile, "update")
-                inserted = newInsertsDF.count()
-                updated = newUpdatesDF.count()
-              }
-              newUpdatesDF.unpersist()
-            }
-          }
-
-          if (!newDeletesDF.isEmpty) {
-            persist(newDeletesDF, columns, columnsPos, currentTile, "delete")
-            deleted = newDeletesDF.count()
-          }
-
-          if (updated != 0 || inserted != 0 || deleted != 0) {
-            val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, org.joda.time.LocalDateTime.now().toString)
-            putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
-          }
-
-          newInsertsDF.unpersist()
-          newDeletesDF.unpersist()
-          dfTail.unpersist()
-          dfHead.unpersist()
-
-          internalConnectionToTarget.execute(s"BEGIN UNLOGGED BATCH " +
-            s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'tail','SUCCESS', toTimestamp(now()), '');" +
-            s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'head','SUCCESS', toTimestamp(now()), '');" +
-            s"APPLY BATCH;")
-
         }
+      } finally {
+        session.close()
       }
     }
 
@@ -1761,6 +2084,7 @@ object GlueApp {
             failures.foreach {
               case Left((tile, error)) =>
                 logger.error(s"Tile $tile failed: ${error.getMessage}")
+              case _ => // unreachable — failures only contains Left values
             }
             throw new RuntimeException("Tile processing failed")
           }
@@ -1797,73 +2121,121 @@ object GlueApp {
     }
 
     def keysDiscoveryProcess(): Unit = {
+      // Infer PK columns for Iceberg table schema
+      val pkColumnsForIceberg = inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs)
+        .map(m => { val (name, tpe) = m.head; Map("name" -> name, "type" -> tpe) })
+
+      // Migrate legacy Parquet data to Iceberg if present (backward compatibility)
+      if (hasLegacyParquetData(s3client, landingZone, srcKeyspaceName, srcTableName, totalTiles)) {
+        logger.info(s"Legacy Parquet data detected for $srcKeyspaceName.$srcTableName, migrating to Iceberg")
+        migrateParquetToIceberg(sparkSession, glueContext, s3client, landingZone, srcKeyspaceName, srcTableName, totalTiles, pkColumnsForIceberg)
+      }
+
       val primaryKeysDf = sourceScan().persist(cachingMode)
+      // Rename 'group' to 'tile' for tile filtering
+      val groupedPkDF = primaryKeysDf.withColumnRenamed("group", "tile").persist(cachingMode)
+
       val ledgerConnection = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
-
-      val tiles = (0 until totalTiles).toList.par
-      tiles.foreach(tile => {
-        val rsTail = ledgerConnection.execute(getLedgerQueryBuilder(srcKeyspaceName, srcTableName, tile, "tail")).one()
-        val rsHead = ledgerConnection.execute(getLedgerQueryBuilder(srcKeyspaceName, srcTableName, tile, "head")).one()
-
-        val tail = Option(rsTail)
-        val head = Option(rsHead)
-        val tailLoadStatus = tail match {
-          case t if !t.isEmpty => rsTail.getString("load_status")
-          case _ => ""
-        }
-        val headLoadStatus = head match {
-          case h if !h.isEmpty => rsHead.getString("load_status")
-          case _ => ""
+      try {
+        // Create database and all per-tile tables sequentially to avoid Glue Catalog concurrency conflicts
+        val dbName = s"$icebergCatalog.${srcKeyspaceName}_db"
+        sparkSession.sql(s"CREATE DATABASE IF NOT EXISTS $dbName")
+        for (tile <- 0 until totalTiles) {
+          ensureIcebergTableExists(sparkSession, srcKeyspaceName, srcTableName, tile, pkColumnsForIceberg, landingZone)
         }
 
-        logger.info(s"Processing $tile, head is $head, tail is $tail, head status is $headLoadStatus, tail status is $tailLoadStatus")
+        // Data writes can run in parallel — each tile writes to its own independent table
+        val tiles = (0 until totalTiles).toList.par
+        tiles.foreach(tile => {
+          logger.info(s"Processing tile $tile")
+          val icebergTblName = icebergTableName(srcKeyspaceName, srcTableName, tile)
 
-        // Swap tail and head
-        if ((!tail.isEmpty && tailLoadStatus == "SUCCESS") && (!head.isEmpty && headLoadStatus == "SUCCESS")) {
-          logger.info("Swapping the tail and the head")
+          // Check if replication has consumed the current snapshot for this tile
+          val currEntry = Option(ledgerConnection.execute(
+            s"SELECT load_status FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$tile and ver='curr'"
+          ).one())
+          val currLoadStatus = currEntry.map(r => Option(r.getString("load_status")).getOrElse("")).getOrElse("")
 
-          val staged = primaryKeysDf.where(col("group") === tile)
-          val oldTailPath = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail"
-          val oldTail = glueContext.getSourceWithFormat(
-            connectionType = "s3",
-            format = "parquet",
-            options = JsonOptions(s"""{"paths": ["$oldTailPath"]}""")
-          ).getDynamicFrame().toDF()
-
-          writeWithSizeControl(oldTail, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
-          writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail")
-
-          ledgerConnection.execute(
-            s"BEGIN UNLOGGED BATCH " +
-              s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','');" +
-              s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','');" +
-              s"APPLY BATCH;"
-          )
-        }
-
-        // The second round (tail and head)
-        if (tail.isEmpty && (!head.isEmpty && headLoadStatus == "SUCCESS")) {
-          logger.info("Loading a tail but keeping the head")
-          val staged = primaryKeysDf.where(col("group") === tile)
-          writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail")
-          ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','')")
-        }
-
-        // Historical upload, the first round (head)
-        if (tail.isEmpty && head.isEmpty) {
-          logger.info("Loading a head")
-          val staged = primaryKeysDf.where(col("group") === tile)
-          writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
-          ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
-          val content = DiscoveryStats(tile, staged.count(), org.joda.time.LocalDateTime.now().toString)
-          putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
-        }
-      })
+          if (currEntry.isDefined && currLoadStatus != "SUCCESS") {
+            logger.info(s"Skipping tile $tile: replication has not yet consumed the current snapshot (load_status='$currLoadStatus')")
+          } else {
+            val tileDf = groupedPkDF.filter(col("tile") === tile).drop("tile")
+            writeIcebergTileSnapshot(sparkSession, tileDf, icebergTblName)
+            val snapshotIdOpt = currentIcebergSnapshotId(sparkSession, icebergTblName)
+            snapshotIdOpt match {
+              case Some(snapshotId) =>
+                recordDiscoverySnapshot(ledgerConnection, srcKeyspaceName, srcTableName, tile, snapshotId)
+                logger.info(s"Recorded snapshot $snapshotId for tile $tile")
+              case None =>
+                logger.warn(s"Could not retrieve snapshot ID after writing tile $tile")
+            }
+            val tileCount = groupedPkDF.where(col("tile") === tile).count()
+            val content = DiscoveryStats(tile, tileCount, org.joda.time.LocalDateTime.now().toString)
+            putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
+          }
+        })
+      } finally {
+        ledgerConnection.close()
+      }
+      groupedPkDF.unpersist()
       primaryKeysDf.unpersist()
-      ledgerConnection.close()
     }
 
     cleanupLedger(internalConnectionToTarget, logger, srcKeyspaceName, srcTableName, cleanUpRequested, processType)
+
+    // Clean up Iceberg tables and S3 data when --cr flag is used
+    if (processType.equals("discovery") && cleanUpRequested) {
+      val dbName = s"${srcKeyspaceName}_db"
+
+      // Use fully qualified SDK v2 classes to avoid conflicts with Glue ETL library
+      val glueClient = software.amazon.awssdk.services.glue.GlueClient.create()
+
+      try {
+        // Delete per-tile Iceberg tables from Glue Catalog
+        for (tile <- 0 until totalTiles) {
+          val catalogTblName = s"${srcTableName}_tile_${tile}_pk_snapshots"
+          Try {
+            glueClient.deleteTable(
+              software.amazon.awssdk.services.glue.model.DeleteTableRequest.builder()
+                .databaseName(dbName).name(catalogTblName).build()
+            )
+            logger.info(s"Deleted Glue Catalog table $dbName.$catalogTblName")
+          } match {
+            case Failure(e) => logger.warn(s"Failed to delete Glue Catalog table $dbName.$catalogTblName: ${e.getMessage}")
+            case Success(_) =>
+          }
+        }
+
+        // Clean up S3 Iceberg data
+        Try {
+          val icebergPrefix = s"$srcKeyspaceName/$srcTableName/iceberg/"
+          var listing = s3client.listObjectsV2(new ListObjectsV2Request().withBucketName(bcktName).withPrefix(icebergPrefix))
+          listing.getObjectSummaries.asScala.foreach(obj => s3client.deleteObject(bcktName, obj.getKey))
+          while (listing.isTruncated) {
+            listing = s3client.listObjectsV2(new ListObjectsV2Request().withBucketName(bcktName).withPrefix(icebergPrefix).withContinuationToken(listing.getNextContinuationToken))
+            listing.getObjectSummaries.asScala.foreach(obj => s3client.deleteObject(bcktName, obj.getKey))
+          }
+          logger.info(s"Cleaned up S3 Iceberg data at s3://$bcktName/$icebergPrefix")
+        } match {
+          case Failure(e) => logger.warn(s"Failed to clean up S3 Iceberg data: ${e.getMessage}")
+          case Success(_) =>
+        }
+
+        // Delete the database from Glue Catalog
+        Try {
+          glueClient.deleteDatabase(
+            software.amazon.awssdk.services.glue.model.DeleteDatabaseRequest.builder()
+              .name(dbName).build()
+          )
+          logger.info(s"Deleted Glue Catalog database $dbName")
+        } match {
+          case Failure(e) => logger.warn(s"Failed to delete Glue Catalog database $dbName: ${e.getMessage}")
+          case Success(_) =>
+        }
+      } finally {
+        glueClient.close()
+      }
+    }
 
     Iterator.continually(stopRequested(bcktName)).takeWhile(_ == false).foreach {
       _ => {

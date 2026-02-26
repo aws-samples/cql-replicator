@@ -77,79 +77,57 @@ Get_TCO() {
 }
 
 function Recovery {
-    log_info "The recovery process started for ${params[TILES]}"
-    local s3_path="${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys/"
-    readarray -t rs < <(aws s3 ls "$s3_path")
-    log_info "Looking in $s3_path"
-    # After recovery attempt, recount existing tiles
-    local recovered_cnt_head=0
-    local recovered_cnt_tail=0
+    log_info "Iceberg recovery validation started for ${params[SOURCE_KS]}.${params[SOURCE_TBL]} with ${params[TILES]} tiles"
+    local issues_found=0
+    local db_name="${params[SOURCE_KS]}_db"
+    local base_iceberg_path="${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/iceberg"
 
-    if [[ ${#rs[@]} -eq 0 ]]; then
-        log_info "No objects found in $s3_path. Nothing to recover."
-        return 0
-    fi
+    # Step 1: Verify per-tile Iceberg tables exist in the Glue Data Catalog
+    for tile in $(seq 0 $(( ${params[TILES]} - 1 ))); do
+      local tbl_name="${params[SOURCE_TBL]}_tile_${tile}_pk_snapshots"
+      log_info "Verifying Iceberg table: ${db_name}.${tbl_name}"
+      local get_table_output
+      get_table_output=$(aws glue get-table --database-name "$db_name" --name "$tbl_name" --region "${params[AWS_REGION]}" 2>&1)
+      local get_table_rc=$?
 
-    declare -A tail head
-    local word number
+      if [[ $get_table_rc -ne 0 ]]; then
+          log_error "Iceberg table '${db_name}.${tbl_name}' not found in Glue Data Catalog"
+          log_warn "Suggested action: Re-run the Discovery process to create the Iceberg table for tile $tile"
+          ((issues_found++))
+      else
+          log_info "Iceberg table '${db_name}.${tbl_name}' exists"
+      fi
 
-    for str in "${rs[@]}"; do
-        if [[ $str =~ PRE[[:space:]]tile_([0-9]+)\.([^/]+)/ ]]; then
-            number=${BASH_REMATCH[1]}
-            word=${BASH_REMATCH[2]}
-            case "$word" in
-                tail) tail[$number]="$str" ;;
-                head) head[$number]="$str" ;;
-                *) log_warn "Unexpected prefix in S3 object: $word" ;;
-            esac
-        else
-            log_warn "Unexpected format in S3 listing: $str"
-        fi
-    done
+      # Step 2: Validate Iceberg metadata files exist in S3 for this tile
+      local iceberg_path="${base_iceberg_path}/tile_${tile}/"
+      local metadata_listing
+      metadata_listing=$(aws s3 ls "${iceberg_path}metadata/" 2>&1)
+      local metadata_rc=$?
 
-    local cnt_head=${#head[@]}
-    local cnt_tail=${#tail[@]}
-
-   if [[ $cnt_head -eq ${params[TILES]} && $cnt_tail -eq 0 ]] || [[ $cnt_head -eq 0 && $cnt_tail -eq ${params[TILES]} ]]; then
-       log_info "Heads=$cnt_head and tails=$cnt_tail are equal in $s3_path. Nothing to recover."
-       # Let the discovery job to reconcile ledger before starting
-   else
-     if ((cnt_head < params[TILES] || cnt_tail < params[TILES])); then
-          log_warn "Detected inconsistency in $s3_path"
-
-          # First, recover missing tiles that exist in the opposite set
-          for ((i=0; i<params[TILES]; i++)); do
-              # If head exists but tail doesn't, copy from head to tail
-              if [[ -n ${head[$i]} && -z ${tail[$i]} ]]; then
-                  log_warn "Recovering tail from head for tile_$i"
-                  src="${s3_path}tile_${i}.head/"
-                  dst="${s3_path}tile_${i}.tail/"
-                  aws s3 cp "$src" "$dst" --recursive > /dev/null
-                  ((recovered_cnt_tail++))
-              # If tail exists but head doesn't, copy from tail to head
-              elif [[ -z ${head[$i]} && -n ${tail[$i]} ]]; then
-                  log_warn "Recovering head from tail for tile_$i"
-                  src="${s3_path}tile_${i}.tail/"
-                  dst="${s3_path}tile_${i}.head/"
-                  aws s3 cp "$src" "$dst" --recursive > /dev/null
-                  ((recovered_cnt_head++))
-              fi
-          done
-
-          local recovered_head=$(( cnt_head + recovered_cnt_head ))
-          local recovered_tail=$(( cnt_tail + recovered_cnt_tail ))
-
-          if ((recovered_head == params[TILES] && recovered_tail == params[TILES])); then
-              log_info "Recovery completed successfully"
-              return 0
+      if [[ $metadata_rc -ne 0 || -z "$metadata_listing" ]]; then
+          log_error "No Iceberg metadata found at ${iceberg_path}metadata/ for tile $tile"
+          log_warn "Suggested action: Re-run the Discovery process to recreate the table for tile $tile"
+          ((issues_found++))
+      else
+          local metadata_json_count
+          metadata_json_count=$(echo "$metadata_listing" | grep -c '\.metadata\.json' || true)
+          if [[ $metadata_json_count -eq 0 ]]; then
+              log_error "No metadata JSON files found at ${iceberg_path}metadata/ for tile $tile"
+              ((issues_found++))
           else
-              log_warn "Some tiles could not be recovered. Manual intervention required or use --cr flag"
-              return 0
+              log_info "Tile $tile: $metadata_json_count metadata JSON file(s)"
           fi
       fi
+    done
+
+    # Step 3: Summary
+    if [[ $issues_found -eq 0 ]]; then
+        log_info "Recovery validation completed. No issues found for ${params[TILES]} tiles."
+    else
+        log_error "Recovery validation completed with $issues_found issue(s). Review the suggested actions above."
     fi
-    code=$?
-    return $code
+
+    return $issues_found
 }
 
 [[ $# -eq 0 ]] && Usage_Exit

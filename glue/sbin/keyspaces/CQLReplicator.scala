@@ -375,7 +375,12 @@ object GlueApp {
       connection
     }
 
-    def inferKeys(cc: CqlSession, keyType: String, ks: String, tbl: String, columnTs: String): Seq[Map[String, String]] = {
+    def buildWritetimeExpression(columns: Seq[String]): String = columns match {
+      case Seq(single) => s"writetime($single) as ts"
+      case multiple    => multiple.map(c => s"writetime($c)").mkString("greatest(", ", ", ") as ts")
+    }
+
+    def inferKeys(cc: CqlSession, keyType: String, ks: String, tbl: String, columnTs: String, writetimeCols: Seq[String] = Seq.empty): Seq[Map[String, String]] = {
       val meta = cc.getMetadata.getKeyspace(ks).get.getTable(tbl).get
       keyType match {
         case "partitionKeys" =>
@@ -383,7 +388,7 @@ object GlueApp {
         case "primaryKeys" =>
           meta.getPrimaryKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase))
         case "primaryKeysWithTS" =>
-          meta.getPrimaryKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase)) :+ Map(s"writetime($columnTs) as ts" -> "bigint")
+          meta.getPrimaryKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase)) :+ Map(buildWritetimeExpression(writetimeCols) -> "bigint")
         case _ =>
           meta.getPrimaryKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase))
       }
@@ -509,6 +514,10 @@ object GlueApp {
 
     val bcktName = landingZone.replaceAll("s3://", "")
     val columnTs = args("WRITETIME_COLUMN")
+    val writetimeColumns: Seq[String] = columnTs match {
+      case "None" => Seq.empty
+      case csv    => csv.split(",").map(_.trim).toSeq
+    }
     val ttlColumn = args("TTL_COLUMN")
     val jsonMapping = args("JSON_MAPPING")
     val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
@@ -532,7 +541,7 @@ object GlueApp {
 
     val pkFinal = columnTs match {
       case "None" => inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
-      case _ => inferKeys(internalConnectionToSource, "primaryKeysWithTS", srcKeyspaceName, srcTableName, columnTs).flatten.toMap.keys.toSeq
+      case _ => inferKeys(internalConnectionToSource, "primaryKeysWithTS", srcKeyspaceName, srcTableName, columnTs, writetimeColumns).flatten.toMap.keys.toSeq
     }
 
     val pkFinalTarget = inferKeys(internalConnectionToTarget, "primaryKeys", trgKeyspaceName, trgTableName, columnTs).flatten.toMap.keys.toSeq
@@ -541,8 +550,8 @@ object GlueApp {
     val allColumnsFromSource = getAllColumns(internalConnectionToSource, srcKeyspaceName, srcTableName)
     val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
     val counterColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "COUNTER").keys).toList
-    val pkFinalWithoutTs = pkFinal.filterNot(_ == s"writetime($columnTs) as ts")
-    val pks = pkFinal.filterNot(_ == s"writetime($columnTs) as ts")
+    val pkFinalWithoutTs = if (writetimeColumns.nonEmpty) pkFinal.filterNot(_ == buildWritetimeExpression(writetimeColumns)) else pkFinal
+    val pks = if (writetimeColumns.nonEmpty) pkFinal.filterNot(_ == buildWritetimeExpression(writetimeColumns)) else pkFinal
     val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
     val columns = inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap
     val columnsPos = scala.collection.immutable.TreeSet(columns.keys.toArray: _*).zipWithIndex
@@ -592,6 +601,8 @@ object GlueApp {
       }
     }
 
+    val writetimeExpr = buildWritetimeExpression(writetimeColumns)
+
     val selectStmtWithTs = columnTs match {
       case s if s.equals("None")
         || !jsonMapping4s.replication.replicateWithTimestamp =>
@@ -599,11 +610,11 @@ object GlueApp {
       case s if !s.equals("None")
         && jsonMapping4s.replication.replicateWithTimestamp
         && replicatedColumns.equals("*") =>
-        allColumnsFromSource.flatMap(_.keys) :+ s"writetime($columnTs) as ts" mkString ", "
+        allColumnsFromSource.flatMap(_.keys) :+ writetimeExpr mkString ", "
       case s if !s.equals("None")
         && jsonMapping4s.replication.replicateWithTimestamp
         && !replicatedColumns.equals("*") =>
-        s"$replicatedColumns, writetime($columnTs) as ts"
+        s"$replicatedColumns, $writetimeExpr"
     }
 
     def getLedgerQueryBuilder(ks: String, tbl: String, tile: Int, ver: String): String = {

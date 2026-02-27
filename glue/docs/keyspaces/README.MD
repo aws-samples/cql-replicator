@@ -156,6 +156,31 @@ minutes. At peak traffic, it can reach up to 6,300 WCUs per second.
 ```
 ![](../images/incremental-traffic.png "Incremental traffic")
 
+### Track changes across multiple columns
+The `--writetime-column` parameter accepts multiple comma-separated column names. When multiple columns are specified,
+CQLReplicator computes the maximum `WRITETIME()` across all specified columns to detect the most recent mutation for change detection.
+
+Single column (existing behavior):
+```shell
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
+                 --writetime-column col1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --env ver5 --target-type keyspaces
+```
+
+Multiple columns:
+```shell
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
+                 --writetime-column col1,col2 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --env ver5 --target-type keyspaces
+```
+
+When multiple columns are specified, CQLReplicator generates `greatest(writetime(col1), writetime(col2), ...) as ts`
+in the CQL query. Cassandra's `WRITETIME()` returns null for columns that were never explicitly written. The `greatest()`
+function excludes null values and returns the maximum of the non-null writetimes. If all specified columns have null
+writetimes for a row, the result is null.
+
 ### Switch from UNLOGGED BATCH to Single Insert
 By default, CQLReplicator uses UNLOGGED BATCH operations for improved performance and cost efficiency.
 However, when dealing with large partitions, you may want to disable batching and use single inserts instead to avoid throttling issues in Amazon Keyspaces.

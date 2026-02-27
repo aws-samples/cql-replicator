@@ -1110,19 +1110,9 @@ function Resize_Cluster {
   confirm "<=== Do you want to continue? ===> "
   check_sampler_runs resize
   if [ "${params[PROCESS_RUNNING]}" = false ]; then
-    aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
-                    "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy" \
-                    --recursive --region "${params[AWS_REGION]}" >/dev/null
-      # Check if primaryKeysCopy exists if the prefix doesn't exists return error and exit
-    if aws s3 ls "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy/" --region "${params[AWS_REGION]}" > /dev/null; then
-      log_info "The copy has been created"
-    else
-      log_error "No copy found in ${params[S3_LANDING_ZONE]}"
-      exit 1
-    fi
-    log_info "Removing the primary keys and stats"
-    aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
-                  --recursive --region "${params[AWS_REGION]}" >/dev/null
+    # Iceberg-based resize: the Scala recomputeTiles() reads directly from per-tile Iceberg tables
+    # No need to copy/delete primaryKeys Parquet files — Iceberg handles data via the Glue Catalog
+    log_info "Clearing stats before resize"
     aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats" \
                   --recursive --region "${params[AWS_REGION]}" >/dev/null
     rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "G.1X" --number-of-workers $(( ${params[TILES]} + 1 )) --region "${params[AWS_REGION]}" --arguments '{
@@ -1157,9 +1147,6 @@ function Resize_Cluster {
       check_sampler_runs resize
     done
       printf "\r%s    \n" "$output"
-      log_info "Removing copy of the primary keys"
-      aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy" \
-                    --recursive --region "${params[AWS_REGION]}" >/dev/null
   fi
 }
 

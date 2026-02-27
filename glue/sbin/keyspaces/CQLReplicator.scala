@@ -1366,6 +1366,23 @@ object GlueApp {
     }
 
     /**
+     * Drops a per-tile Iceberg table from the Glue Catalog and cleans up S3 data.
+     * Uses Iceberg's built-in DROP TABLE behavior which handles both catalog metadata
+     * and underlying S3 data cleanup.
+     */
+    def dropIcebergTileTable(spark: SparkSession, ksName: String, tblName: String, tile: Int): Unit = {
+      val tableName = icebergTableName(ksName, tblName, tile)
+      Try {
+        spark.sql(s"DROP TABLE IF EXISTS $tableName")
+      } match {
+        case Failure(e) =>
+          logger.warn(s"Failed to drop Iceberg tile table $tableName: ${e.getMessage}")
+        case Success(_) =>
+          logger.info(s"Dropped Iceberg tile table $tableName")
+      }
+    }
+
+    /**
      * Retrieves the previous and current snapshot IDs for a tile.
      * Returns (previousSnapshotId, currentSnapshotId) or None if insufficient history.
      */
@@ -2016,60 +2033,91 @@ object GlueApp {
       currentNumTiles
     }
 
+    def getCurrentIcebergTilesCount(ledgerSession: CqlSession): Int = {
+      val rs = ledgerSession.execute(
+        s"SELECT tile FROM $internalMigrationKeyspace.$internalMigrationTable " +
+          s"WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName' AND ver='curr' ALLOW FILTERING"
+      )
+      rs.all().size()
+    }
+
     def recomputeTiles(): Unit = {
       val ledgerConnection = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
       try {
-        val currentNumTiles = getCurrentTilesCount()
+        // Task 3.1: Use Iceberg-based tile count detection instead of S3 Parquet scan
+        val currentNumTiles = getCurrentIcebergTilesCount(ledgerConnection)
         logger.info(s"new tiles $totalTiles, current tiles $currentNumTiles")
 
         if (currentNumTiles > 0 && currentNumTiles != totalTiles) {
           logger.info(s"Detected a change in tiles from $currentNumTiles to $totalTiles. Recomputing tiles")
 
-          // Read and transform primary keys
-          val primaryKeys = glueContext.getSourceWithFormat(
-              connectionType = "s3",
-              format = "parquet",
-              options = JsonOptions(s"""{"paths": ["$landingZone/$srcKeyspaceName/$srcTableName/primaryKeysCopy"]}""")
-            ).getDynamicFrame()
-            .toDF()
-            .drop("group")
+          // Task 3.1: Read existing primary keys from per-tile Iceberg tables instead of Parquet
+          val tileDataFrames = (0 until currentNumTiles).map { tile =>
+            val tblName = icebergTableName(srcKeyspaceName, srcTableName, tile)
+            sparkSession.read.format("iceberg").load(tblName)
+          }
+          val unionedDf = tileDataFrames.reduce(_ unionByName _)
+          val primaryKeys = unionedDf
+            .drop("tile")
             .distinct()
             .persist(cachingMode)
 
-          // Calculate hash and group
+          val originalCount = primaryKeys.count()
+
+          // Task 3.1: Infer PK columns using inferKeys (same as keysDiscoveryProcess)
+          val pkColumnsForIceberg = inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs)
+            .map(m => { val (name, tpe) = m.head; Map("name" -> name, "type" -> tpe) })
+
+          // Task 3.5: Preserve xxhash64-based grouping logic
           val hashColumns = pkFinalWithoutTs.map(col)
           val transformedDf = primaryKeys
             .withColumn("group", abs(xxhash64(concat(hashColumns: _*))) % totalTiles)
             .repartition(totalTiles, col("group"))
             .persist(cachingMode)
 
-          // Clear existing ledger entries
+          // Task 3.2: Clear existing ledger entries before writing new tile entries (Req 8.1, 8.2)
           ledgerConnection.execute(s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName'")
 
-          // Process tiles in parallel
+          // Task 3.2: Create Iceberg database and ensure all tile tables exist sequentially
+          // (same pattern as keysDiscoveryProcess to avoid Glue Catalog concurrency conflicts)
+          val dbName = s"$icebergCatalog.${srcKeyspaceName}_db"
+          sparkSession.sql(s"CREATE DATABASE IF NOT EXISTS $dbName")
+          for (tile <- 0 until totalTiles) {
+            ensureIcebergTableExists(sparkSession, srcKeyspaceName, srcTableName, tile, pkColumnsForIceberg, landingZone)
+          }
+
+          // Task 3.2: Write tiles via Iceberg + record snapshots; Task 3.5: stats reporting
           val results = (0 until totalTiles).toList.par.map { tile =>
             try {
-              // Process each tile
               val tileDf = transformedDf
                 .where(col("group") === tile)
+                .drop("group")
                 .repartition(defaultPartitions, pks.map(col): _*)
 
-              // Cache the count before writing
               val tileCount = tileDf.count()
 
-              // Write tile data
-              writeWithSizeControl(tileDf, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
+              // Write to per-tile Iceberg table
+              val icebergTblName = icebergTableName(srcKeyspaceName, srcTableName, tile)
+              writeIcebergTileSnapshot(sparkSession, tileDf, icebergTblName)
 
-              // Update ledger
-              ledgerConnection.execute(
-                s"""INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(
-                   |ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load
-                   |) VALUES(
-                   |'$srcKeyspaceName','$srcTableName',$tile,'SUCCESS',toTimestamp(now()),
-                   |'tile_$tile.head','head','SUCCESS',''
-                   |)""".stripMargin)
+              // Record snapshot in ledger with both curr and prev entries
+              // prev is marked as load_status='SUCCESS' so replication sees a valid baseline
+              // and does a delta comparison (finding zero changes) instead of a full re-replicate
+              val snapshotIdOpt = currentIcebergSnapshotId(sparkSession, icebergTblName)
+              snapshotIdOpt match {
+                case Some(snapshotId) =>
+                  ledgerConnection.execute(
+                    s"BEGIN UNLOGGED BATCH " +
+                      s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile,'SUCCESS',toTimestamp(now()),'${snapshotId.toString}','prev','SUCCESS',toTimestamp(now()));" +
+                      s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile,'SUCCESS',toTimestamp(now()),'${snapshotId.toString}','curr','','');" +
+                      s"APPLY BATCH;"
+                  )
+                  logger.info(s"Recorded snapshot $snapshotId for tile $tile (curr + prev)")
+                case None =>
+                  logger.warn(s"Could not retrieve snapshot ID after writing tile $tile")
+              }
 
-              // Update stats
+              // Task 3.5: Update stats
               val content = DiscoveryStats(tile, tileCount, org.joda.time.LocalDateTime.now().toString)
               putStats(
                 landingZone.replaceAll("s3://", ""),
@@ -2085,10 +2133,9 @@ object GlueApp {
             }
           }.seq
 
-          // Validate results
+          // Task 3.4: Validate results — row count integrity check
           val (successes, failures) = results.partition(_.isRight)
           val totalProcessed = successes.collect { case Right((_, count)) => count }.sum
-          val originalCount = primaryKeys.count()
 
           if (failures.nonEmpty) {
             logger.error(s"Failed to process ${failures.size} tiles")
@@ -2100,13 +2147,27 @@ object GlueApp {
             throw new RuntimeException("Tile processing failed")
           }
 
-          // Verify data integrity
           if (totalProcessed != originalCount) {
             logger.error(s"Data integrity check failed: Original count=$originalCount, Processed count=$totalProcessed")
             throw new RuntimeException("Data integrity check failed")
           }
 
-          // Clean up
+          // Task 3.3: Clean up orphaned Iceberg tiles when tile count decreases
+          if (totalTiles < currentNumTiles) {
+            for (tile <- totalTiles until currentNumTiles) {
+              dropIcebergTileTable(sparkSession, srcKeyspaceName, srcTableName, tile)
+              Try {
+                ledgerConnection.execute(
+                  s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName' AND tile=$tile"
+                )
+              } match {
+                case Failure(e) => logger.warn(s"Failed to delete ledger entries for orphaned tile $tile: ${e.getMessage}")
+                case Success(_) => logger.info(s"Deleted ledger entries for orphaned tile $tile")
+              }
+            }
+          }
+
+          // Clean up cached DataFrames
           transformedDf.unpersist()
           primaryKeys.unpersist()
 

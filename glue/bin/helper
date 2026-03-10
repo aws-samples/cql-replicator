@@ -79,6 +79,7 @@ Get_TCO() {
 function Recovery {
     log_info "Iceberg recovery validation started for ${params[SOURCE_KS]}.${params[SOURCE_TBL]} with ${params[TILES]} tiles"
     local issues_found=0
+    local tiles_missing_metadata=0
     local db_name="${params[SOURCE_KS]}_db"
     local base_iceberg_path="${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/iceberg"
 
@@ -91,9 +92,8 @@ function Recovery {
       local get_table_rc=$?
 
       if [[ $get_table_rc -ne 0 ]]; then
-          log_error "Iceberg table '${db_name}.${tbl_name}' not found in Glue Data Catalog"
-          log_warn "Suggested action: Re-run the Discovery process to create the Iceberg table for tile $tile"
-          ((issues_found++))
+          log_info "Iceberg table '${db_name}.${tbl_name}' not found in Glue Data Catalog (will be created by Discovery)"
+          ((tiles_missing_metadata++))
       else
           log_info "Iceberg table '${db_name}.${tbl_name}' exists"
       fi
@@ -105,15 +105,14 @@ function Recovery {
       local metadata_rc=$?
 
       if [[ $metadata_rc -ne 0 || -z "$metadata_listing" ]]; then
-          log_error "No Iceberg metadata found at ${iceberg_path}metadata/ for tile $tile"
-          log_warn "Suggested action: Re-run the Discovery process to recreate the table for tile $tile"
-          ((issues_found++))
+          log_info "No Iceberg metadata found at ${iceberg_path}metadata/ for tile $tile"
+          ((tiles_missing_metadata++))
       else
           local metadata_json_count
           metadata_json_count=$(echo "$metadata_listing" | grep -c '\.metadata\.json' || true)
           if [[ $metadata_json_count -eq 0 ]]; then
-              log_error "No metadata JSON files found at ${iceberg_path}metadata/ for tile $tile"
-              ((issues_found++))
+              log_info "No metadata JSON files found at ${iceberg_path}metadata/ for tile $tile"
+              ((tiles_missing_metadata++))
           else
               log_info "Tile $tile: $metadata_json_count metadata JSON file(s)"
           fi
@@ -121,10 +120,17 @@ function Recovery {
     done
 
     # Step 3: Summary
-    if [[ $issues_found -eq 0 ]]; then
+    # If ALL tiles are missing metadata, this is a first load — not an error
+    local total_checks=$(( ${params[TILES]} * 2 ))
+    if [[ $tiles_missing_metadata -eq $total_checks ]]; then
+        log_info "No existing Iceberg data found for any tile. This is a first load — Discovery will create everything."
+    elif [[ $tiles_missing_metadata -eq 0 ]]; then
         log_info "Recovery validation completed. No issues found for ${params[TILES]} tiles."
     else
-        log_error "Recovery validation completed with $issues_found issue(s). Review the suggested actions above."
+        # Partial metadata — some tiles have data, some don't. This is a real inconsistency.
+        issues_found=$tiles_missing_metadata
+        log_error "Recovery validation completed with $issues_found issue(s). Some tiles have data while others don't."
+        log_warn "Suggested action: Re-run with --cr to clean up and start fresh, or re-run Discovery to recreate missing tiles."
     fi
 
     return $issues_found

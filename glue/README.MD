@@ -41,8 +41,7 @@ Direct migration to Amazon Keyspaces, offering a fully managed, serverless Cassa
 ## Complementary Solutions 
 Additional connectors for specific use cases including data lakes (S3), search capabilities (OpenSearch), and in-memory performance (MemoryDB):
 - [Apache Cassandra to Amazon S3](docs/s3/README.MD)
-- [Apache Cassandra to Amazon Opensearch](docs/oss/README.MD)
-- [Apache Cassandra to Amazon MemoryDB](docs/memorydb/README.MD)
+- [Apache Cassandra to Amazon DynamoDB](docs/dynamodb/README.MD)(experimental)
 
 ## License
 This tool licensed under the Apache-2 License. See the LICENSE file.

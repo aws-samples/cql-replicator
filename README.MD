@@ -53,52 +53,6 @@ optimal performance.
 Follow the instructions provided in the [CQLReplicator documentation](glue/README.MD) to configure, initialize, and run
 the migration tool.
 
-### Near zero downtime migration to Amazon MemoryDB
-
-![](usecase-cass-to-memorydb.png "Migration to Amazon MemoryDB")
-
-The objective of this use-case is to support customers in seamlessly migrating from self-managed Cassandra clusters to
-Amazon MemoryDB.
-This migration approach ensures zero downtime, no code compilation, predictable incremental traffic, and migration
-costs.
-
-#### Step 1: Identify Migration Workload
-
-Identify the keyspaces and tables in your Cassandra cluster that you want to migrate. You can use the `DESCRIBE` command
-in `CQLSH` to list all keyspaces and tables.
-
-#### Step 2: Check with target structure on MemoryDB
-
-CQLReplicator performs two keys transformations:
-**Primary Key Conversion**: CQLReplicator converts the primary key from Cassandra into a string format for MemoryDB,
-e.g.
-a primary key composed of multiple partition and clustering keys would be transformed into a single `key1#key2#key3` in
-MemoryDB.
-**Regular columns as JSON**: Regular columns from Cassandra are stored as JSON text in MemoryDB. This allows for
-flexible and efficient
-data access in MemoryDB, as JSON is widely used data interchange format.
-
-#### Step 3: Check Cassandra Cluster Capacity
-
-Ensure that you have enough capacity/resources (CPUs, memory, network throughput, and storage) on the Cassandra cluster
-to handle
-migration workload.
-
-#### Step 4: Estimate Migration Costs
-
-Estimate the number of rows per table in your Cassandra cluster. This will help you estimate the migration costs for
-AWS Glue (which be used for CQLReplicator) and traffic against Amazon MemoryDB (which will store the migrated data).
-
-#### Step 5: Prepare Target Environment
-
-[Deploy Amazon MemoryDB cluster](https://docs.aws.amazon.com/memorydb/latest/devguide/set-up.html) that correspond to
-your Cassandra tables.
-
-#### Step 6: Run CQLReplicator
-
-Follow the instructions provided in the [CQLReplicator documentation](glue/README.MD) to configure, initialize, and run
-the migration tool.
-
 ### Use-case for materialized views with Amazon Keyspaces
 
 Materialized view (MV) is a powerful concept to manage and access your data. MV allows you to create a new table
@@ -157,48 +111,6 @@ analytics and ML purposes:
 
 By leveraging these services, you can extract valuable insights from your data, build predictive models, and make
 data-driven decisions.
-
-### Use-case for Search with Amazon Keyspaces (Preview)
-
-CQLReplicator is a tool to replicate payloads (INSERTS, UPDATES) from Amazon Keyspaces to Amazon OpenSearch Service.
-
-![](usecase-keyspaces-search.png "Amazon OpenSearch Service")
-
-#### Step 1: Identify Migration Workload
-
-Identify the keyspaces and tables in your source that you want to replicate to Amazon OpenSearch Service.
-You can use the `DESCRIBE` command in `CQLSH` to list all keyspaces and tables.
-
-#### Step 2: Check target index structure on Amazon OpenSearch Service
-
-Create a search index `target_keyspace_name-target_table_name` Amazon OpenSearch Service (optional). if the search index
-doesn't exist
-CQLReplicator will create a simple schema that maps all your columns to search fields. All fields will be `text`.
-
-#### Step 3: Check Amazon Keyspaces table Capacity
-
-Ensure that you have enough RCUs (read capacity units) on the Keyspaces table to handle replication traffic.
-
-#### Step 4: Estimate Replication Costs
-
-Estimate the number of rows in your source table. This will help you estimate the replication costs for
-AWS Glue (which be used for CQLReplicator) and traffic against Amazon OpenSearch service.
-
-#### Step 5: Prepare Target Environment
-
-[Deploy Amazon OpenSearch Service](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/gsg.html) that
-correspond to
-your Amazon Keyspaces tables.
-
-#### Step 6: Run CQLReplicator
-
-Follow the instructions provided in the [CQLReplicator documentation](glue/README.MD) to configure, initialize, and run
-the migration tool.
-
-#### Step 7: Validate the result
-
-if you want quickly validate the replicated workload with SQL
-use [opensearchsql](https://github.com/opensearch-project/sql)
 
 ### Use-case for replicating Amazon Keyspaces table between AWS accounts
 

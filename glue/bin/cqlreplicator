@@ -549,12 +549,7 @@ validate_iam_role_permissions() {
       check_permissions "cassandra" "${keyspaces_actions[@]}"
     fi
 
-    if [ "${params[TARGET_TYPE]}" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == false ]; then
-      check_permissions "dynamodb" "${dynamodb_actions[@]}"
-      check_permissions "cassandra" "${keyspaces_actions[@]}"
-    fi
-
-    if [ "${params[TARGET_TYPE]}" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == true ]; then
+    if [ "${params[TARGET_TYPE]}" = "dynamodb" ]; then
       check_permissions "dynamodb" "${dynamodb_actions[@]}"
     fi
 
@@ -637,7 +632,7 @@ function Clean_Up {
     log_warn "Glue Data Catalog databases were not cleaned up. Use --src-keyspace-list 'ks1,ks2' to specify which Iceberg databases to delete."
   fi
 
-  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false && ${params[TARGET_TYPE]} != "dynamodb" ]]; then
     aws keyspaces delete-keyspace --keyspace-name "$INT_KS_NAME" --region "${params[AWS_REGION]}"
   fi
 }
@@ -766,8 +761,11 @@ function Init {
     uploader_helper "OpenSearchConnector.conf" 0 1 5
   fi
 
-  # Should be used at least for the ledger
-  uploader_helper "KeyspacesConnector.conf" 0 1 5
+  # KeyspacesConnector.conf is needed for ledger access (keyspaces, memorydb, opensearch targets)
+  # DynamoDB target uses a DynamoDB-based ledger — no Keyspaces connection needed
+  if [[ ${params[TARGET_TYPE]} != "dynamodb" ]]; then
+    uploader_helper "KeyspacesConnector.conf" 0 1 5
+  fi
 
   # Source C*/K*
   uploader_helper "CassandraConnector.conf" 1 2 5
@@ -943,12 +941,12 @@ function Init {
             --default-arguments "$default_args" > /dev/null
     fi
 
-  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == true ]]; then
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == true || ${params[TARGET_TYPE]} == "dynamodb" ]]; then
     progress 4 5 "Skipping CQLReplicator's internal keyspace          "
     progress 5 5 "Skipping CQLReplicator's internal table             "
   fi
 
-  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false && ${params[TARGET_TYPE]} != "dynamodb" ]]; then
     progress 4 5 "Creating CQLReplicator's internal resources         "
     # Create a keyspace - migration
     aws keyspaces create-keyspace --keyspace-name "$INT_KS_NAME" --region "${params[AWS_REGION]}" > /dev/null
@@ -1068,6 +1066,16 @@ function Start_Discovery {
     confirm "<=== Do you want to continue? ===> "
     log_info "Deleting objects in ${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}..."
     aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}" --recursive --region "${params[AWS_REGION]}" > /dev/null 2>&1
+
+    # Clean up old Parquet snapshots from the S3 target path if json-mapping specifies a custom bucket/prefix
+    if [[ -n "$JSON_MAPPING" && "$JSON_MAPPING" != "None" ]]; then
+      PARQUET_BUCKET=$(echo "$JSON_MAPPING" | jq -r '.s3.bucket // empty')
+      PARQUET_PREFIX=$(echo "$JSON_MAPPING" | jq -r '.s3.prefix // empty')
+      if [[ -n "$PARQUET_BUCKET" && -n "$PARQUET_PREFIX" ]]; then
+        log_info "Deleting old Parquet snapshots in s3://${PARQUET_BUCKET}/${PARQUET_PREFIX}/${params[TARGET_KS]}/${params[TARGET_TBL]}..."
+        aws s3 rm "s3://${PARQUET_BUCKET}/${PARQUET_PREFIX}/${params[TARGET_KS]}/${params[TARGET_TBL]}" --recursive --region "${params[AWS_REGION]}" > /dev/null 2>&1
+      fi
+    fi
   fi
   if check_discovery_runs "true"; then
     Delete_Stop_Event_D

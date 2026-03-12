@@ -2026,7 +2026,7 @@ object GlueApp {
               // Single partition key, single clustering column
               case (1, 1) =>
                 fl.executeSingleDelete(createDeleteRequest(
-                  toPkAttribute(effectiveAttributes(ddbPartitionKey)),
+                  toPkAttribute(effectiveAttributes(partitionKeys.head)),
                   Some(toSkAttribute(effectiveAttributes(clusteringColumns.head)))
                 ))
 
@@ -2042,7 +2042,7 @@ object GlueApp {
               case (1, n) if n > 1 =>
                 val sortKeyValue = toKeyAttribute(combineKeys(clusteringColumns), jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyType)
                 fl.executeSingleDelete(createDeleteRequest(
-                  toPkAttribute(effectiveAttributes(ddbPartitionKey)),
+                  toPkAttribute(effectiveAttributes(partitionKeys.head)),
                   Some(sortKeyValue)
                 ))
 

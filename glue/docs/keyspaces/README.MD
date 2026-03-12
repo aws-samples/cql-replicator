@@ -73,6 +73,33 @@ Note: If you run the CQLReplicator on EC2 you should attach the following inline
 - `--main-script-landing` - use this flag if you want to store the main script in the `s3://your-landing-zone/script/CQLReplicator.scala`
 - `--env` - use to create multiple environments, e.g. dev/test/prod
 
+### VPC Endpoint Requirements
+
+CQLReplicator uses Apache Iceberg with the AWS Glue Data Catalog for snapshot management. The Glue job runs inside a VPC, so the following VPC endpoints are required for Iceberg catalog operations:
+
+| Endpoint | Type | Purpose |
+|----------|------|---------|
+| `com.amazonaws.{region}.glue` | Interface | Iceberg catalog operations (CREATE TABLE, getTable, etc.) |
+| `com.amazonaws.{region}.s3` | Gateway | Iceberg data/metadata read/write in S3 |
+
+The Glue interface endpoint must have:
+- `PrivateDnsEnabled` = `true`
+- The VPC must have `enableDnsSupport` = `true` and `enableDnsHostnames` = `true`
+- The endpoint's security group must allow inbound TCP port 443 from the Glue job's security group
+
+Verification:
+```shell
+# Check Glue endpoint
+aws ec2 describe-vpc-endpoints \
+  --filters "Name=vpc-id,Values={vpc-id}" "Name=service-name,Values=com.amazonaws.{region}.glue" \
+  --query 'VpcEndpoints[*].{ID:VpcEndpointId,Subnets:SubnetIds,State:State,PrivateDns:PrivateDnsEnabled}'
+
+# Check S3 endpoint
+aws ec2 describe-vpc-endpoints \
+  --filters "Name=vpc-id,Values={vpc-id}" "Name=service-name,Values=com.amazonaws.{region}.s3" \
+  --query 'VpcEndpoints[*].{ID:VpcEndpointId,State:State}'
+```
+
 ## Start migration process
 To operate CQLReplicator on AWS Glue, you need to use `--cmd run` command, followed by a series of parameters. The
 precise configuration of these is primarily determined by your unique migration requirements. For instance, these
@@ -128,6 +155,31 @@ minutes. At peak traffic, it can reach up to 6,300 WCUs per second.
                  --env ver5 --inc-traffic --target-type keyspaces
 ```
 ![](../images/incremental-traffic.png "Incremental traffic")
+
+### Track changes across multiple columns
+The `--writetime-column` parameter accepts multiple comma-separated column names. When multiple columns are specified,
+CQLReplicator computes the maximum `WRITETIME()` across all specified columns to detect the most recent mutation for change detection.
+
+Single column (existing behavior):
+```shell
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
+                 --writetime-column col1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --env ver5 --target-type keyspaces
+```
+
+Multiple columns:
+```shell
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
+                 --writetime-column col1,col2 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --env ver5 --target-type keyspaces
+```
+
+When multiple columns are specified, CQLReplicator generates `greatest(writetime(col1), writetime(col2), ...) as ts`
+in the CQL query. Cassandra's `WRITETIME()` returns null for columns that were never explicitly written. The `greatest()`
+function excludes null values and returns the maximum of the non-null writetimes. If all specified columns have null
+writetimes for a row, the result is null.
 
 ### Switch from UNLOGGED BATCH to Single Insert
 By default, CQLReplicator uses UNLOGGED BATCH operations for improved performance and cost efficiency.
@@ -334,6 +386,20 @@ cqlreplicator --cmd get-failed-jobs --landing-zone s3://<PROVIDED_BUCKET_NAME> \
               --region us-east-1 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
               --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator
 ```
+
+## Configure log level
+By default, CQLReplicator sets the Spark log level to `ERROR` to reduce noise in CloudWatch logs. You can change this using the `--logging-level` flag:
+
+```shell
+   cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --env ver5 --target-type keyspaces --logging-level WARN
+```
+
+Available log levels: `ALL`, `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` (default), `FATAL`, `OFF`.
+
+This controls Spark's internal logging (DAGScheduler, BlockManager, TaskSetManager, etc.). CQLReplicator's own messages via GlueLogger are always visible regardless of this setting.
 
 ## AWS Glue Monitoring
 You can profile and monitor CQLReplicator operations using AWS Glue job profiler. It collects and processes raw data
@@ -596,7 +662,7 @@ Enable the custom VARINT reader by setting `useCustomVarintReader` to `true` in 
                     }
                   }
                 }'
-``
+```
 
 ### Configuration Options
 The `readConfiguration` section supports the following parameters:
@@ -748,6 +814,15 @@ The following command will delete the Glue job, connector, the S3 bucket, and th
 ```shell
    cqlreplicator --cmd cleanup --landing-zone s3://<PROVIDED_BUCKET_NAME> --region "us-east-1"
 ```
+
+To also clean up Iceberg databases and tables from the Glue Data Catalog, provide the source keyspaces used during migration:
+
+```shell
+   cqlreplicator --cmd cleanup --landing-zone s3://<PROVIDED_BUCKET_NAME> --region "us-east-1" \
+                 --src-keyspace-list "ks_source_1,ks_source_2"
+```
+
+Each keyspace maps to a Glue database named `{keyspace}_db`. Without `--src-keyspace-list`, the Glue Data Catalog databases are not deleted and a warning is displayed.
 
 ## License
 This tool licensed under the Apache-2 License. See the LICENSE file.

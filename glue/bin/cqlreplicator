@@ -39,12 +39,15 @@ declare -A params=(
     [DEFAULT_WORKLOAD_TYPE]=continuous
     [GLUE_TYPE]=gluestreaming
     [WCU_TRAFFIC]=0
-    [DEFAULT_ROWS_PER_SECOND]=2000
+    [DEFAULT_ROWS_PER_SECOND]=1000
     [PROCESS_RUNNING]=false
     [TIME_SCHEDULE]=""
     [DEFAULT_SOURCE]=cassandra
     [SCB]="None"
     [TOKEN]="None"
+    [ICEBERG_CATALOG]="cql_replicator_catalog"
+    [LOGGING]="ERROR"
+    [SOURCE_KS_LIST]=""
 )
 
 # Dynamic variables
@@ -458,6 +461,8 @@ function Usage_Exit {
   echo "  --source-type, --cst             Default source type is cassandra, available option is astra"
   echo "  --token                          Astra token, for example, it starts from AstraCS:..."
   echo "  --scb                            Astra secure connect bundle is a zip file containing security credentials and certificates required to establish connection to a managed cluster"
+  echo "  --logging-level LEVEL            Set Spark log level: ERROR (default), WARN, INFO, DEBUG, ALL"
+  echo "  --src-keyspace-list LIST         Comma-separated list of source keyspaces for Glue Catalog cleanup (used with cleanup command)"
   echo
   echo "Commands:"
   echo "  init        Deploy CQLReplicator Glue job and download jars"
@@ -503,6 +508,7 @@ validate_iam_role_permissions() {
     local keyspaces_actions=("cassandra:Insert" "cassandra:Update" "cassandra:Select" "cassandra:Delete")
     local dynamodb_actions=("dynamodb:PutItem" "dynamodb:UpdateItem" "dynamodb:BatchWriteItem" "dynamodb:DeleteItem")
     local s3_actions=("s3:ListBucket" "s3:PutObject" "s3:DeleteObject" "s3:GetObject")
+    local glue_catalog_actions=("glue:CreateDatabase" "glue:GetDatabase" "glue:CreateTable" "glue:GetTable" "glue:UpdateTable" "glue:DeleteTable" "glue:GetTables")
 
     check_permissions() {
         local service="$1"
@@ -518,6 +524,9 @@ validate_iam_role_permissions() {
         if [[ $service == "s3" ]]; then
           bkt_name=$(echo "${params[S3_LANDING_ZONE]}" | sed 's|s3://||')
           resource_arn="arn:aws:$service:$region:$account:$bkt_name"
+        fi
+        if [[ $service == "glue" ]]; then
+          resource_arn="arn:aws:$service:$region:$account:catalog"
         fi
 
         for action in "${actions[@]}"; do
@@ -540,16 +549,12 @@ validate_iam_role_permissions() {
       check_permissions "cassandra" "${keyspaces_actions[@]}"
     fi
 
-    if [ "${params[TARGET_TYPE]}" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == false ]; then
-      check_permissions "dynamodb" "${dynamodb_actions[@]}"
-      check_permissions "cassandra" "${keyspaces_actions[@]}"
-    fi
-
-    if [ "${params[TARGET_TYPE]}" = "dynamodb" ] && [ "${params[SKIP_KEYSPACES_LEDGER]}" == true ]; then
+    if [ "${params[TARGET_TYPE]}" = "dynamodb" ]; then
       check_permissions "dynamodb" "${dynamodb_actions[@]}"
     fi
 
     check_permissions "s3" "${s3_actions[@]}"
+    check_permissions "glue" "${glue_catalog_actions[@]}"
     check_glue_service_role
 }
 
@@ -607,9 +612,57 @@ function Clean_Up {
   aws glue delete-connection --connection-name "cql-replicator-memorydb-integration${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null 2>&1
   aws glue delete-connection --connection-name "cql-replicator-opensearch-integration${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null 2>&1
   aws glue delete-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}"
-  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
+
+  # Clean up Iceberg databases/tables from Glue Data Catalog
+  if [[ -n "${params[SOURCE_KS_LIST]}" ]]; then
+    IFS=',' read -ra ks_array <<< "${params[SOURCE_KS_LIST]}"
+    for ks_name in "${ks_array[@]}"; do
+      ks_name=$(echo "$ks_name" | tr -d ' ')
+      local db_name="${ks_name}_db"
+      local tables
+      tables=$(aws glue get-tables --database-name "$db_name" --region "${params[AWS_REGION]}" --query 'TableList[].Name' --output text 2>/dev/null) || true
+      for tbl_name in $tables; do
+        aws glue delete-table --database-name "$db_name" --name "$tbl_name" --region "${params[AWS_REGION]}" > /dev/null 2>&1
+        log_info "Deleted Glue table $db_name.$tbl_name"
+      done
+      aws glue delete-database --name "$db_name" --region "${params[AWS_REGION]}" > /dev/null 2>&1
+      log_info "Deleted Glue database $db_name"
+    done
+  else
+    log_warn "Glue Data Catalog databases were not cleaned up. Use --src-keyspace-list 'ks1,ks2' to specify which Iceberg databases to delete."
+  fi
+
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false && ${params[TARGET_TYPE]} != "dynamodb" ]]; then
     aws keyspaces delete-keyspace --keyspace-name "$INT_KS_NAME" --region "${params[AWS_REGION]}"
   fi
+}
+
+validate_security_groups_quoting() {
+    local sg_value="$1"
+    # Strip outer single quotes if present, then check each SG id
+    local stripped
+    stripped=$(echo "$sg_value" | sed "s/^'//;s/'$//")
+
+    # Split by comma and validate each segment
+    IFS=',' read -ra sg_parts <<< "$stripped"
+    for part in "${sg_parts[@]}"; do
+        local cleaned
+        cleaned=$(echo "$part" | tr -d "'\" " )
+        if [[ -n "$cleaned" && ! "$cleaned" =~ ^sg-[a-f0-9]+$ ]]; then
+            log_error "Invalid security group format: '$cleaned'"
+            log_error "Expected format: --sg '\"sg-abc123\",\"sg-def456\"'"
+            exit 1
+        fi
+    done
+
+    # Check that double quotes are present around each SG id for the JSON template
+    if [[ "$stripped" != *'"'* ]]; then
+        log_error "Security groups must be wrapped in double quotes for the Glue connection JSON."
+        log_error "You provided: --sg $sg_value"
+        log_error "Expected:     --sg '\"sg-abc123\",\"sg-def456\"'"
+        log_error "Example:      --sg '\"$stripped\"'"
+        exit 1
+    fi
 }
 
 function Init {
@@ -617,6 +670,7 @@ function Init {
       check_input "${params[AZ]}" "Error: availability zone is empty, must be provided"
       check_input "${params[SUBNET]}" "Error: subnet is empty, must be provided"
       check_input "${params[SG]}" "Error: sg is empty, must be provided"
+      validate_security_groups_quoting "${params[SG]}"
     else
       log_info "Skipping glue connector creation"
     fi
@@ -650,12 +704,12 @@ function Init {
     fi
 
   # Uploading the jars
-  ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.4.1/spark-cassandra-connector-assembly_2.12-3.4.1.jar"
+  ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.5.1/spark-cassandra-connector-assembly_2.12-3.5.1.jar"
   "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
   ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar" "/org/opensearch/driver/opensearch-sql-jdbc/1.4.0.1/opensearch-sql-jdbc-1.4.0.1.jar")
-  S3_PATH_BASE=("${params[S3_LANDING_ZONE]}/artifacts/spark-cassandra-connector-assembly_2.12-3.4.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  S3_PATH_BASE=("${params[S3_LANDING_ZONE]}/artifacts/spark-cassandra-connector-assembly_2.12-3.5.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   S3_PATH_KEYSPACES=("${params[S3_LANDING_ZONE]}/artifacts/vavr-0.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-retry-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-core-1.7.1.jar")
   S3_PATH_MEMORYDB=("${params[S3_LANDING_ZONE]}/artifacts/jedis-4.4.6.jar")
   S3_PATH_OSS=("${params[S3_LANDING_ZONE]}/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
@@ -707,8 +761,11 @@ function Init {
     uploader_helper "OpenSearchConnector.conf" 0 1 5
   fi
 
-  # Should be used at least for the ledger
-  uploader_helper "KeyspacesConnector.conf" 0 1 5
+  # KeyspacesConnector.conf is needed for ledger access (keyspaces, memorydb, opensearch targets)
+  # DynamoDB target uses a DynamoDB-based ledger — no Keyspaces connection needed
+  if [[ ${params[TARGET_TYPE]} != "dynamodb" ]]; then
+    uploader_helper "KeyspacesConnector.conf" 0 1 5
+  fi
 
   # Source C*/K*
   uploader_helper "CassandraConnector.conf" 1 2 5
@@ -747,7 +804,7 @@ function Init {
   if [[ "${params[GLUE_MONITORING]}" == true ]]; then
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
   fi
-  local conf_string="spark.files=${params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf${astra_path_scb} --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=200 --conf spark.default.parallelism=200 --conf spark.locality.wait=0${astra_spark_creds}"
+  local conf_string="spark.files=${params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf${astra_path_scb} --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions,org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.${params[ICEBERG_CATALOG]}=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.${params[ICEBERG_CATALOG]}.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.${params[ICEBERG_CATALOG]}.warehouse=${params[S3_LANDING_ZONE]} --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=100 --conf spark.default.parallelism=100 --conf spark.locality.wait=0${astra_spark_creds}"
   
   if [[ -n "${astra_path_scb:1}" ]]; then
     local default_args=$(jq -n \
@@ -756,12 +813,14 @@ function Init {
       --arg conf "$conf_string" \
       --arg extra_files "${astra_path_scb:1}" \
       --arg class "GlueApp" \
+      --arg datalake_formats "iceberg" \
       '{
         "--job-language": $job_lang,
         "--extra-jars": $extra_jars,
         "--conf": $conf,
         "--extra-files": $extra_files,
-        "--class": $class
+        "--class": $class,
+        "--datalake-formats": $datalake_formats
       }')
   else
     local default_args=$(jq -n \
@@ -769,16 +828,40 @@ function Init {
       --arg extra_jars "$S3_PATH_LIBS" \
       --arg conf "$conf_string" \
       --arg class "GlueApp" \
+      --arg datalake_formats "iceberg" \
       '{
         "--job-language": $job_lang,
         "--extra-jars": $extra_jars,
         "--conf": $conf,
-        "--class": $class
+        "--class": $class,
+        "--datalake-formats": $datalake_formats
       }')
   fi
 
   if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
       progress 3 5 "Creating Glue artifacts                             "
+
+      # Check if Glue job already exists before creating resources
+      if aws glue get-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null 2>&1; then
+        log_warn "Glue job '${params[JOB_NAME]}${params[DEFAULT_ENV]}' already exists."
+        read -rp "Do you want to recreate the job and connection? (y/n): " user_choice
+        if [[ "$user_choice" == "y" || "$user_choice" == "Y" ]]; then
+          local existing_conn
+          existing_conn=$(aws glue get-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" --query 'Job.Connections.Connections[0]' --output text 2>/dev/null)
+          log_info "Deleting existing Glue job '${params[JOB_NAME]}${params[DEFAULT_ENV]}'..."
+          aws glue delete-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null
+          if [[ -n "$existing_conn" && "$existing_conn" != "None" ]]; then
+            log_info "Deleting existing Glue connection '$existing_conn'..."
+            aws glue delete-connection --connection-name "$existing_conn" --region "${params[AWS_REGION]}" > /dev/null 2>&1
+          fi
+        else
+          log_info "Skipping Glue job and connection creation. Using existing resources."
+          # Retrieve existing connection name for downstream use
+          glue_conn_name=$(aws glue get-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" --query 'Job.Connections.Connections[0]' --output text 2>/dev/null)
+          return 0
+        fi
+      fi
+
       glue_conn_name=$(echo cql-replicator-"$(uuidgen)" | tr ' [:upper:]' ' [:lower:]')
       aws glue create-connection --connection-input '{
          "Name":"'$glue_conn_name${params[DEFAULT_ENV]}'",
@@ -817,7 +900,7 @@ function Init {
            --name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
            --role "${params[GLUE_IAM_ROLE]}" \
            --description "${params[DESCRIPTION]} for ${params[TARGET_TYPE]}" \
-           --glue-version "4.0" \
+           --glue-version "5.1" \
            --number-of-workers 2 \
            --worker-type "${params[WORKER_TYPE]}" \
            --connections "Connections=$glue_conn_name${params[DEFAULT_ENV]}" \
@@ -830,11 +913,25 @@ function Init {
 
   if [[ ${params[SKIP_GLUE_CONNECTOR]} == true ]]; then
         progress 3 5 "Creating Glue artifacts                             "
+
+        # Check if Glue job already exists before creating
+        if aws glue get-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null 2>&1; then
+          log_warn "Glue job '${params[JOB_NAME]}${params[DEFAULT_ENV]}' already exists."
+          read -rp "Do you want to recreate the job? (y/n): " user_choice
+          if [[ "$user_choice" == "y" || "$user_choice" == "Y" ]]; then
+            log_info "Deleting existing Glue job '${params[JOB_NAME]}${params[DEFAULT_ENV]}'..."
+            aws glue delete-job --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --region "${params[AWS_REGION]}" > /dev/null
+          else
+            log_info "Skipping Glue job creation. Using existing job."
+            return 0
+          fi
+        fi
+
         aws glue create-job \
             --name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
             --role "${params[GLUE_IAM_ROLE]}" \
             --description "${params[DESCRIPTION]} -> ${params[TARGET_TYPE]}" \
-            --glue-version "4.0" \
+            --glue-version "5.0" \
             --number-of-workers 2 \
             --worker-type "${params[WORKER_TYPE]}" \
             --command "Name=${params[GLUE_TYPE]},ScriptLocation=$glue_bucket_artifacts/scripts/${params[JOB_NAME]}${params[DEFAULT_ENV]}.scala" \
@@ -844,12 +941,12 @@ function Init {
             --default-arguments "$default_args" > /dev/null
     fi
 
-  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == true ]]; then
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == true || ${params[TARGET_TYPE]} == "dynamodb" ]]; then
     progress 4 5 "Skipping CQLReplicator's internal keyspace          "
     progress 5 5 "Skipping CQLReplicator's internal table             "
   fi
 
-  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false ]]; then
+  if [[ ${params[SKIP_KEYSPACES_LEDGER]} == false && ${params[TARGET_TYPE]} != "dynamodb" ]]; then
     progress 4 5 "Creating CQLReplicator's internal resources         "
     # Create a keyspace - migration
     aws keyspaces create-keyspace --keyspace-name "$INT_KS_NAME" --region "${params[AWS_REGION]}" > /dev/null
@@ -908,7 +1005,9 @@ function Start_Sampler {
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
           "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
           "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
-          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
+          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'",
+          "--ICEBERG_CATALOG":"'${params[ICEBERG_CATALOG]}'",
+          "--LOGGING":"'${params[LOGGING]}'"}' --output text)
     params[PROCESS_RUNNING]=true
     local delay=0.1
     local spinstr='|/-\'
@@ -967,6 +1066,16 @@ function Start_Discovery {
     confirm "<=== Do you want to continue? ===> "
     log_info "Deleting objects in ${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}..."
     aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}" --recursive --region "${params[AWS_REGION]}" > /dev/null 2>&1
+
+    # Clean up old Parquet snapshots from the S3 target path if json-mapping specifies a custom bucket/prefix
+    if [[ -n "$JSON_MAPPING" && "$JSON_MAPPING" != "None" ]]; then
+      PARQUET_BUCKET=$(echo "$JSON_MAPPING" | jq -r '.s3.bucket // empty')
+      PARQUET_PREFIX=$(echo "$JSON_MAPPING" | jq -r '.s3.prefix // empty')
+      if [[ -n "$PARQUET_BUCKET" && -n "$PARQUET_PREFIX" ]]; then
+        log_info "Deleting old Parquet snapshots in s3://${PARQUET_BUCKET}/${PARQUET_PREFIX}/${params[TARGET_KS]}/${params[TARGET_TBL]}..."
+        aws s3 rm "s3://${PARQUET_BUCKET}/${PARQUET_PREFIX}/${params[TARGET_KS]}/${params[TARGET_TBL]}" --recursive --region "${params[AWS_REGION]}" > /dev/null 2>&1
+      fi
+    fi
   fi
   if check_discovery_runs "true"; then
     Delete_Stop_Event_D
@@ -986,7 +1095,9 @@ function Start_Discovery {
         "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
         "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
         "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
-        "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
+        "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'",
+        "--ICEBERG_CATALOG":"'${params[ICEBERG_CATALOG]}'",
+        "--LOGGING":"'${params[LOGGING]}'"}' --output text)
     DISCOVERY_RUNNING_ID=$rs
     JOBS+=("$rs")
   fi
@@ -1007,19 +1118,9 @@ function Resize_Cluster {
   confirm "<=== Do you want to continue? ===> "
   check_sampler_runs resize
   if [ "${params[PROCESS_RUNNING]}" = false ]; then
-    aws s3 cp "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
-                    "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy" \
-                    --recursive --region "${params[AWS_REGION]}" >/dev/null
-      # Check if primaryKeysCopy exists if the prefix doesn't exists return error and exit
-    if aws s3 ls "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy/" --region "${params[AWS_REGION]}" > /dev/null; then
-      log_info "The copy has been created"
-    else
-      log_error "No copy found in ${params[S3_LANDING_ZONE]}"
-      exit 1
-    fi
-    log_info "Removing the primary keys and stats"
-    aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeys" \
-                  --recursive --region "${params[AWS_REGION]}" >/dev/null
+    # Iceberg-based resize: the Scala recomputeTiles() reads directly from per-tile Iceberg tables
+    # No need to copy/delete primaryKeys Parquet files — Iceberg handles data via the Glue Catalog
+    log_info "Clearing stats before resize"
     aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/stats" \
                   --recursive --region "${params[AWS_REGION]}" >/dev/null
     rs=$(aws glue start-job-run --job-name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" --worker-type "G.1X" --number-of-workers $(( ${params[TILES]} + 1 )) --region "${params[AWS_REGION]}" --arguments '{
@@ -1038,7 +1139,9 @@ function Resize_Cluster {
             "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
             "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
             "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
-            "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
+            "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'",
+            "--ICEBERG_CATALOG":"'${params[ICEBERG_CATALOG]}'",
+            "--LOGGING":"'${params[LOGGING]}'"}' --output text)
     params[PROCESS_RUNNING]=true
     local delay=0.1
     local spinstr='|/-\'
@@ -1052,9 +1155,6 @@ function Resize_Cluster {
       check_sampler_runs resize
     done
       printf "\r%s    \n" "$output"
-      log_info "Removing copy of the primary keys"
-      aws s3 rm "${params[S3_LANDING_ZONE]}/${params[SOURCE_KS]}/${params[SOURCE_TBL]}/primaryKeysCopy" \
-                    --recursive --region "${params[AWS_REGION]}" >/dev/null
   fi
 }
 
@@ -1111,7 +1211,9 @@ function Start_Replication {
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
           "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
           "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
-          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
+          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'",
+          "--ICEBERG_CATALOG":"'${params[ICEBERG_CATALOG]}'",
+          "--LOGGING":"'${params[LOGGING]}'"}' --output text)
        JOBS+=("$rs")
       sleep ${params[COOLING_PERIOD]}
     fi
@@ -1154,7 +1256,9 @@ function Start_Single_Replication {
           "--JSON_MAPPING":"'$JSON_MAPPING_B64'",
           "--REPLAY_LOG":"'${params[REPLAY_LOG]}'",
           "--TTL_COLUMN":"'${params[TTL_COLUMN]}'",
-          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'"}' --output text)
+          "--WORKLOAD_TYPE":"'${params[DEFAULT_WORKLOAD_TYPE]}'",
+          "--ICEBERG_CATALOG":"'${params[ICEBERG_CATALOG]}'",
+          "--LOGGING":"'${params[LOGGING]}'"}' --output text)
     JOBS+=("$rs")
   fi
 }
@@ -1449,6 +1553,19 @@ while (( "$#" )); do
       log_info "The log of failed retries will be replayed, in order: inserts, updates, and deletes"
       params[REPLAY_LOG]=true
       shift 1
+      ;;
+    --logging-level)
+      params[LOGGING]=$(echo "$2" | tr '[:lower:]' '[:upper:]')
+      if [[ ! "${params[LOGGING]}" =~ ^(ALL|TRACE|DEBUG|INFO|WARN|ERROR|FATAL|OFF)$ ]]; then
+        log_error "Invalid log level: ${params[LOGGING]}. Valid values: ALL, TRACE, DEBUG, INFO, WARN, ERROR, FATAL, OFF"
+        exit 1
+      fi
+      log_info "Log level: ${params[LOGGING]}"
+      shift 2
+      ;;
+    --src-keyspace-list|--skl2)
+      params[SOURCE_KS_LIST]="$2"
+      shift 2
       ;;
     --max-wcu-traffic|--mwt)
       params[WCU_TRAFFIC]="$2"

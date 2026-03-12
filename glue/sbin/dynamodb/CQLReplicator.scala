@@ -5,35 +5,11 @@
 
 // Target Amazon DynamoDB - Preview
 
-/* Usage:
-
-// Run this command to init to deploy the cqlreplicator
-// The tool is going to deploy an intrenal table for tracking replication process in Amazon Keyspaces "migration.ladger"
-  cqlreplicator --cmd init
-                --subnet "subnet-00a00b00"
-                --sg '"sg-0e0b0a000000d000b"'
-                --az "us-east-1a"
-                --region us-east-1
-                --glue-iam-role GlueRole
-                --env ddbdemo
-                --target-type dynamodb
-
-// Run this command to start the replicator
-  cqlreplicator --cmd run \
-                --target-type dynamodb \
-                --landing-zone s3://<BUCKET_NAME> \
-                --region us-east-1 --max-wcu-traffic 30000 --src-keyspace ks \
-                --src-table tbl --trg-keyspace ks --trg-table tbl --env ddbdemo \
-                --writetime-column data
-                --json-mapping '{ "replication": {"dynamoDBPrimaryKey":{"partitionKeyName":"pk","sortKeyName": "sk","separator":"#"}},
-                                  "dynamodb":{"readBeforeWrite": false,
-                                              "dynamoDBConnection": { "endpoint": "dynamodb.us-east-1.amazonaws.com","region": "us-east-1"}}}' \
-                --workload-type batch
- */
-
 import com.amazonaws.ClientConfiguration
 import com.amazonaws.client.builder.AwsClientBuilder.EndpointConfiguration
 import com.amazonaws.retry.{PredefinedRetryPolicies, RetryPolicy}
+import com.amazonaws.services.dynamodbv2.document.{Item, ItemUtils}
+import com.amazonaws.services.dynamodbv2.document.internal.InternalUtils
 import com.amazonaws.services.dynamodbv2.model._
 import com.amazonaws.services.dynamodbv2.{AmazonDynamoDB, AmazonDynamoDBClientBuilder}
 import com.amazonaws.services.glue.GlueContext
@@ -44,6 +20,8 @@ import com.amazonaws.services.s3.{AmazonS3, AmazonS3ClientBuilder}
 import com.datastax.oss.driver.api.core.CqlSession
 import com.datastax.oss.driver.api.core.`type`.{DataType, DataTypes}
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader
+import io.github.resilience4j.core.IntervalFunction
+import io.github.resilience4j.retry.{Retry, RetryConfig}
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.cassandra._
@@ -58,16 +36,19 @@ import org.json4s.jackson.Serialization.write
 
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.time.format.DateTimeFormatter
-import java.time.{ZoneId, ZonedDateTime}
+import java.time.{Duration, Instant, ZoneId, ZonedDateTime}
 import java.util.Base64
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.io.Source
+import scala.util.hashing.MurmurHash3
 import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try}
+import net.jpountz.xxhash.{XXHashFactory, XXHash64}
 
 sealed abstract class BaseException(message: String, cause: Throwable = null)
   extends RuntimeException(message, cause) {
@@ -102,12 +83,12 @@ sealed trait Stats
 case class DynamoDBConnection(endpoint: String, region: String)
 case class WriteConfiguration(writeBatchSize: Int = 1024 * 1024, batchSize: Int = 1024 * 1024, maxRetryAttempts: Int = 64, maxStatementsPerBatch: Int = 24, preShuffleBeforeWrite: Boolean = true, backoff: Int = 25)
 case class ReadConfiguration(splitSizeInMB: Int = 64, concurrentReads: Int = 32, consistencyLevel: String = "LOCAL_ONE", fetchSizeInRows: Int = 500, queryRetryCount: Int = 180,
-                             readTimeoutMS: Int = 120000)
+                             readTimeoutMS: Int = 120000, useCustomVarintReader: Boolean = false)
 case class DiscoveryStats(tile: Int, primaryKeys: Long, updatedTimestamp: String) extends Stats
 case class ReplicationStats(tile: Int, primaryKeys: Long, updatedPrimaryKeys: Long, insertedPrimaryKeys: Long, deletedPrimaryKeys: Long, updatedTimestamp: String) extends Stats
 case class MaterializedViewConfig(enabled: Boolean = false, mvName: String = "")
 case class PointInTimeReplicationConfig(predicateOp: String = "greaterThan")
-case class DynamoDBPrimaryKey(partitionKeyName: String = "PK", sortKeyName: String = "", separator: String = "#")
+case class DynamoDBPrimaryKey(partitionKeyName: String = "PK", partitionKeyType: String = "S", sortKeyName: String = "", sortKeyType: String = "S", separator: String = "#")
 case class Replication(allColumns: Boolean = true, columns: List[String] = List(""), useCustomSerializer: Boolean = false, useMaterializedView: MaterializedViewConfig = MaterializedViewConfig(),
                        replicateWithTimestamp: Boolean = false,
                        pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig(),
@@ -115,10 +96,14 @@ case class Replication(allColumns: Boolean = true, columns: List[String] = List(
                        dynamoDBPrimaryKey: DynamoDBPrimaryKey = DynamoDBPrimaryKey())
 case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryKeysColumns: Boolean = false, targetAttributeName: String = "")
 case class LargeObjectsConfig(enabled: Boolean = false, columns: List[String] = List(""), bucket: String = "", prefix: String = "", keySeparator: String = "#", compressionEnabled: Boolean = false)
-case class Transformation(enabled: Boolean = false, addNonPrimaryKeyColumns: List[String] = List(), filterExpression: String = "")
+case class TransformExpression(columnName: String, rule: String, alias: String = "", keepSource: Boolean = false)
+case class Transformation(enabled: Boolean = false, addNonPrimaryKeyColumns: List[String] = List(), filterExpression: String = "",
+                          transformExpressions: List[TransformExpression] = List())
 case class UdtConversion(enabled: Boolean = true, columns: List[String] = List(""))
 case class DDB(dynamoDBConnection: DynamoDBConnection, compressionConfig: CompressionConfig, largeObjectsConfig: LargeObjectsConfig, transformation: Transformation, readBeforeWrite: Boolean = false, udtConversion: UdtConversion, writeConfiguration: WriteConfiguration)
 case class JsonMapping(replication: Replication, dynamodb: DDB)
+
+case class DlqConfig(s3client: AmazonS3, bucketName: String, key: String)
 
 class RowConverter {
   // Pre-compile patterns and formatters
@@ -168,29 +153,23 @@ class RowConverter {
     (whereStmt.toString(), attributes)
   }
 
-  // Use it only for primary keys
+  // Use it only for primary keys — respects DynamoDB key type (S or N) from configuration
   private def convertDDBValue(row: Row, position: Int, colName: String, colType: String): Map[String, AttributeValue] = {
     try {
-      colType match {
-        case t if StringTypes.contains(t) =>
-          Map(colName -> new AttributeValue().withS(row.getString(position)))
-        case "date" =>
-          Map(colName -> new AttributeValue().withS(row.getDate(position).toString))
-        case "timestamp" =>
-          Map(colName -> new AttributeValue().withN(handleTimestamp(row, position)))
-        case "time" =>
-          Map(colName -> new AttributeValue().withN(row.getLong(position).toString))
-        case t if NumericTypes.contains(t) =>
-          Map(colName -> new AttributeValue().withN(getNumericValue(row, position, t)))
-        case "uuid" | "timeuuid" =>
-          Map(colName -> new AttributeValue().withS(row.getString(position)))
-        case "boolean" =>
-          Map(colName -> new AttributeValue().withBOOL(row.getBoolean(position)))
-        case "blob" =>
-          Map(colName -> new AttributeValue().withB(ByteBuffer.wrap(row.getAs[Array[Byte]](colName))))
-        case _ =>
-          throw CassandraTypeException(s"Unrecognized data type $colType")
+      val stringValue: String = colType match {
+        case t if StringTypes.contains(t) => row.getString(position)
+        case "date" => row.getDate(position).toString
+        case "timestamp" => handleTimestamp(row, position)
+        case "time" => row.getLong(position).toString
+        case t if NumericTypes.contains(t) => getNumericValue(row, position, t)
+        case "uuid" | "timeuuid" => row.getString(position)
+        case "boolean" => row.getBoolean(position).toString
+        case "blob" => java.util.Base64.getEncoder.encodeToString(row.getAs[Array[Byte]](colName))
+        case _ => throw CassandraTypeException(s"Unrecognized data type $colType")
       }
+      // Always store as String — the actual DynamoDB attribute type (S or N) is applied
+      // later in createPutRequest/executeDelete based on partitionKeyType/sortKeyType config
+      Map(colName -> new AttributeValue().withS(stringValue))
     } catch {
       case e: Exception =>
         throw DynamoDBTypeException(
@@ -263,8 +242,8 @@ class RowConverter {
       case "float" => row.getFloat(position).toString
       case "double" => row.getDouble(position).toString
       case "decimal" => row.getDecimal(position).toString
-      case "smallint" => row.getShort(position).toString
-      case "tinyint" => row.getByte(position).toString
+      case "smallint" => row.get(position).asInstanceOf[Number].shortValue().toString
+      case "tinyint" => row.get(position).asInstanceOf[Number].byteValue().toString
       case "varint" => row.getAs[java.math.BigDecimal](position).toString
     }
   }
@@ -373,8 +352,8 @@ class SupportFunctions {
   }
 }
 
-case class FlushingSet(flushingClient: AmazonDynamoDB,internalConfig: WriteConfiguration,
-                       logger: GlueLogger, targetTable: String) {
+case class FlushingSet(flushingClient: AmazonDynamoDB, internalConfig: WriteConfiguration,
+                       dlqConfig: DlqConfig, logger: GlueLogger, targetTable: String) {
 
   private val statements: ListBuffer[WriteRequest] = ListBuffer.empty
 
@@ -395,7 +374,12 @@ case class FlushingSet(flushingClient: AmazonDynamoDB,internalConfig: WriteConfi
         .withTableName(targetTable)
         .withItem(putRequest.getItem)
 
-      flushingClient.putItem(request)
+      Try(flushingClient.putItem(request)) match {
+        case Success(_) =>
+        case Failure(e) =>
+          logger.error(s"Failed to execute single put after all attempts: ${e.getMessage}")
+          persistToDlq(dlqConfig, ItemUtils.toItem(putRequest.getItem).toJSON)
+      }
     }
     else {
       try {
@@ -408,17 +392,24 @@ case class FlushingSet(flushingClient: AmazonDynamoDB,internalConfig: WriteConfi
         Some(flushingClient.putItem(request))
       } catch {
         case _: ConditionalCheckFailedException =>
-        case e: Exception => throw DynamoDbOperationException(s"Error executing put request: $e", e)
+        case e: Exception =>
+          logger.error(s"Failed to execute conditional put after all attempts: ${e.getMessage}")
+          persistToDlq(dlqConfig, ItemUtils.toItem(putRequest.getItem).toJSON)
       }
     }
   }
 
-  def executeSingleDelete(writeRequest: WriteRequest): DeleteItemResult = {
+  def executeSingleDelete(writeRequest: WriteRequest): Unit = {
     val deleteRequest = writeRequest.getDeleteRequest
     val request = new DeleteItemRequest()
       .withTableName(targetTable)
       .withKey(deleteRequest.getKey)
-    flushingClient.deleteItem(request)
+    Try(flushingClient.deleteItem(request)) match {
+      case Success(_) =>
+      case Failure(e) =>
+        logger.error(s"Failed to execute single delete after all attempts: ${e.getMessage}")
+        persistToDlq(dlqConfig, ItemUtils.toItem(deleteRequest.getKey).toJSON)
+    }
   }
 
   def flush(): Unit = this.synchronized {
@@ -436,7 +427,32 @@ case class FlushingSet(flushingClient: AmazonDynamoDB,internalConfig: WriteConfi
         backoff = Math.min(backoff * 2, 64000L)
         retryCount += 1
       }
+
+      if (!unprocessed.isEmpty) {
+        logger.error(s"BatchWriteItem still has ${unprocessed.size()} unprocessed items after $retryCount retries, persisting to DLQ")
+        unprocessed.values().asScala.foreach { items =>
+          items.asScala.foreach { item =>
+            val payload = Option(item.getPutRequest).map(pr => ItemUtils.toItem(pr.getItem).toJSON)
+              .orElse(Option(item.getDeleteRequest).map(dr => ItemUtils.toItem(dr.getKey).toJSON))
+              .getOrElse(item.toString)
+            persistToDlq(dlqConfig, payload)
+          }
+        }
+      }
+
       statements.clear()
+    }
+  }
+
+  private def persistToDlq(dlqConfig: DlqConfig, payload: String): Unit = {
+    val ts = org.joda.time.LocalDateTime.now().toString
+    val key = s"${dlqConfig.key}/log-$ts.msg"
+
+    try {
+      dlqConfig.s3client.putObject(dlqConfig.bucketName, key, payload)
+    } catch {
+      case e: Exception =>
+        logger.error(s"Failed to persist to DLQ at $key: ${e.getMessage}")
     }
   }
 }
@@ -468,13 +484,68 @@ object GlueApp {
       }
     }
 
+    def isLogObjectPresent(ksName: String,
+                           tblName: String,
+                           bucketName: String,
+                           s3Client: com.amazonaws.services.s3.AmazonS3,
+                           tile: Int, op: String): Option[String] = {
+      val prefix = s"$ksName/$tblName/dlq/$tile/$op"
+      val listObjectsRequest = new ListObjectsV2Request().withBucketName(bucketName).withPrefix(prefix)
+      val objectListing = s3Client.listObjectsV2(listObjectsRequest)
+      val firstObjectKeyOption = objectListing.getObjectSummaries.asScala.headOption.map(_.getKey)
+      firstObjectKeyOption
+    }
+
+    // Strictly Serializable - DynamoDB adapted replay
+    def replayLogs(logger: GlueLogger,
+                   ksName: String,
+                   tblName: String,
+                   bucketName: String,
+                   s3Client: com.amazonaws.services.s3.AmazonS3,
+                   tile: Int,
+                   op: String,
+                   ddbClient: AmazonDynamoDB,
+                   targetTable: String): Unit = {
+      Iterator.continually(isLogObjectPresent(ksName, tblName, bucketName, s3Client, tile, op)).takeWhile(_.nonEmpty).foreach {
+        key => {
+          val keyTmp = key.get
+          val getObjectRequest = new GetObjectRequest(bucketName, keyTmp)
+          val s3Object = s3Client.getObject(getObjectRequest)
+          val objectContent = scala.io.Source.fromInputStream(s3Object.getObjectContent).mkString
+          Try {
+            logger.info(s"Detected a failed $op '$keyTmp' in the dlq. The $op is going to be replayed.")
+            val attributeMap = InternalUtils.toAttributeValues(Item.fromJSON(objectContent))
+            op match {
+              case "insert" | "update" =>
+                val request = new PutItemRequest().withTableName(targetTable).withItem(attributeMap)
+                ddbClient.putItem(request)
+              case "delete" =>
+                val request = new DeleteItemRequest().withTableName(targetTable).withKey(attributeMap)
+                ddbClient.deleteItem(request)
+            }
+          } match {
+            case Failure(_) => throw new DlqS3Exception(s"Failed to replay $op: $objectContent")
+            case Success(_) => {
+              s3Client.deleteObject(bucketName, keyTmp)
+              logger.info(s"Operation $op '$keyTmp' replayed and removed from the dlq successfully.")
+            }
+          }
+        }
+      }
+    }
+
     def getDBConnection(connectionConfName: String, bucketName: String, s3client: AmazonS3): CqlSession = {
       val connectorConf = s3client.getObjectAsString(bucketName, s"artifacts/$connectionConfName")
       CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
         .build()
     }
 
-    def inferKeys(cc: CqlSession, keyType: String, ks: String, tbl: String, columnTs: String): Seq[mutable.LinkedHashMap[String, String]] = {
+    def buildWritetimeExpression(columns: Seq[String]): String = columns match {
+      case Seq(single) => s"writetime($single) as ts"
+      case multiple    => multiple.map(c => s"writetime($c)").mkString("greatest(", ", ", ") as ts")
+    }
+
+    def inferKeys(cc: CqlSession, keyType: String, ks: String, tbl: String, columnTs: String, writetimeCols: Seq[String] = Seq.empty): Seq[mutable.LinkedHashMap[String, String]] = {
       val meta = cc.getMetadata.getKeyspace(ks).get.getTable(tbl).get
 
       // Get partition key columns in their defined order
@@ -495,7 +566,7 @@ object GlueApp {
 
         case "primaryKeysWithTS" =>
           orderedPrimaryKeys.map(x => mutable.LinkedHashMap(x.getName.toString -> x.getType.toString.toLowerCase)) :+
-            mutable.LinkedHashMap(s"writetime($columnTs) as ts" -> "bigint")
+            mutable.LinkedHashMap(buildWritetimeExpression(writetimeCols) -> "bigint")
 
         case _ =>
           orderedPrimaryKeys.map(x => mutable.LinkedHashMap(x.getName.toString -> x.getType.toString.toLowerCase))
@@ -590,7 +661,9 @@ object GlueApp {
     val logger = new GlueLogger
     import sparkSession.implicits._
 
-    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG", "WORKLOAD_TYPE").toArray)
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "TILE", "TOTAL_TILES", "PROCESS_TYPE", "SOURCE_KS", "SOURCE_TBL", "TARGET_KS", "TARGET_TBL", "WRITETIME_COLUMN", "TTL_COLUMN", "S3_LANDING_ZONE", "REPLICATION_POINT_IN_TIME", "SAFE_MODE", "CLEANUP_REQUESTED", "JSON_MAPPING", "REPLAY_LOG", "WORKLOAD_TYPE", "ICEBERG_CATALOG", "LOGGING").toArray)
+    val logLevel = args.getOrElse("LOGGING", "ERROR").toUpperCase
+    sparkContext.setLogLevel(logLevel)
     Job.init(args("JOB_NAME"), glueContext, args.asJava)
     val jobRunId = args("JOB_RUN_ID")
     val currentTile = args("TILE").toInt
@@ -627,8 +700,19 @@ object GlueApp {
     val trgTableName = args("TARGET_TBL")
     val trgKeyspaceName = args("TARGET_KS")
     val landingZone = args("S3_LANDING_ZONE")
+    val icebergCatalog = args("ICEBERG_CATALOG")
+
+    // Iceberg Spark session configuration
+    // Note: spark.sql.extensions and spark.sql.catalog.* are static configs
+    // and must be set via --conf in the Glue job definition, not at runtime.
+    sparkSession.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
     val bcktName = landingZone.replaceAll("s3://", "")
     val columnTs = args("WRITETIME_COLUMN")
+    val writetimeColumns: Seq[String] = columnTs match {
+      case "None" => Seq.empty
+      case csv    => csv.split(",").map(_.trim).toSeq
+    }
     val ttlColumn = args("TTL_COLUMN")
     val jsonMapping = args("JSON_MAPPING")
     val replicationPointInTime = args("REPLICATION_POINT_IN_TIME").toLong
@@ -642,17 +726,16 @@ object GlueApp {
     val s3client = AmazonS3ClientBuilder.standard().withClientConfiguration(s3ClientConf).build()
 
     val internalConnectionToSource = getDBConnection("CassandraConnector.conf", bcktName, s3client)
-    val internalConnectionToTarget = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
 
     // Let's do preflight checks
     logger.info("Preflight check started")
     preFlightCheck(internalConnectionToSource, srcKeyspaceName, srcTableName, "source", logger)
-    preFlightCheck(internalConnectionToTarget, trgKeyspaceName, trgTableName, "target", logger)
+    preFlightCheck(internalConnectionToSource, trgKeyspaceName, trgTableName, "target", logger)
     logger.info("Preflight check completed")
 
     val pkFinal = columnTs match {
       case "None" => inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).map(_.keys.head)
-      case _ => inferKeys(internalConnectionToSource, "primaryKeysWithTS", srcKeyspaceName, srcTableName, columnTs).map(_.keys.head)
+      case _ => inferKeys(internalConnectionToSource, "primaryKeysWithTS", srcKeyspaceName, srcTableName, columnTs, writetimeColumns).map(_.keys.head)
     }
 
     val stringTypes = Set("STRING", "TEXT", "INET", "VARCHAR", "ASCII", "UUID", "TIMEUUID", "DATE", "TIME", "TIMESTAMP")
@@ -695,9 +778,9 @@ object GlueApp {
     val allColumnsFromSource = getAllColumns(internalConnectionToSource, srcKeyspaceName, srcTableName)
     val blobColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "BLOB").keys).toList
     val counterColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "COUNTER").keys).toList
-    val pkFinalWithoutTs = pkFinal.filterNot(_ == s"writetime($columnTs) as ts")
+    val pkFinalWithoutTs = if (writetimeColumns.nonEmpty) pkFinal.filterNot(_ == buildWritetimeExpression(writetimeColumns)) else pkFinal
     val clusteringColumns = pkFinalWithoutTs.filterNot(partitionKeys.contains)
-    val pks = pkFinal.filterNot(_ == s"writetime($columnTs) as ts")
+    val pks = if (writetimeColumns.nonEmpty) pkFinal.filterNot(_ == buildWritetimeExpression(writetimeColumns)) else pkFinal
     val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
     val columns = inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap
     val columnsPos = columns.keys.toSeq.zipWithIndex
@@ -709,12 +792,12 @@ object GlueApp {
     logger.info(s"Json mapping: $jsonMappingRaw")
     logger.info(s"Compute resources: Instances $instances, Cores: $cores")
     val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\r\\n|\\r|\\n", ""))
+
     val replicatedColumns = jsonMapping4s match {
       case JsonMapping(Replication(true, _, _, _, _, _, _, _), _) => "*"
       case rep => rep.replication.columns.mkString(",")
     }
-    val internalMigrationKeyspace = "migration"
-    val internalMigrationTable = "ledger"
+
     val attrCondExpressionCAS = if (jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyName.isEmpty)
       ("attribute_not_exists(#pk)", Map("#pk" -> jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyName))
     else
@@ -751,14 +834,229 @@ object GlueApp {
       clientBuilder.build()
     }
 
-    def cleanupLedger(cc: CqlSession,
-                      logger: GlueLogger,
-                      ks: String, tbl: String,
-                      cleanUpRequested: Boolean,
-                      pt: String): Unit = {
-      if (pt.equals("discovery") && cleanUpRequested) {
-        cc.execute(s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$ks' and tbl='$tbl'")
-        logger.info(s"Cleaned up the $internalMigrationKeyspace.$internalMigrationTable")
+    val ledgerTableName: String = "CQLReplicator.ledger"
+    val ledgerClient: AmazonDynamoDB = getDDBConnection(
+      jsonMapping4s.dynamodb.dynamoDBConnection.endpoint,
+      jsonMapping4s.dynamodb.dynamoDBConnection.region
+    )
+
+    // --- DynamoDB Ledger helper functions ---
+
+    def ledgerPartitionKey(ks: String, tbl: String, tile: Int): String =
+      s"$ks#$tbl#$tile"
+
+    def ensureLedgerTableExists(client: AmazonDynamoDB, tableName: String): Unit = {
+      try {
+        client.describeTable(tableName)
+      } catch {
+        case _: ResourceNotFoundException =>
+          val request = new CreateTableRequest()
+            .withTableName(tableName)
+            .withKeySchema(
+              new KeySchemaElement("pk", KeyType.HASH),
+              new KeySchemaElement("sk", KeyType.RANGE)
+            )
+            .withAttributeDefinitions(
+              new AttributeDefinition("pk", ScalarAttributeType.S),
+              new AttributeDefinition("sk", ScalarAttributeType.S)
+            )
+            .withBillingMode(BillingMode.PAY_PER_REQUEST)
+          client.createTable(request)
+          val waiter = new com.amazonaws.services.dynamodbv2.waiters.AmazonDynamoDBWaiters(client)
+          waiter.tableExists().run(
+            new com.amazonaws.waiters.WaiterParameters(new DescribeTableRequest(tableName))
+          )
+      }
+    }
+
+    def getLedgerEntry(client: AmazonDynamoDB, tableName: String, ks: String, tbl: String, tile: Int, ver: String): Option[Map[String, String]] = {
+      val key = Map(
+        "pk" -> new AttributeValue().withS(ledgerPartitionKey(ks, tbl, tile)),
+        "sk" -> new AttributeValue().withS(ver)
+      ).asJava
+      val request = new GetItemRequest()
+        .withTableName(tableName)
+        .withKey(key)
+      val result = client.getItem(request)
+      Option(result.getItem).map { item =>
+        val m = item.asScala.toMap
+        Map(
+          "offload_status" -> m.get("offload_status").map(_.getS).getOrElse(""),
+          "dt_offload" -> m.get("dt_offload").map(_.getS).getOrElse(""),
+          "location" -> m.get("location").map(_.getS).getOrElse(""),
+          "load_status" -> m.get("load_status").map(_.getS).getOrElse(""),
+          "dt_load" -> m.get("dt_load").map(_.getS).getOrElse("")
+        )
+      }
+    }
+
+    def deleteLedgerEntry(client: AmazonDynamoDB, tableName: String, ks: String, tbl: String, tile: Int, ver: String): Unit = {
+      val key = Map(
+        "pk" -> new AttributeValue().withS(ledgerPartitionKey(ks, tbl, tile)),
+        "sk" -> new AttributeValue().withS(ver)
+      ).asJava
+      val request = new DeleteItemRequest()
+        .withTableName(tableName)
+        .withKey(key)
+      client.deleteItem(request)
+    }
+
+    def deleteLedgerEntriesForTable(client: AmazonDynamoDB, tableName: String, ks: String, tbl: String): Unit = {
+      val prefix = s"$ks#$tbl#"
+      var lastEvaluatedKey: java.util.Map[String, AttributeValue] = null
+      val allKeys = scala.collection.mutable.ListBuffer[(String, String)]()
+
+      do {
+        val scanRequest = new ScanRequest()
+          .withTableName(tableName)
+          .withFilterExpression("begins_with(pk, :prefix)")
+          .withExpressionAttributeValues(Map(":prefix" -> new AttributeValue().withS(prefix)).asJava)
+          .withProjectionExpression("pk, sk")
+        if (lastEvaluatedKey != null) {
+          scanRequest.withExclusiveStartKey(lastEvaluatedKey)
+        }
+        val result = client.scan(scanRequest)
+        result.getItems.asScala.foreach { item =>
+          allKeys += ((item.get("pk").getS, item.get("sk").getS))
+        }
+        lastEvaluatedKey = result.getLastEvaluatedKey
+      } while (lastEvaluatedKey != null && !lastEvaluatedKey.isEmpty)
+
+      allKeys.grouped(25).foreach { batch =>
+        val deleteRequests = batch.map { case (pk, sk) =>
+          new WriteRequest(new DeleteRequest(Map(
+            "pk" -> new AttributeValue().withS(pk),
+            "sk" -> new AttributeValue().withS(sk)
+          ).asJava))
+        }.asJava
+        val batchRequest = new BatchWriteItemRequest()
+          .withRequestItems(Map(tableName -> deleteRequests).asJava)
+        var result = client.batchWriteItem(batchRequest)
+        var unprocessed = result.getUnprocessedItems
+        while (unprocessed != null && !unprocessed.isEmpty) {
+          result = client.batchWriteItem(unprocessed)
+          unprocessed = result.getUnprocessedItems
+        }
+      }
+    }
+
+    def getCurrentIcebergTilesCount(client: AmazonDynamoDB, tableName: String, ks: String, tbl: String): Int = {
+      val prefix = s"$ks#$tbl#"
+      var lastEvaluatedKey: java.util.Map[String, AttributeValue] = null
+      var count = 0
+
+      do {
+        val scanRequest = new ScanRequest()
+          .withTableName(tableName)
+          .withFilterExpression("begins_with(pk, :prefix) AND sk = :ver")
+          .withExpressionAttributeValues(Map(
+            ":prefix" -> new AttributeValue().withS(prefix),
+            ":ver" -> new AttributeValue().withS("curr")
+          ).asJava)
+          .withSelect("COUNT")
+        if (lastEvaluatedKey != null) {
+          scanRequest.withExclusiveStartKey(lastEvaluatedKey)
+        }
+        val result = client.scan(scanRequest)
+        count += result.getCount
+        lastEvaluatedKey = result.getLastEvaluatedKey
+      } while (lastEvaluatedKey != null && !lastEvaluatedKey.isEmpty)
+
+      count
+    }
+
+    def recordDiscoverySnapshotDDB(client: AmazonDynamoDB, tableName: String, ks: String, tbl: String, tile: Int, snapshotId: Long): Unit = {
+      val pk = ledgerPartitionKey(ks, tbl, tile)
+      val existingCurr = getLedgerEntry(client, tableName, ks, tbl, tile, "curr")
+      val now = Instant.now().toString
+
+      existingCurr match {
+        case Some(currEntry) =>
+          val prevItem = Map(
+            "pk" -> new AttributeValue().withS(pk),
+            "sk" -> new AttributeValue().withS("prev"),
+            "offload_status" -> new AttributeValue().withS(currEntry.getOrElse("offload_status", "")),
+            "dt_offload" -> new AttributeValue().withS(currEntry.getOrElse("dt_offload", "")),
+            "location" -> new AttributeValue().withS(currEntry.getOrElse("location", "")),
+            "load_status" -> new AttributeValue().withS(currEntry.getOrElse("load_status", "")),
+            "dt_load" -> new AttributeValue().withS(currEntry.getOrElse("dt_load", ""))
+          ).asJava
+
+          val newCurrItem = Map(
+            "pk" -> new AttributeValue().withS(pk),
+            "sk" -> new AttributeValue().withS("curr"),
+            "offload_status" -> new AttributeValue().withS("SUCCESS"),
+            "dt_offload" -> new AttributeValue().withS(now),
+            "location" -> new AttributeValue().withS(snapshotId.toString),
+            "load_status" -> new AttributeValue().withS(""),
+            "dt_load" -> new AttributeValue().withS("")
+          ).asJava
+
+          val transactRequest = new TransactWriteItemsRequest()
+            .withTransactItems(
+              new TransactWriteItem().withPut(new Put().withTableName(tableName).withItem(prevItem)),
+              new TransactWriteItem().withPut(new Put().withTableName(tableName).withItem(newCurrItem))
+            )
+          client.transactWriteItems(transactRequest)
+
+        case None =>
+          val newCurrItem = Map(
+            "pk" -> new AttributeValue().withS(pk),
+            "sk" -> new AttributeValue().withS("curr"),
+            "offload_status" -> new AttributeValue().withS("SUCCESS"),
+            "dt_offload" -> new AttributeValue().withS(now),
+            "location" -> new AttributeValue().withS(snapshotId.toString),
+            "load_status" -> new AttributeValue().withS(""),
+            "dt_load" -> new AttributeValue().withS("")
+          ).asJava
+
+          val putRequest = new PutItemRequest()
+            .withTableName(tableName)
+            .withItem(newCurrItem)
+          client.putItem(putRequest)
+      }
+    }
+
+    def markReplicationCompleteDDB(client: AmazonDynamoDB, tableName: String, ks: String, tbl: String, tile: Int): Unit = {
+      val pk = ledgerPartitionKey(ks, tbl, tile)
+      val now = Instant.now().toString
+
+      val updateExpr = "SET load_status = :status, dt_load = :dt"
+      val exprValues = Map(
+        ":status" -> new AttributeValue().withS("SUCCESS"),
+        ":dt" -> new AttributeValue().withS(now)
+      ).asJava
+
+      val updateCurr = new Update()
+        .withTableName(tableName)
+        .withKey(Map(
+          "pk" -> new AttributeValue().withS(pk),
+          "sk" -> new AttributeValue().withS("curr")
+        ).asJava)
+        .withUpdateExpression(updateExpr)
+        .withExpressionAttributeValues(exprValues)
+
+      val updatePrev = new Update()
+        .withTableName(tableName)
+        .withKey(Map(
+          "pk" -> new AttributeValue().withS(pk),
+          "sk" -> new AttributeValue().withS("prev")
+        ).asJava)
+        .withUpdateExpression(updateExpr)
+        .withExpressionAttributeValues(exprValues)
+
+      val transactRequest = new TransactWriteItemsRequest()
+        .withTransactItems(
+          new TransactWriteItem().withUpdate(updateCurr),
+          new TransactWriteItem().withUpdate(updatePrev)
+        )
+      client.transactWriteItems(transactRequest)
+    }
+
+    def cleanupLedgerDDB(client: AmazonDynamoDB, tableName: String, logger: GlueLogger, ks: String, tbl: String, pt: String, cleanUpRequested: Boolean): Unit = {
+      if (pt == "discovery" && cleanUpRequested) {
+        logger.info(s"Cleaning up ledger entries for $ks.$tbl")
+        deleteLedgerEntriesForTable(client, tableName, ks, tbl)
       }
     }
 
@@ -814,6 +1112,8 @@ object GlueApp {
       }
     }
 
+    val writetimeExpr = buildWritetimeExpression(writetimeColumns)
+
     val selectStmtWithTs = {
       if (replicatedColumns.isEmpty) {
         throw DynamoDbOperationException("replicatedColumns cannot be empty")
@@ -826,18 +1126,282 @@ object GlueApp {
         case s if !s.equals("None")
           && jsonMapping4s.replication.replicateWithTimestamp
           && replicatedColumns.equals("*") =>
-          allColumnsFromSource.flatMap(_.keys) :+ s"writetime($columnTs) as ts" mkString ", "
+          allColumnsFromSource.flatMap(_.keys) :+ writetimeExpr mkString ", "
         case s if !s.equals("None")
           && jsonMapping4s.replication.replicateWithTimestamp
           && !replicatedColumns.equals("*") =>
-          s"$replicatedColumns, writetime($columnTs) as ts"
+          s"$replicatedColumns, $writetimeExpr"
       }
     }
 
-    def getLedgerQueryBuilder(ks: String, tbl: String, tile: Int, ver: String): String = {
-      s"SELECT ks, tbl, tile, offload_status, dt_offload, location, ver, load_status, dt_load FROM $internalMigrationKeyspace.$internalMigrationTable" +
-        s" WHERE ks='$ks' and tbl='$tbl' and tile=$tile and ver='$ver'"
+    // ---- Iceberg Table Management Functions (ported from Keyspaces version) ----
+
+    /** Fully qualified Iceberg table name in Glue Catalog, per tile. */
+    def icebergTableName(ksName: String, tblName: String, tile: Int): String = {
+      s"$icebergCatalog.${ksName}_db.${tblName}_tile_${tile}_pk_snapshots"
     }
+
+    /** Maps Cassandra types to Spark SQL types for Iceberg table creation. */
+    def cassandraTypeToSparkSql(cassandraType: String): String = {
+      cassandraType.toLowerCase match {
+        case "text" | "varchar" | "ascii" | "inet" | "uuid" | "timeuuid" => "STRING"
+        case "int" | "varint"                                            => "INT"
+        case "bigint" | "counter"                                        => "BIGINT"
+        case "float"                                                     => "FLOAT"
+        case "double"                                                    => "DOUBLE"
+        case "boolean"                                                   => "BOOLEAN"
+        case "timestamp"                                                 => "TIMESTAMP"
+        case "date"                                                      => "DATE"
+        case "decimal"                                                   => "DECIMAL(38,19)"
+        case "smallint"                                                  => "SMALLINT"
+        case "tinyint"                                                   => "TINYINT"
+        case "blob"                                                      => "BINARY"
+        case _                                                           => "STRING"
+      }
+    }
+
+    /**
+     * Creates the Iceberg table for a specific tile if it doesn't exist.
+     * Schema: primary key columns + ts (bigint)
+     * One table per tile for snapshot isolation.
+     * Location: s3://{landingZone}/{ks}/{tbl}/iceberg/tile_{tile}/
+     */
+    def ensureIcebergTableExists(
+      spark: SparkSession,
+      ksName: String,
+      tblName: String,
+      tile: Int,
+      pkColumns: Seq[Map[String, String]],
+      lz: String
+    ): Unit = {
+      val tableName = icebergTableName(ksName, tblName, tile)
+      val columnDefs = pkColumns.map { c =>
+        val name = c("name")
+        val sparkType = cassandraTypeToSparkSql(c("type"))
+        s"$name $sparkType"
+      }.mkString(", ")
+      val lzPath = lz.stripSuffix("/")
+      val location = s"$lzPath/$ksName/$tblName/iceberg/tile_$tile/"
+      val createSql =
+        s"""CREATE TABLE IF NOT EXISTS $tableName (
+           |  $columnDefs,
+           |  ts BIGINT
+           |) USING iceberg
+           |LOCATION '$location'""".stripMargin
+      spark.sql(createSql)
+    }
+
+    /**
+     * Runs expire_snapshots to retain only the N most recent snapshots.
+     * Logs and swallows errors to avoid aborting the discovery cycle.
+     */
+    def expireIcebergSnapshots(
+      spark: SparkSession,
+      tableName: String,
+      retainLast: Int = 2
+    ): Unit = {
+      Try {
+        spark.sql(s"CALL $icebergCatalog.system.expire_snapshots(table => '$tableName', retain_last => $retainLast)")
+      } match {
+        case Failure(e) => logger.warn(s"Failed to expire snapshots for $tableName: ${e.getMessage}")
+        case Success(_) => logger.info(s"Successfully expired snapshots for $tableName, retaining last $retainLast")
+      }
+    }
+
+    /**
+     * Returns the current (latest) snapshot ID of the Iceberg table.
+     * Used after a write to record in the ledger.
+     */
+    def currentIcebergSnapshotId(spark: SparkSession, tableName: String): Option[Long] = {
+      Try {
+        val snapshots = spark.sql(s"SELECT snapshot_id FROM $tableName.snapshots ORDER BY committed_at DESC LIMIT 1")
+        if (snapshots.isEmpty) None
+        else Some(snapshots.first().getLong(0))
+      } match {
+        case Failure(e) =>
+          logger.error(s"Failed to get current snapshot ID for $tableName: ${e.getMessage}")
+          None
+        case Success(result) => result
+      }
+    }
+
+    /**
+     * Checks whether a specific snapshot ID exists in the Iceberg table.
+     * Used to validate ledger-referenced snapshots before attempting time-travel reads.
+     */
+    def snapshotExists(spark: SparkSession, tableName: String, snapshotId: Long): Boolean = {
+      Try {
+        val result = spark.sql(s"SELECT snapshot_id FROM $tableName.snapshots WHERE snapshot_id = $snapshotId")
+        !result.isEmpty
+      } match {
+        case Failure(e) =>
+          logger.warn(s"Failed to check snapshot existence for $snapshotId in $tableName: ${e.getMessage}")
+          false
+        case Success(exists) => exists
+      }
+    }
+
+    /**
+     * Writes primary keys to the per-tile Iceberg table.
+     * Overwrites the entire table content for this tile.
+     */
+    def writeIcebergTileSnapshot(
+      spark: SparkSession,
+      tileDf: DataFrame,
+      tableName: String
+    ): Unit = {
+      tileDf.writeTo(tableName).overwritePartitions()
+    }
+
+    /**
+     * Reads the per-tile Iceberg table at a specific snapshot ID.
+     * Uses Spark's snapshot-id read option for time-travel.
+     */
+    def readIcebergAtSnapshot(
+      spark: SparkSession,
+      tableName: String,
+      snapshotId: Long
+    ): DataFrame = {
+      spark.read
+        .option("snapshot-id", snapshotId.toString)
+        .format("iceberg")
+        .load(tableName)
+    }
+
+    /**
+     * Computes the change set between two snapshots for a per-tile table.
+     * Returns (inserts, deletes, updates) DataFrames.
+     * Uses null-safe comparison (eqNullSafe) for ts column to detect
+     * null-to-value transitions correctly.
+     */
+    def computeIcebergChanges(
+      spark: SparkSession,
+      tableName: String,
+      prevSnapshotId: Long,
+      currSnapshotId: Long,
+      pkColumns: Seq[String],
+      colTs: String
+    ): (DataFrame, DataFrame, DataFrame) = {
+      val prev = readIcebergAtSnapshot(spark, tableName, prevSnapshotId)
+      val curr = readIcebergAtSnapshot(spark, tableName, currSnapshotId)
+
+      val inserts = curr.join(prev, pkColumns, "leftanti")
+      val deletes = prev.join(curr, pkColumns, "leftanti")
+
+      val updates = if (colTs != "None") {
+        val joinCols = pkColumns.toSeq
+        val joined = curr.alias("curr").join(prev.alias("prev"), joinCols, "inner")
+        // Use null-safe comparison: =!= returns null when either side is null,
+        // causing rows to be silently dropped. Cassandra writetime() returns
+        // null when the tracked column was never written, so we must use
+        // NOT (curr.ts <=> prev.ts) to detect null-to-value transitions.
+        val filtered = joined.filter(not(col("curr.ts").eqNullSafe(col("prev.ts"))))
+        logger.info(s"Update detection: colTs=$colTs, joinCols=$joinCols")
+        filtered.select(joinCols.map(c => col(c)) :+ col("curr.ts").alias("ts"): _*)
+      } else {
+        spark.emptyDataFrame
+      }
+
+      (inserts, deletes, updates)
+    }
+
+    /**
+     * Drops a per-tile Iceberg table from the Glue Catalog and cleans up S3 data.
+     * Uses Iceberg's built-in DROP TABLE behavior which handles both catalog metadata
+     * and underlying S3 data cleanup.
+     */
+    def dropIcebergTileTable(spark: SparkSession, ksName: String, tblName: String, tile: Int): Unit = {
+      val tableName = icebergTableName(ksName, tblName, tile)
+      Try {
+        spark.sql(s"DROP TABLE IF EXISTS $tableName")
+      } match {
+        case Failure(e) =>
+          logger.warn(s"Failed to drop Iceberg tile table $tableName: ${e.getMessage}")
+        case Success(_) =>
+          logger.info(s"Dropped Iceberg tile table $tableName")
+      }
+    }
+
+    /**
+     * Checks if legacy Parquet head/tail directories exist for a table.
+     */
+    def hasLegacyParquetData(
+      s3Client: com.amazonaws.services.s3.AmazonS3,
+      lz: String,
+      ksName: String,
+      tblName: String,
+      numTiles: Int
+    ): Boolean = {
+      val bucket = lz.replaceAll("s3://", "")
+      (0 until numTiles).exists { tile =>
+        val headPrefix = s"$ksName/$tblName/primaryKeys/tile_$tile.head/"
+        val tailPrefix = s"$ksName/$tblName/primaryKeys/tile_$tile.tail/"
+        val headResult = s3Client.listObjectsV2(new ListObjectsV2Request().withBucketName(bucket).withPrefix(headPrefix).withMaxKeys(1))
+        val tailResult = s3Client.listObjectsV2(new ListObjectsV2Request().withBucketName(bucket).withPrefix(tailPrefix).withMaxKeys(1))
+        headResult.getKeyCount > 0 || tailResult.getKeyCount > 0
+      }
+    }
+
+    /**
+     * Migrates the most recent Parquet snapshot (tail preferred, head fallback)
+     * into per-tile Iceberg tables as the initial snapshot.
+     */
+    def migrateParquetToIceberg(
+      spark: SparkSession,
+      gc: GlueContext,
+      s3Client: com.amazonaws.services.s3.AmazonS3,
+      lz: String,
+      ksName: String,
+      tblName: String,
+      numTiles: Int,
+      pkColumns: Seq[Map[String, String]]
+    ): Unit = {
+      val bucket = lz.replaceAll("s3://", "")
+      for (tile <- 0 until numTiles) {
+        Try {
+          val tableName = icebergTableName(ksName, tblName, tile)
+          ensureIcebergTableExists(spark, ksName, tblName, tile, pkColumns, lz)
+
+          val tailPrefix = s"$ksName/$tblName/primaryKeys/tile_$tile.tail/"
+          val headPrefix = s"$ksName/$tblName/primaryKeys/tile_$tile.head/"
+          val tailResult = s3Client.listObjectsV2(new ListObjectsV2Request().withBucketName(bucket).withPrefix(tailPrefix).withMaxKeys(1))
+          val headResult = s3Client.listObjectsV2(new ListObjectsV2Request().withBucketName(bucket).withPrefix(headPrefix).withMaxKeys(1))
+
+          val parquetPath = if (tailResult.getKeyCount > 0) {
+            Some(s"s3://$bucket/$ksName/$tblName/primaryKeys/tile_$tile.tail")
+          } else if (headResult.getKeyCount > 0) {
+            Some(s"s3://$bucket/$ksName/$tblName/primaryKeys/tile_$tile.head")
+          } else {
+            None
+          }
+
+          parquetPath match {
+            case Some(path) =>
+              val parquetDf = spark.read.parquet(path)
+              // Drop 'group' or 'tile' columns — per-tile tables don't need them
+              val icebergDf = parquetDf
+                .drop("group")
+                .drop("tile")
+              writeIcebergTileSnapshot(spark, icebergDf, tableName)
+              currentIcebergSnapshotId(spark, tableName) match {
+                case Some(snapshotId) =>
+                  recordDiscoverySnapshotDDB(ledgerClient, ledgerTableName, ksName, tblName, tile, snapshotId)
+                  logger.info(s"Migrated Parquet data for tile $tile from $path to Iceberg with snapshot $snapshotId")
+                case None =>
+                  logger.error(s"Failed to get snapshot ID after migrating tile $tile from $path")
+              }
+            case None =>
+              logger.info(s"No legacy Parquet data found for tile $tile, skipping migration")
+          }
+        } match {
+          case Failure(e) =>
+            logger.error(s"Failed to migrate Parquet data for tile $tile: ${e.getMessage}")
+          case Success(_) =>
+        }
+      }
+    }
+
+    // ---- End Iceberg Table Management Functions ----
 
     def binToHex(bytes: Array[Byte], sep: Option[String] = None): String = {
       sep match {
@@ -1189,20 +1753,31 @@ object GlueApp {
                         ): WriteRequest = {
       implicit val formats: DefaultFormats.type = DefaultFormats
 
+      val pkType = jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyType
+      val skType = jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyType
+
+      def toAttributeValue(rawValue: String, ddbKeyType: String): AttributeValue = {
+        ddbKeyType.toUpperCase match {
+          case "N" => new AttributeValue().withN(rawValue)
+          case _ => new AttributeValue().withS(rawValue)
+        }
+      }
+
       // Handle partition key(s)
       val partitionKeyAttribute = if (partitionKeys.size == 1) {
-        // Single partition key - use original type
         val key = partitionKeys.head
         val dataType = dataTypes.getOrElse(key,
           throw DynamoDBTypeException(s"Single partition key - use original type. Missing data type for partition key: $key"))
-
         (json \ key) match {
           case JNothing => throw DynamoDBTypeException(s"Single partition key - use original type. Missing partition key: $key")
           case JNull => throw DynamoDBTypeException(s"Single partition key - use original type. Partition key cannot be null: $key")
-          case value => createAttributeValue(value, dataType)
+          case value =>
+            val rawValue = createAttributeValue(value, dataType)
+            // Apply the configured DynamoDB key type
+            val strValue = Option(rawValue.getS).getOrElse(Option(rawValue.getN).getOrElse(value.extract[String]))
+            toAttributeValue(strValue, pkType)
         }
       } else {
-        // Multiple partition keys - combine as String
         val combinedKey = partitionKeys.map { key =>
           (json \ key) match {
             case JNothing => throw DynamoDBTypeException(s"Multiple partition keys - combine as String. Missing partition key: $key")
@@ -1210,25 +1785,24 @@ object GlueApp {
             case value => value.extract[String]
           }
         }.mkString(separator)
-
-        new AttributeValue().withS(combinedKey)
+        toAttributeValue(combinedKey, pkType)
       }
 
       // Handle sort key(s) if present
       val itemWithSortKey = if (sortKeys.nonEmpty) {
         val sortKeyAttribute = if (sortKeys.size == 1) {
-          // Single sort key - use original type
           val key = sortKeys.head
           val dataType = dataTypes.getOrElse(key,
             throw DynamoDBTypeException(s"Handle sort key(s) if present. Missing data type for sort key: $key"))
-
           (json \ key) match {
             case JNothing => throw DynamoDBTypeException(s"Handle sort key(s) if present. Missing sort key: $key")
             case JNull => throw DynamoDBTypeException(s"Handle sort key(s) if present. Sort key cannot be null: $key")
-            case value => createAttributeValue(value, dataType)
+            case value =>
+              val rawValue = createAttributeValue(value, dataType)
+              val strValue = Option(rawValue.getS).getOrElse(Option(rawValue.getN).getOrElse(value.extract[String]))
+              toAttributeValue(strValue, skType)
           }
         } else {
-          // Multiple sort keys - combine as String
           val combinedKey = sortKeys.map { key =>
             (json \ key) match {
               case JNothing => throw DynamoDBTypeException(s"Multiple sort keys - combine as String. Missing sort key: $key")
@@ -1236,8 +1810,7 @@ object GlueApp {
               case value => value.extract[String]
             }
           }.mkString(separator)
-
-          new AttributeValue().withS(combinedKey)
+          toAttributeValue(combinedKey, skType)
         }
         Map(targetSortKeyName -> sortKeyAttribute)
       } else {
@@ -1287,14 +1860,64 @@ object GlueApp {
         lazy val supportFunctions = new SupportFunctions()
         lazy val s3ClientOnPartition = AmazonS3ClientBuilder.defaultClient()
         lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition)
-        lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
         lazy val dynamodbCnnParPar = getDDBConnection(jsonMapping4s.dynamodb.dynamoDBConnection.endpoint, jsonMapping4s.dynamodb.dynamoDBConnection.region)
-        lazy val fl = FlushingSet(dynamodbCnnParPar, jsonMapping4s.dynamodb.writeConfiguration, logger, trgTableName)
+        lazy val dlqConfig = DlqConfig(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op")
+        lazy val fl = FlushingSet(dynamodbCnnParPar, jsonMapping4s.dynamodb.writeConfiguration, dlqConfig, logger, trgTableName)
         lazy val maxStatementsPerBatch = jsonMapping4s.dynamodb.writeConfiguration.maxStatementsPerBatch
         lazy val rowConverter = new RowConverter
         lazy val ddbPartitionKey = jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyName
         lazy val ddbSortKey = jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyName
         lazy val ddbKeySeparator = jsonMapping4s.replication.dynamoDBPrimaryKey.separator
+        lazy val xxHashFactory = XXHashFactory.fastestInstance()
+        lazy val xxHash64: XXHash64 = xxHashFactory.hash64()
+        lazy val seedXxHash64 = 42L
+
+        def hashValue(value: String, rule: String): Any = {
+          rule.toLowerCase match {
+            case "murmurhash3" => MurmurHash3.stringHash(value)
+            case "md5" =>
+              val md = MessageDigest.getInstance("MD5")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "sha-1" | "sha1" =>
+              val md = MessageDigest.getInstance("SHA-1")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "sha-2" | "sha2" | "sha-256" | "sha256" =>
+              val md = MessageDigest.getInstance("SHA-256")
+              md.digest(value.getBytes(StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+            case "xxhash64" =>
+              val bytes = value.getBytes("UTF-8")
+              xxHash64.hash(bytes, 0, bytes.length, seedXxHash64)
+            case _ => value
+          }
+        }
+
+        def valueTransformer(inputJson: JValue, rules: List[TransformExpression]): JValue = {
+          if (rules.isEmpty) return inputJson
+
+          rules.foldLeft(inputJson) { (currentJson, rule) =>
+            (currentJson \ rule.columnName) match {
+              case JNothing => currentJson
+              case value =>
+                val stringValue = value.values.toString
+                val hashedValue = hashValue(stringValue, rule.rule)
+                val newValue = hashedValue match {
+                  case s: String => JString(s)
+                  case i: Int => JInt(i)
+                  case l: Long => JLong(l)
+                  case other => JString(other.toString)
+                }
+                if (rule.alias.nonEmpty) {
+                  if (rule.keepSource) {
+                    currentJson merge JObject(rule.alias -> newValue)
+                  } else {
+                    currentJson.removeField { case (k, _) => k == rule.columnName } merge JObject(rule.alias -> newValue)
+                  }
+                } else {
+                  currentJson.transformField { case (k, _) if k == rule.columnName => (k, newValue) }
+                }
+            }
+          }
+        }
 
         def processRow(row: Row): Unit = {
           val wc = rowConverter.rowToStatement(row, columns, columnsPos)
@@ -1325,13 +1948,60 @@ object GlueApp {
 
         def executeDelete(attributes: mutable.LinkedHashMap[String, AttributeValue], wc: String): Unit = {
 
+          // Apply transform expressions to attributes for delete key computation
+          val effectiveAttributes = if (jsonMapping4s.dynamodb.transformation.enabled && jsonMapping4s.dynamodb.transformation.transformExpressions.nonEmpty) {
+            val transformed = mutable.LinkedHashMap[String, AttributeValue]() ++= attributes
+            jsonMapping4s.dynamodb.transformation.transformExpressions.foreach { rule =>
+              if (transformed.contains(rule.columnName)) {
+                val originalValue = {
+                  val av = transformed(rule.columnName)
+                  Option(av.getS).orElse(Option(av.getN)).getOrElse("")
+                }
+                val hashedValue = hashValue(originalValue, rule.rule).toString
+                val hashedAttr = rule.rule.toLowerCase match {
+                  case "murmurhash3" => new AttributeValue().withN(hashedValue)
+                  case "xxhash64" => new AttributeValue().withN(hashedValue)
+                  case _ => new AttributeValue().withS(hashedValue)
+                }
+                if (rule.alias.nonEmpty) {
+                  if (!rule.keepSource) {
+                    transformed.remove(rule.columnName)
+                  }
+                  transformed.put(rule.alias, hashedAttr)
+                } else {
+                  transformed.put(rule.columnName, hashedAttr)
+                }
+              }
+            }
+            transformed
+          } else {
+            attributes
+          }
+
           def combineKeys(keys: Seq[String]): String = {
-            attributes.filterKeys(keys.contains)
+            effectiveAttributes.filterKeys(keys.contains)
               .values
               .map(av =>
                 Option(av.getS).orElse(Option(av.getN)).getOrElse("")
               )
               .mkString(ddbKeySeparator)
+          }
+
+          def toKeyAttribute(rawValue: String, ddbKeyType: String): AttributeValue = {
+            ddbKeyType.toUpperCase match {
+              case "N" => new AttributeValue().withN(rawValue)
+              case _ => new AttributeValue().withS(rawValue)
+            }
+          }
+
+          def toPkAttribute(value: AttributeValue): AttributeValue = {
+            val raw = Option(value.getS).orElse(Option(value.getN)).getOrElse("")
+            toKeyAttribute(raw, jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyType)
+          }
+
+          def toSkAttribute(value: AttributeValue): AttributeValue = {
+            val raw = Option(value.getS).orElse(Option(value.getN)).getOrElse("")
+            toKeyAttribute(raw, jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyType)
           }
 
           def createDeleteRequest(partitionValue: AttributeValue, sortValue: Option[AttributeValue] = None): WriteRequest = {
@@ -1351,40 +2021,40 @@ object GlueApp {
             (partitionKeys.size, clusteringColumns.size) match {
               // Single partition key, no clustering columns
               case (1, 0) =>
-                fl.executeSingleDelete(createDeleteRequest(attributes.values.head))
+                fl.executeSingleDelete(createDeleteRequest(toPkAttribute(effectiveAttributes.values.head)))
 
               // Single partition key, single clustering column
               case (1, 1) =>
                 fl.executeSingleDelete(createDeleteRequest(
-                  attributes(ddbPartitionKey),
-                  Some(attributes(clusteringColumns.head))
+                  toPkAttribute(effectiveAttributes(partitionKeys.head)),
+                  Some(toSkAttribute(effectiveAttributes(clusteringColumns.head)))
                 ))
 
               // Multiple partition keys and single clustering column
               case (n, 1) if n > 1 =>
-                val partitionValue = new AttributeValue().withS(combineKeys(partitionKeys))
+                val partitionValue = toKeyAttribute(combineKeys(partitionKeys), jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyType)
                 fl.executeSingleDelete(createDeleteRequest(
                   partitionValue,
-                  Some(attributes(clusteringColumns.head))
+                  Some(toSkAttribute(effectiveAttributes(clusteringColumns.head)))
                 ))
 
               // Single partition key, multiple clustering columns
               case (1, n) if n > 1 =>
-                val sortKeyValue = new AttributeValue().withS(combineKeys(clusteringColumns))
+                val sortKeyValue = toKeyAttribute(combineKeys(clusteringColumns), jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyType)
                 fl.executeSingleDelete(createDeleteRequest(
-                  attributes(ddbPartitionKey),
+                  toPkAttribute(effectiveAttributes(partitionKeys.head)),
                   Some(sortKeyValue)
                 ))
 
               // Multiple partition keys, no clustering columns
-              case (_, 0) /*if attributes.size > 1 */ =>
-                val partitionValue = new AttributeValue().withS(combineKeys(partitionKeys))
+              case (_, 0) =>
+                val partitionValue = toKeyAttribute(combineKeys(partitionKeys), jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyType)
                 fl.executeSingleDelete(createDeleteRequest(partitionValue))
 
               // Multiple partition keys, multiple clustering columns
-              case (_, n) if n > 1 /*&& attributes.size > 1 */ =>
-                val partitionValue = new AttributeValue().withS(combineKeys(partitionKeys))
-                val sortKeyValue = new AttributeValue().withS(combineKeys(clusteringColumns))
+              case (_, n) if n > 1 =>
+                val partitionValue = toKeyAttribute(combineKeys(partitionKeys), jsonMapping4s.replication.dynamoDBPrimaryKey.partitionKeyType)
+                val sortKeyValue = toKeyAttribute(combineKeys(clusteringColumns), jsonMapping4s.replication.dynamoDBPrimaryKey.sortKeyType)
                 fl.executeSingleDelete(createDeleteRequest(
                   partitionValue,
                   Some(sortKeyValue)
@@ -1401,7 +2071,10 @@ object GlueApp {
         def executePut(rs: String, whereClause: String): Unit = {
           val jsonRowEscaped = supportFunctions.correctValues(blobColumns, udtColumns, rs)
           val jsonRow = compressValues(jsonRowEscaped)
-          val json4sRow = jsonRow
+          val json4sRow = if (jsonMapping4s.dynamodb.transformation.enabled)
+            valueTransformer(jsonRow, jsonMapping4s.dynamodb.transformation.transformExpressions)
+          else
+            jsonRow
           val backToJsonRow = backToCQLStatementWithoutTs(json4sRow)
 
           val ddbRequest = createPutRequest(backToJsonRow,
@@ -1433,7 +2106,6 @@ object GlueApp {
 
         partition.foreach(processRow)
         fl.flush()
-        keyspacesConnPerPar.close()
         cassandraConnPerPar.close()
         dynamodbCnnParPar.shutdown()
       })
@@ -1457,162 +2129,124 @@ object GlueApp {
     }
 
     def dataReplicationProcess(): Unit = {
-      val ledger = internalConnectionToTarget.execute(
-        s"""SELECT location,tile,ver
-           |FROM $internalMigrationKeyspace.$internalMigrationTable
-           | WHERE ks='$srcKeyspaceName'
-           |AND tbl='$srcTableName'
-           |AND tile=$currentTile
-           |AND load_status=''
-           |AND offload_status='SUCCESS'
-           |AND ver in ('head','tail')
-           |ALLOW FILTERING""".stripMargin).all().asScala
+      val icebergTblName = icebergTableName(srcKeyspaceName, srcTableName, currentTile)
+      val pkColumnNames = pks
 
-      val ledgerList = Option(ledger)
+      logger.info(s"Starting replication for tile $currentTile, Iceberg table: $icebergTblName")
 
-      if (!ledgerList.isEmpty) {
-        val locations = ledgerList.get.map(c => (c.getString(0), c.getInt(1), c.getString(2))).toList.par
-        val heads = locations.count(_._3 == "head")
-        val tails = locations.count(_._3 == "tail")
+      // Read both curr and prev ledger entries from DynamoDB
+      val currEntry = getLedgerEntry(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName, currentTile, "curr")
+      val prevEntry = getLedgerEntry(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName, currentTile, "prev")
 
-        if (heads > 0 && tails == 0) {
+      logger.info(s"Ledger curr for tile $currentTile: ${currEntry.map(m => s"location=${m("location")}, load_status='${m("load_status")}', offload_status='${m("offload_status")}'").getOrElse("NOT FOUND")}")
+      logger.info(s"Ledger prev for tile $currentTile: ${prevEntry.map(m => s"location=${m("location")}, load_status='${m("load_status")}', offload_status='${m("offload_status")}'").getOrElse("NOT FOUND")}")
 
-          logger.info(s"Historical data load.Processing locations: $locations")
-          locations.foreach(location => {
-            val ledgerConnection = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
+      currEntry match {
+        case None =>
+          logger.info(s"No pending replication work for tile $currentTile")
 
-            val loc = location._1
-            val sourcePath = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/$loc"
-            val sourceDf = glueContext.getSourceWithFormat(
-              connectionType = "s3",
-              format = "parquet",
-              options = JsonOptions(s"""{"paths": ["$sourcePath"]}""")
-            ).getDynamicFrame().toDF().persist(cachingMode)
+        case Some(currMap) =>
+          val currOffloadStatus = currMap.getOrElse("offload_status", "")
+          val currLoadStatus = currMap.getOrElse("load_status", "")
+          val currSnapshotIdOpt = Try(currMap("location").toLong).toOption
 
-            val sourceDfV2 = sourceDf.drop("group").drop("ts")
-            val tile = location._2
+          if (currOffloadStatus != "SUCCESS") {
+            logger.info(s"Discovery not completed for tile $currentTile (offload_status='$currOffloadStatus')")
+          } else if (currSnapshotIdOpt.isEmpty) {
+            logger.warn(s"Invalid snapshot ID in ledger for tile $currentTile")
+          } else if (currLoadStatus == "SUCCESS") {
+            // Already replicated this snapshot, nothing to do
+            logger.info(s"Current snapshot already replicated for tile $currentTile")
+          } else {
+            val currSnapshotId = currSnapshotIdOpt.get
 
-            persist(sourceDfV2, columns, columnsPos, tile, "insert")
+            // Check if prev exists with load_status=SUCCESS — that means we already did
+            // an initial load and this is a delta cycle
+            val prevSnapshotIdOpt = prevEntry.flatMap(m => Try(m("location").toLong).toOption)
+            val prevLoadStatus = prevEntry.map(m => m.getOrElse("load_status", "")).getOrElse("")
 
-            ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$tile,'head','SUCCESS', toTimestamp(now()), '')")
-            val cnt = sourceDfV2.count()
+            prevSnapshotIdOpt match {
+              case Some(prevSnapshotId) if prevLoadStatus == "SUCCESS" =>
+                // Validate both snapshots exist before attempting delta load
+                val prevExists = snapshotExists(sparkSession, icebergTblName, prevSnapshotId)
+                val currExists = snapshotExists(sparkSession, icebergTblName, currSnapshotId)
 
-            val content = ReplicationStats(tile, cnt, 0, 0, 0, org.joda.time.LocalDateTime.now().toString)
-            putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$tile", "count.json", content)
-            ledgerConnection.close()
-            sourceDf.unpersist()
-          }
-          )
-        }
+                if (!prevExists || !currExists) {
+                  logger.warn(s"Snapshot missing for tile $currentTile (prev=$prevSnapshotId exists=$prevExists, curr=$currSnapshotId exists=$currExists), skipping — waiting for discovery to write a fresh snapshot")
+                } else {
+                  // Delta load: compute changes between prev and curr snapshots
+                  logger.info(s"Processing delta for tile $currentTile (prev=$prevSnapshotId, curr=$currSnapshotId)")
+                  var inserted: Long = 0
+                  var deleted: Long = 0
+                  var updated: Long = 0
 
-        if ((heads > 0 && tails > 0) || (heads == 0 && tails > 0)) {
-          var inserted: Long = 0
-          var deleted: Long = 0
-          var updated: Long = 0
+                  val (newInsertsDF, newDeletesDF, newUpdatesDF) = computeIcebergChanges(
+                    sparkSession, icebergTblName, prevSnapshotId, currSnapshotId,
+                    pkColumnNames, columnTs
+                  )
 
-          logger.info("Processing replica...")
-          val pathTail = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.tail"
-          val dfTail = glueContext.getSourceWithFormat(
-              connectionType = "s3",
-              format = "parquet",
-              options = JsonOptions(s"""{"paths": ["$pathTail"]}""")
-            ).getDynamicFrame()
-            .toDF()
-            .drop("group")
-            .repartition(defaultPartitions, pks.map(c => col(c)): _*)
-            .persist(cachingMode)
+                  val insertsDf = newInsertsDF.drop("ts").persist(cachingMode)
+                  val deletesDf = newDeletesDF.drop("ts").persist(cachingMode)
 
-          val pathHead = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$currentTile.head"
-          val dfHead = glueContext.getSourceWithFormat(
-              connectionType = "s3",
-              format = "parquet",
-              options = JsonOptions(s"""{"paths": ["$pathHead"]}""")
-            ).getDynamicFrame()
-            .toDF()
-            .drop("group")
-            .repartition(defaultPartitions, pks.map(c => col(c)): _*)
-            .persist(cachingMode)
+                  columnTs match {
+                    case ct if ct == "None" && counterColumns.isEmpty => {
+                      if (!insertsDf.isEmpty) {
+                        persist(insertsDf, columns, columnsPos, currentTile, "insert")
+                        inserted = insertsDf.count()
+                      }
+                    }
+                    case _ => {
+                      val updatesDf = newUpdatesDF.drop("ts").persist(cachingMode)
+                      if (!(insertsDf.isEmpty && updatesDf.isEmpty)) {
+                        persist(insertsDf, columns, columnsPos, currentTile, "insert")
+                        persist(updatesDf, columns, columnsPos, currentTile, "update")
+                        inserted = insertsDf.count()
+                        updated = updatesDf.count()
+                      }
+                      updatesDf.unpersist()
+                    }
+                  }
 
-          val newInsertsDF: DataFrame = dfTail.drop("ts").as("tail").join(dfHead.drop("ts").as("head"), cond, "leftanti").persist(cachingMode)
-          val newDeletesDF: DataFrame = dfHead.drop("ts").as("head").join(dfTail.drop("ts").as("tail"), cond, "leftanti").persist(cachingMode)
+                  if (!deletesDf.isEmpty) {
+                    persist(deletesDf, columns, columnsPos, currentTile, "delete")
+                    deleted = deletesDf.count()
+                  }
 
-          columnTs match {
-            case ct if ct == "None" && counterColumns.isEmpty => {
-              if (!newInsertsDF.isEmpty) {
-                persist(newInsertsDF, columns, columnsPos, currentTile, "insert")
-                inserted = newInsertsDF.count()
-              }
-            }
-            case ct if ct == "None" && counterColumns.nonEmpty => {
-              val newCounterUpdatesDF = dfTail.as("tail").join(dfHead.as("head"), cond, "inner").
-                filter($"tail.counter_hash" =!= $"head.counter_hash").
-                selectExpr(pks.map(x => s"tail.$x") ++ counterColumns.map(y => s"tail.$y-head.$y as $y"): _*).persist(cachingMode)
-              persist(newInsertsDF, columns, columnsPos, currentTile, "insert")
-              persist(newCounterUpdatesDF, columns, columnsPos, currentTile, "update")
-              inserted = newInsertsDF.count()
-              updated = newCounterUpdatesDF.count()
-            }
-            case _ => {
+                  logger.info(s"Delta completed for tile $currentTile: inserts=$inserted, updates=$updated, deletes=$deleted")
 
-              val tailKeys = dfTail
-                .select(col("ts") +: pks.map(col): _*)
-                .withColumn("tail_ts", col("ts"))
-                .drop("ts")
-                .persist(cachingMode)
+                  if (updated != 0 || inserted != 0 || deleted != 0) {
+                    val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, org.joda.time.LocalDateTime.now().toString)
+                    putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
+                  }
 
-              val headKeys = dfHead
-                .select(col("ts") +: pks.map(col): _*)
-                .withColumn("head_ts", col("ts"))
-                .drop("ts")
-                .persist(cachingMode)
+                  insertsDf.unpersist()
+                  deletesDf.unpersist()
 
-              val tsComparisonDF = tailKeys
-                .join(broadcast(headKeys), pks, "inner")
-                .filter($"tail_ts" > $"head_ts")
-                .select(pks.map(col): _*)
-                .persist(cachingMode)
+                  markReplicationCompleteDDB(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName, currentTile)
+                  expireIcebergSnapshots(sparkSession, icebergTblName)
+                }
 
-              if (!newInsertsDF.isEmpty) {
-                persist(newInsertsDF, columns, columnsPos, currentTile, "insert")
-                inserted = newInsertsDF.count()
-              }
+              case _ =>
+                // Initial/historical load: no previous replicated snapshot
+                if (!snapshotExists(sparkSession, icebergTblName, currSnapshotId)) {
+                  logger.warn(s"Snapshot $currSnapshotId missing for tile $currentTile, skipping — waiting for discovery to write a fresh snapshot")
+                } else {
+                  logger.info(s"Historical data load for tile $currentTile (snapshot=$currSnapshotId)")
+                  val sourceDf = readIcebergAtSnapshot(sparkSession, icebergTblName, currSnapshotId)
+                  val sourceDfV2 = sourceDf.drop("ts")
 
-              if (!tsComparisonDF.isEmpty) {
-                val newUpdatesDF = dfTail
-                  .join(broadcast(tsComparisonDF), pks, "inner")
-                  .persist(cachingMode)
-                persist(newUpdatesDF, columns, columnsPos, currentTile, "update")
-                updated = newUpdatesDF.count()
-                newUpdatesDF.unpersist()
+                  persist(shuffleDfV2(sourceDfV2), columns, columnsPos, currentTile, "insert")
+                  val cnt = sourceDfV2.count()
+                  logger.info(s"Historical load completed for tile $currentTile: $cnt rows inserted")
 
-              }
-              tailKeys.unpersist()
-              headKeys.unpersist()
-              tsComparisonDF.unpersist()
+                  val content = ReplicationStats(currentTile, cnt, 0, 0, 0, org.joda.time.LocalDateTime.now().toString)
+                  putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
+
+                  markReplicationCompleteDDB(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName, currentTile)
+                  expireIcebergSnapshots(sparkSession, icebergTblName)
+                }
             }
           }
-
-          if (!newDeletesDF.isEmpty) {
-            persist(newDeletesDF, columns, columnsPos, currentTile, "delete")
-            deleted = newDeletesDF.count()
-          }
-
-          if (updated != 0 || inserted != 0 || deleted != 0) {
-            val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, org.joda.time.LocalDateTime.now().toString)
-            putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
-          }
-
-          newInsertsDF.unpersist()
-          newDeletesDF.unpersist()
-          dfTail.unpersist()
-          dfHead.unpersist()
-
-          internalConnectionToTarget.execute(s"BEGIN UNLOGGED BATCH " +
-            s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'tail','SUCCESS', toTimestamp(now()), '');" +
-            s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,ver,load_status,dt_load, offload_status) VALUES('$srcKeyspaceName','$srcTableName',$currentTile,'head','SUCCESS', toTimestamp(now()), '');" +
-            s"APPLY BATCH;")
-
-        }
       }
     }
 
@@ -1692,6 +2326,20 @@ object GlueApp {
 
     def sourceScan(): DataFrame = {
       logger.info("Reading the source")
+
+      // Check if we need to use custom varint reader
+      val useCustomVarintReader = jsonMapping4s.replication.readConfiguration.useCustomVarintReader
+
+      if (useCustomVarintReader) {
+        logger.info("Using custom varint reader to handle potential overflow")
+        sourceScanWithCustomVarintReader()
+      } else {
+        sourceScanStandard()
+      }
+    }
+
+    def sourceScanStandard(): DataFrame = {
+      logger.info("Using standard DataFrame reader")
       val cassandraReadConfig = Map(
         "inferSchema" -> "true",
         "spark.cassandra.input.split.sizeInMB" -> jsonMapping4s.replication.readConfiguration.splitSizeInMB.toString,
@@ -1762,6 +2410,194 @@ object GlueApp {
       finalDf
     }
 
+    def sourceScanWithCustomVarintReader(): DataFrame = {
+      import com.datastax.spark.connector._
+      import com.datastax.spark.connector.cql.CassandraConnector
+      import com.datastax.spark.connector.rdd.ReadConf
+      import org.apache.spark.sql.Row
+      import sparkSession.implicits._
+
+      logger.info("Using custom varint reader for primary keys")
+
+      val srcTableForDiscovery = jsonMapping4s.replication.useMaterializedView match {
+        case mv if mv.enabled => mv.mvName
+        case _ => srcTableName
+      }
+
+      val pointInTimePredicate = {
+        val op = jsonMapping4s.replication.pointInTimeReplicationConfig.predicateOp
+        (c: org.apache.spark.sql.ColumnName) =>
+          op match {
+            case "greaterThan" => c > replicationPointInTime
+            case "lessThanOrEqual" => c <= replicationPointInTime
+            case _ => true
+          }
+      }
+
+      val filterColumns = jsonMapping4s.dynamodb.transformation.addNonPrimaryKeyColumns match {
+        case cols if cols.isEmpty => pkFinal
+        case cols => pkFinal ++ cols
+      }
+
+      // Get column metadata from Cassandra
+      val columnMeta = getAllColumns(internalConnectionToSource, srcKeyspaceName, srcTableForDiscovery)
+        .map(colMap => colMap.head) // Extract (columnName, columnType) pairs
+        .filter(col => filterColumns.contains(col._1))
+        .toMap
+
+      logger.info(s"Column metadata: $columnMeta")
+      logger.info(s"Filter columns: $filterColumns")
+
+      // Create schema with varint columns as StringType and writetime as LongType
+      val schema = StructType(filterColumns.map { colName =>
+        // Extract alias for writetime columns
+        val fieldName = if (colName.contains("writetime(") && colName.contains(") as ")) {
+          val writetimePattern = """writetime\(([^)]+)\)\s+as\s+(.+)""".r
+          colName match {
+            case writetimePattern(_, alias) => alias.trim
+            case _ => colName
+          }
+        } else {
+          colName
+        }
+
+        val colType = columnMeta.getOrElse(colName, "text").toLowerCase
+        val dataType = if (colType == "varint") {
+          StringType // Store varint as string to handle overflow
+        } else if (colName.contains("writetime(") || colName.contains("as ts")) {
+          LongType // Writetime columns return Long values
+        } else {
+          colType match {
+            case "text" | "varchar" | "ascii" => StringType
+            case "int" => IntegerType
+            case "bigint" => LongType
+            case "boolean" => BooleanType
+            case "double" => DoubleType
+            case "float" => FloatType
+            case "timestamp" => TimestampType
+            case "date" => DateType
+            case "uuid" | "timeuuid" => StringType
+            case "blob" => BinaryType
+            case "decimal" => DecimalType(38, 0)
+            case "smallint" => ShortType
+            case "tinyint" => ByteType
+            case _ => LongType // Default to LongType for special columns like writetime
+          }
+        }
+        StructField(fieldName, dataType, nullable = true)
+      }.toArray)
+
+      logger.info(s"Created schema: ${schema.fields.map(f => s"${f.name}:${f.dataType}").mkString(", ")}")
+
+      // Convert filterColumns to use RDD API syntax for writetime
+      val rddSelectColumns = filterColumns.map { colName =>
+        if (colName.contains("writetime(") && colName.contains(") as ")) {
+          // Extract column name from writetime(column) as alias
+          val writetimePattern = """writetime\(([^)]+)\)\s+as\s+(.+)""".r
+          colName match {
+            case writetimePattern(sourceCol, alias) =>
+              logger.info(s"Converting writetime syntax: $colName -> WriteTime($sourceCol) as $alias")
+              // For RDD API, we need to use WriteTime function
+              com.datastax.spark.connector.WriteTime(sourceCol) as alias
+            case _ =>
+              com.datastax.spark.connector.ColumnName(colName)
+          }
+        } else {
+          com.datastax.spark.connector.ColumnName(colName)
+        }
+      }
+
+      logger.info(s"RDD select columns: ${rddSelectColumns.mkString(", ")}")
+
+      // Configure Cassandra connector for RDD API
+      val cassandraConnector = CassandraConnector(
+        sparkContext.getConf
+          .set("spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
+          .set("spark.cassandra.input.consistency.level", jsonMapping4s.replication.readConfiguration.consistencyLevel)
+      )
+
+      val cassandraRDD = sparkContext.cassandraTable(srcKeyspaceName, srcTableForDiscovery)
+        .withConnector(cassandraConnector)
+        .withReadConf(ReadConf(
+          splitSizeInMB = jsonMapping4s.replication.readConfiguration.splitSizeInMB,
+          fetchSizeInRows = jsonMapping4s.replication.readConfiguration.fetchSizeInRows,
+          taskMetricsEnabled = true
+        ))
+        .select(rddSelectColumns: _*)
+
+      logger.info(s"Created Cassandra RDD for table $srcKeyspaceName.$srcTableForDiscovery with custom connector")
+
+      // Convert CassandraRow to Spark Row, handling varint columns specially
+      val rowRDD = cassandraRDD.map { cassandraRow =>
+        val values = filterColumns.map { colName =>
+          val colType = columnMeta.getOrElse(colName, "text").toLowerCase
+          if (colType == "varint") {
+            // Handle varint as string to avoid overflow using the proper getVarInt method
+            try {
+              cassandraRow.getVarIntOption(colName) match {
+                case Some(varInt) => varInt.toString // Convert to string to avoid overflow and schema mismatch
+                case None => null
+              }
+            } catch {
+              case e: Exception =>
+                logger.warn(s"Error reading varint column $colName: ${e.getMessage}")
+                null
+            }
+          } else {
+            // Handle other column types
+            try {
+              colType match {
+                case "text" | "varchar" | "ascii" => cassandraRow.getStringOption(colName).orNull
+                case "int" => cassandraRow.getIntOption(colName).map(Integer.valueOf).orNull
+                case "bigint" => cassandraRow.getLongOption(colName).map(java.lang.Long.valueOf).orNull
+                case "boolean" => cassandraRow.getBooleanOption(colName).map(java.lang.Boolean.valueOf).orNull
+                case "double" => cassandraRow.getDoubleOption(colName).map(java.lang.Double.valueOf).orNull
+                case "float" => cassandraRow.getFloatOption(colName).map(java.lang.Float.valueOf).orNull
+                case "timestamp" => cassandraRow.getDateOption(colName).orNull
+                case "date" => cassandraRow.getDateOption(colName).orNull
+                case "uuid" | "timeuuid" => cassandraRow.getUUIDOption(colName).map(_.toString).orNull
+                case "blob" => cassandraRow.getBytesOption(colName).map(_.array()).orNull
+                case "decimal" => cassandraRow.getDecimalOption(colName).orNull
+                case "smallint" => cassandraRow.getIntOption(colName).map(Integer.valueOf).orNull
+                case "tinyint" => cassandraRow.getIntOption(colName).map(Integer.valueOf).orNull
+                case _ =>
+                  // Handle special cases like writetime columns that might return BigInteger
+                  val rawValue = cassandraRow.getVarInt(colName)
+                  rawValue match {
+                    case bi: BigInt => bi.longValue() // Convert BigInteger to Long for writetime
+                    case other => other
+                  }
+              }
+            } catch {
+              case e: Exception =>
+                logger.warn(s"Error reading column $colName of type $colType: ${e.getMessage}")
+                null
+            }
+          }
+        }.toSeq
+        Row.fromSeq(values)
+      }
+
+      val df = sparkSession.createDataFrame(rowRDD, schema)
+
+      val groupingExpr = abs(xxhash64(concat(
+        pkFinalWithoutTs.map { colName =>
+          col(colName).cast("string")
+        }: _*
+      ))) % totalTiles
+
+      val finalDf = df
+        .withColumn("group", groupingExpr)
+        .repartition(defaultPartitions, col("group"))
+        .transform(df =>
+          if (!jsonMapping4s.dynamodb.transformation.enabled) df
+          else if (jsonMapping4s.dynamodb.transformation.enabled && !jsonMapping4s.dynamodb.transformation.filterExpression.isEmpty)
+            df.filter(jsonMapping4s.dynamodb.transformation.filterExpression)
+          else df
+        )
+      finalDf
+    }
+
     def getCurrentTilesCount(fileType: String = "both"): Int = {
       val listObjectsRequest = new ListObjectsV2Request()
         .withBucketName(bcktName)
@@ -1792,57 +2628,104 @@ object GlueApp {
     }
 
     def recomputeTiles(): Unit = {
-      val ledgerConnection = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
       try {
-        val currentNumTiles = getCurrentTilesCount()
+        // Use Iceberg-based tile count detection instead of S3 Parquet scan
+        val currentNumTiles = getCurrentIcebergTilesCount(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName)
         logger.info(s"new tiles $totalTiles, current tiles $currentNumTiles")
 
         if (currentNumTiles > 0 && currentNumTiles != totalTiles) {
           logger.info(s"Detected a change in tiles from $currentNumTiles to $totalTiles. Recomputing tiles")
 
-          // Read and transform primary keys
-          val primaryKeys = glueContext.getSourceWithFormat(
-              connectionType = "s3",
-              format = "parquet",
-              options = JsonOptions(s"""{"paths": ["$landingZone/$srcKeyspaceName/$srcTableName/primaryKeysCopy"]}""")
-            ).getDynamicFrame()
-            .toDF()
-            .drop("group")
+          // Read existing primary keys from per-tile Iceberg tables instead of Parquet
+          val tileDataFrames = (0 until currentNumTiles).map { tile =>
+            val tblName = icebergTableName(srcKeyspaceName, srcTableName, tile)
+            sparkSession.read.format("iceberg").load(tblName)
+          }
+          val unionedDf = tileDataFrames.reduce(_ unionByName _)
+          val primaryKeys = unionedDf
+            .drop("tile")
             .distinct()
             .persist(cachingMode)
 
-          // Calculate hash and group
+          val originalCount = primaryKeys.count()
+
+          // Infer PK columns using inferKeys (same as keysDiscoveryProcess)
+          val pkColumnsForIceberg = inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs)
+            .map(m => { val (name, tpe) = m.head; Map("name" -> name, "type" -> tpe) })
+
+          // Recompute tile assignment via xxhash64
           val hashColumns = pkFinalWithoutTs.map(col)
           val transformedDf = primaryKeys
             .withColumn("group", abs(xxhash64(concat(hashColumns: _*))) % totalTiles)
             .repartition(totalTiles, col("group"))
             .persist(cachingMode)
 
-          // Clear existing ledger entries
-          ledgerConnection.execute(s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName'")
+          // Clear all existing ledger entries for the source table before writing new entries
+          deleteLedgerEntriesForTable(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName)
 
-          // Process tiles in parallel
+          // Create Iceberg database and ensure all tile tables exist sequentially
+          // (same pattern as keysDiscoveryProcess to avoid Glue Catalog concurrency conflicts)
+          val dbName = s"$icebergCatalog.${srcKeyspaceName}_db"
+          sparkSession.sql(s"CREATE DATABASE IF NOT EXISTS $dbName")
+          for (tile <- 0 until totalTiles) {
+            ensureIcebergTableExists(sparkSession, srcKeyspaceName, srcTableName, tile, pkColumnsForIceberg, landingZone)
+          }
+
+          // Write tiles in parallel via Iceberg + record snapshots in ledger
           val results = (0 until totalTiles).toList.par.map { tile =>
             try {
-              // Process each tile
               val tileDf = transformedDf
                 .where(col("group") === tile)
+                .drop("group")
                 .repartition(defaultPartitions, pks.map(col): _*)
 
-              // Cache the count before writing
               val tileCount = tileDf.count()
 
-              // Write tile data
-              writeWithSizeControl(tileDf, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
+              // Write to per-tile Iceberg table
+              val icebergTblName = icebergTableName(srcKeyspaceName, srcTableName, tile)
+              writeIcebergTileSnapshot(sparkSession, tileDf, icebergTblName)
 
-              // Update ledger
-              ledgerConnection.execute(
-                s"""INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(
-                   |ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load
-                   |) VALUES(
-                   |'$srcKeyspaceName','$srcTableName',$tile,'SUCCESS',toTimestamp(now()),
-                   |'tile_$tile.head','head','SUCCESS',''
-                   |)""".stripMargin)
+              // Record snapshot in ledger with both curr and prev entries using TransactWriteItems.
+              // prev is marked as load_status='SUCCESS' so replication sees a valid baseline
+              // and does a delta comparison (finding zero changes) instead of a full re-replicate.
+              val snapshotIdOpt = currentIcebergSnapshotId(sparkSession, icebergTblName)
+              snapshotIdOpt match {
+                case Some(snapshotId) =>
+                  val pk = ledgerPartitionKey(srcKeyspaceName, srcTableName, tile)
+                  val now = Instant.now().toString
+
+                  // Write prev entry with load_status=SUCCESS (baseline for delta comparison)
+                  val prevItem = Map(
+                    "pk" -> new AttributeValue().withS(pk),
+                    "sk" -> new AttributeValue().withS("prev"),
+                    "offload_status" -> new AttributeValue().withS("SUCCESS"),
+                    "dt_offload" -> new AttributeValue().withS(now),
+                    "location" -> new AttributeValue().withS(snapshotId.toString),
+                    "load_status" -> new AttributeValue().withS("SUCCESS"),
+                    "dt_load" -> new AttributeValue().withS(now)
+                  ).asJava
+
+                  // Write curr entry with load_status empty (so replication will process it)
+                  val currItem = Map(
+                    "pk" -> new AttributeValue().withS(pk),
+                    "sk" -> new AttributeValue().withS("curr"),
+                    "offload_status" -> new AttributeValue().withS("SUCCESS"),
+                    "dt_offload" -> new AttributeValue().withS(now),
+                    "location" -> new AttributeValue().withS(snapshotId.toString),
+                    "load_status" -> new AttributeValue().withS(""),
+                    "dt_load" -> new AttributeValue().withS("")
+                  ).asJava
+
+                  val transactRequest = new TransactWriteItemsRequest()
+                    .withTransactItems(
+                      new TransactWriteItem().withPut(new Put().withTableName(ledgerTableName).withItem(prevItem)),
+                      new TransactWriteItem().withPut(new Put().withTableName(ledgerTableName).withItem(currItem))
+                    )
+                  ledgerClient.transactWriteItems(transactRequest)
+                  logger.info(s"Recorded snapshot $snapshotId for tile $tile (curr + prev)")
+                case None =>
+                  logger.warn(s"Could not retrieve snapshot ID after writing tile $tile")
+              }
 
               // Update stats
               val content = DiscoveryStats(tile, tileCount, org.joda.time.LocalDateTime.now().toString)
@@ -1860,27 +2743,40 @@ object GlueApp {
             }
           }.seq
 
-          // Validate results
+          // Validate results — row count integrity check
           val (successes, failures) = results.partition(_.isRight)
           val totalProcessed = successes.collect { case Right((_, count)) => count }.sum
-          val originalCount = primaryKeys.count()
 
           if (failures.nonEmpty) {
             logger.error(s"Failed to process ${failures.size} tiles")
             failures.foreach {
               case Left((tile, error)) =>
                 logger.error(s"Tile $tile failed: ${error.getMessage}")
+              case _ => // unreachable — failures only contains Left values
             }
-            throw RecomputeTilesException("Tile processing failed")
+            throw new RuntimeException("Tile processing failed")
           }
 
-          // Verify data integrity
           if (totalProcessed != originalCount) {
             logger.error(s"Data integrity check failed: Original count=$originalCount, Processed count=$totalProcessed")
-            throw RecomputeTilesException("Data integrity check failed")
+            throw new RuntimeException("Data integrity check failed")
           }
 
-          // Clean up
+          // Clean up orphaned Iceberg tiles when tile count decreases
+          if (totalTiles < currentNumTiles) {
+            for (tile <- totalTiles until currentNumTiles) {
+              dropIcebergTileTable(sparkSession, srcKeyspaceName, srcTableName, tile)
+              Try {
+                deleteLedgerEntry(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName, tile, "curr")
+                deleteLedgerEntry(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName, tile, "prev")
+              } match {
+                case Failure(e) => logger.warn(s"Failed to delete ledger entries for orphaned tile $tile: ${e.getMessage}")
+                case Success(_) => logger.info(s"Deleted ledger entries for orphaned tile $tile")
+              }
+            }
+          }
+
+          // Unpersist cached DataFrames after completion
           transformedDf.unpersist()
           primaryKeys.unpersist()
 
@@ -1890,9 +2786,8 @@ object GlueApp {
         }
       } catch {
         case e: Exception =>
-          throw RecomputeTilesException(s"Error during tile re-computation: $e")
-      } finally {
-        ledgerConnection.close()
+          logger.error(s"Error during tile re-computation: $e")
+          throw e
       }
     }
     def writeWithSizeControl(df: DataFrame, path: String): Unit = {
@@ -1905,77 +2800,117 @@ object GlueApp {
     }
 
     def keysDiscoveryProcess(): Unit = {
-      val primaryKeysDf = sourceScan().persist(cachingMode)
-      val ledgerConnection = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
+      // Infer PK columns for Iceberg table schema
+      val pkColumnsForIceberg = inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs)
+        .map(m => { val (name, tpe) = m.head; Map("name" -> name, "type" -> tpe) })
 
+      // Migrate legacy Parquet data to Iceberg if present (backward compatibility)
+      if (hasLegacyParquetData(s3client, landingZone, srcKeyspaceName, srcTableName, totalTiles)) {
+        logger.info(s"Legacy Parquet data detected for $srcKeyspaceName.$srcTableName, migrating to Iceberg")
+        migrateParquetToIceberg(sparkSession, glueContext, s3client, landingZone, srcKeyspaceName, srcTableName, totalTiles, pkColumnsForIceberg)
+      }
+
+      val primaryKeysDf = sourceScan().persist(cachingMode)
+      // Rename 'group' to 'tile' for tile filtering
+      val groupedPkDF = primaryKeysDf.withColumnRenamed("group", "tile").persist(cachingMode)
+
+      // Create database and all per-tile tables sequentially to avoid Glue Catalog concurrency conflicts
+      val dbName = s"$icebergCatalog.${srcKeyspaceName}_db"
+      sparkSession.sql(s"CREATE DATABASE IF NOT EXISTS $dbName")
+      for (tile <- 0 until totalTiles) {
+        ensureIcebergTableExists(sparkSession, srcKeyspaceName, srcTableName, tile, pkColumnsForIceberg, landingZone)
+      }
+
+      // Data writes can run in parallel — each tile writes to its own independent table
       val tiles = (0 until totalTiles).toList.par
       tiles.foreach(tile => {
-        val rsTail = ledgerConnection.execute(getLedgerQueryBuilder(srcKeyspaceName, srcTableName, tile, "tail")).one()
-        val rsHead = ledgerConnection.execute(getLedgerQueryBuilder(srcKeyspaceName, srcTableName, tile, "head")).one()
+        logger.info(s"Processing tile $tile")
+        val icebergTblName = icebergTableName(srcKeyspaceName, srcTableName, tile)
 
-        val tail = Option(rsTail)
-        val head = Option(rsHead)
-        val tailLoadStatus = tail match {
-          case t if t.isDefined => rsTail.getString("load_status")
-          case _ => ""
-        }
-        val headLoadStatus = head match {
-          case h if h.isDefined => rsHead.getString("load_status")
-          case _ => ""
-        }
+        // Check if replication has consumed the current snapshot for this tile
+        val currEntry = getLedgerEntry(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName, tile, "curr")
+        val currLoadStatus = currEntry.map(_.getOrElse("load_status", "")).getOrElse("")
 
-        logger.info(s"Processing $tile, head is $head, tail is $tail, head status is $headLoadStatus, tail status is $tailLoadStatus")
-
-        // Historical upload, the first round (head), no data in the ledger
-        if (tail.isEmpty && head.isEmpty) {
-          logger.info("Loading a head")
-          val staged = primaryKeysDf.where(col("group") === tile)
-          writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
-          ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','')")
-          val content = DiscoveryStats(tile, staged.count(), org.joda.time.LocalDateTime.now().toString)
+        if (currEntry.isDefined && currLoadStatus != "SUCCESS") {
+          logger.info(s"Skipping tile $tile: replication has not yet consumed the current snapshot (load_status='$currLoadStatus')")
+        } else {
+          val tileDf = groupedPkDF.filter(col("tile") === tile).drop("tile")
+          writeIcebergTileSnapshot(sparkSession, tileDf, icebergTblName)
+          val snapshotIdOpt = currentIcebergSnapshotId(sparkSession, icebergTblName)
+          snapshotIdOpt match {
+            case Some(snapshotId) =>
+              recordDiscoverySnapshotDDB(ledgerClient, ledgerTableName, srcKeyspaceName, srcTableName, tile, snapshotId)
+              logger.info(s"Recorded snapshot $snapshotId for tile $tile")
+            case None =>
+              logger.warn(s"Could not retrieve snapshot ID after writing tile $tile")
+          }
+          val tileCount = groupedPkDF.where(col("tile") === tile).count()
+          val content = DiscoveryStats(tile, tileCount, org.joda.time.LocalDateTime.now().toString)
           putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
         }
+      })
+      groupedPkDF.unpersist()
+      primaryKeysDf.unpersist()
+    }
 
-        // The second round (tail and head)
-        if (!head.isEmpty && headLoadStatus == "SUCCESS") {
-          // Tail never has been loaded
-          if (tail.isEmpty) {
-            logger.info("Loading a tail but keeping the head")
-            val staged = primaryKeysDf.where(col("group") === tile)
-            writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail")
-            ledgerConnection.execute(s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location, ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','')")
+    // Initialize DynamoDB ledger table (auto-creates if it doesn't exist)
+    ensureLedgerTableExists(ledgerClient, ledgerTableName)
+
+    cleanupLedgerDDB(ledgerClient, ledgerTableName, logger, srcKeyspaceName, srcTableName, processType, cleanUpRequested)
+
+    // Clean up Iceberg tables and S3 data when --cr flag is used
+    if (processType.equals("discovery") && cleanUpRequested) {
+      val dbName = s"${srcKeyspaceName}_db"
+
+      // Use fully qualified SDK v2 classes to avoid conflicts with Glue ETL library
+      val glueClient = software.amazon.awssdk.services.glue.GlueClient.create()
+
+      try {
+        // Delete per-tile Iceberg tables from Glue Catalog
+        for (tile <- 0 until totalTiles) {
+          val catalogTblName = s"${srcTableName}_tile_${tile}_pk_snapshots"
+          Try {
+            glueClient.deleteTable(
+              software.amazon.awssdk.services.glue.model.DeleteTableRequest.builder()
+                .databaseName(dbName).name(catalogTblName).build()
+            )
+            logger.info(s"Deleted Glue Catalog table $dbName.$catalogTblName")
+          } match {
+            case Failure(e) => logger.warn(s"Failed to delete Glue Catalog table $dbName.$catalogTblName: ${e.getMessage}")
+            case Success(_) =>
           }
         }
 
-        // Swap tail and head
-        if ((tail.isDefined && tailLoadStatus == "SUCCESS") && (head.isDefined && headLoadStatus == "SUCCESS")) {
-          logger.info("Swapping the tail and the head")
-
-          val staged = primaryKeysDf.where(col("group") === tile)
-          writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
-          val oldTailPath = s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail"
-          val oldTail = glueContext.getSourceWithFormat(
-            connectionType = "s3",
-            format = "parquet",
-            options = JsonOptions(s"""{"paths": ["$oldTailPath"]}""")
-          ).getDynamicFrame().toDF()
-
-          writeWithSizeControl(oldTail, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.head")
-          writeWithSizeControl(staged, s"$landingZone/$srcKeyspaceName/$srcTableName/primaryKeys/tile_$tile.tail")
-
-          ledgerConnection.execute(
-            s"BEGIN UNLOGGED BATCH " +
-              s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.tail', 'tail','','');" +
-              s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver, load_status, dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile, 'SUCCESS', toTimestamp(now()), 'tile_$tile.head', 'head','','');" +
-              s"APPLY BATCH;"
-          )
+        // Clean up S3 Iceberg data
+        Try {
+          val icebergPrefix = s"$srcKeyspaceName/$srcTableName/iceberg/"
+          var listing = s3client.listObjectsV2(new ListObjectsV2Request().withBucketName(bcktName).withPrefix(icebergPrefix))
+          listing.getObjectSummaries.asScala.foreach(obj => s3client.deleteObject(bcktName, obj.getKey))
+          while (listing.isTruncated) {
+            listing = s3client.listObjectsV2(new ListObjectsV2Request().withBucketName(bcktName).withPrefix(icebergPrefix).withContinuationToken(listing.getNextContinuationToken))
+            listing.getObjectSummaries.asScala.foreach(obj => s3client.deleteObject(bcktName, obj.getKey))
+          }
+          logger.info(s"Cleaned up S3 Iceberg data at s3://$bcktName/$icebergPrefix")
+        } match {
+          case Failure(e) => logger.warn(s"Failed to clean up S3 Iceberg data: ${e.getMessage}")
+          case Success(_) =>
         }
-      })
-      primaryKeysDf.unpersist()
-      ledgerConnection.close()
-    }
 
-    cleanupLedger(internalConnectionToTarget, logger, srcKeyspaceName, srcTableName, cleanUpRequested, processType)
+        // Delete the database from Glue Catalog
+        Try {
+          glueClient.deleteDatabase(
+            software.amazon.awssdk.services.glue.model.DeleteDatabaseRequest.builder()
+              .name(dbName).build()
+          )
+          logger.info(s"Deleted Glue Catalog database $dbName")
+        } match {
+          case Failure(e) => logger.warn(s"Failed to delete Glue Catalog database $dbName: ${e.getMessage}")
+          case Success(_) =>
+        }
+      } finally {
+        glueClient.close()
+      }
+    }
 
     Iterator.continually(stopRequested(bcktName)).takeWhile(_ == false).foreach {
       _ => {
@@ -1999,6 +2934,20 @@ object GlueApp {
             }
           }
           case "replication" => {
+            if (replayLog) {
+              val replayDdbClient = getDDBConnection(jsonMapping4s.dynamodb.dynamoDBConnection.endpoint,
+                jsonMapping4s.dynamodb.dynamoDBConnection.region)
+              try {
+                // Replay inserts
+                replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "insert", replayDdbClient, trgTableName)
+                // Replay updates
+                replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "update", replayDdbClient, trgTableName)
+                // Replay deletes
+                replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "delete", replayDdbClient, trgTableName)
+              } finally {
+                replayDdbClient.shutdown()
+              }
+            }
             measureTime("dataReplicationProcess", 120) {
               dataReplicationProcess()
             }
@@ -2018,6 +2967,7 @@ object GlueApp {
       }
     }
     logger.info(s"Stop was requested for the $processType process...")
+    ledgerClient.shutdown()
     Job.commit()
   }
 }

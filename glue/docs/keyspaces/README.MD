@@ -437,12 +437,44 @@ if you want to change the default point in time replication behavior and replica
 
 ## Compress selected columns
 To minimize the size of large columns in the target table, enable the `compressionConfig` in the json mapping.
-All selected columns will be encoded in JSON format and compressed by the LZ4 fast compressor.
+Two compression algorithms are available:
 
-Note that the compressed payload includes the length of the original decompressed data, so that you don't need to save
-the length at anywhere else. The compressed data must be decompressed by [LZ4DecompressorWithLength](https://javadoc.io/doc/org.lz4/lz4-java/latest/net/jpountz/lz4/LZ4DecompressorWithLength.html)
-and is NOT compatible with any other decompressors in lz4-java or any other lz4 tools. This class deliberately does not extend
-LZ4Compressor because they are not interchangeable.
+| Algorithm | Use Case | Decompression |
+|-----------|----------|---------------|
+| `lz4` (default) | General-purpose, fast compression with moderate ratio. Good for most workloads | [LZ4DecompressorWithLength](https://javadoc.io/doc/org.lz4/lz4-java/latest/net/jpountz/lz4/LZ4DecompressorWithLength.html) |
+| `zstd-dict-based` | Dictionary-trained compression for higher compression ratios on structured/repetitive data. Requires a sample file for dictionary training | [zstd-jni](https://github.com/luben/zstd-jni) `ZstdDictDecompress` with the generated dictionary |
+
+Use `lz4` when you need fast compression without additional setup. Use `zstd-dict-based` when your data has repetitive patterns (e.g., JSON documents with consistent schemas) and you want better compression ratios at the cost of a one-time dictionary training step.
+
+### compressionConfig Schema
+
+```json
+{
+  "keyspaces": {
+    "compressionConfig": {
+      "enabled": true,
+      "compression": "zstd-dict-based",
+      "compressionLevel": 3,
+      "compressAllNonPrimaryColumns": true,
+      "compressNonPrimaryColumns": ["col1", "col2"],
+      "targetNameColumn": "compressed_data"
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enables column-level compression |
+| `compression` | string | `"lz4"` | Compression algorithm: `"lz4"` or `"zstd-dict-based"` |
+| `compressionLevel` | integer | `3` | Zstd compression level (1–22). Higher values give better compression at the cost of speed. Ignored for lz4 |
+| `compressAllNonPrimaryColumns` | boolean | `false` | Compress all non-primary-key columns |
+| `compressNonPrimaryColumns` | list[string] | `[""]` | Specific columns to compress (when `compressAllNonPrimaryColumns` is false) |
+| `targetNameColumn` | string | `""` | Target column name for the compressed blob |
+
+If `compression` is omitted, it defaults to `"lz4"`. If `compressionLevel` is outside the range 1–22, the Glue job terminates with an error.
+
+### LZ4 compression example
 
 ```shell
 ./cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<PROVIDED_BUCKET_NAME> --writetime-column col2 \
@@ -463,6 +495,109 @@ LZ4Compressor because they are not interchangeable.
                                           }}
                                         }'
 ```
+
+Note that the LZ4 compressed payload includes the length of the original decompressed data, so that you don't need to save
+the length at anywhere else. The compressed data must be decompressed by [LZ4DecompressorWithLength](https://javadoc.io/doc/org.lz4/lz4-java/latest/net/jpountz/lz4/LZ4DecompressorWithLength.html)
+and is NOT compatible with any other decompressors in lz4-java or any other lz4 tools.
+
+### Zstd dictionary-based compression example
+
+Before running the discovery job with `zstd-dict-based` compression, create and upload a sample file to S3:
+
+1. Create a JSON file named `{ks_name}_{table_name}_sample.json` containing a JSON array of strings:
+
+```json
+[
+  "{\"col1\": \"value1\", \"col2\": 42}",
+  "{\"col1\": \"value2\", \"col2\": 99}",
+  "{\"col1\": \"value3\", \"col2\": 7}"
+]
+```
+
+2. Upload to: `s3://{S3_LANDING_ZONE}/artifacts/{ks_name}_{table_name}_sample.json`
+
+During the discovery job, CQLReplicator trains a zstd dictionary from the sample file, verifies it via a round-trip compress/decompress check, and uploads it to S3 at:
+`s3://{S3_LANDING_ZONE}/artifacts/{ks_name}_{table_name}_dictionary.bin`
+
+Each replication job downloads the dictionary at startup and uses it for all compression operations. You can also download the dictionary and use it in your own application with `ZstdDictDecompress` from [zstd-jni](https://github.com/luben/zstd-jni) for decompression.
+
+Running with `--cleanup-requested` regenerates the dictionary. Without the flag, the existing dictionary is reused.
+
+```shell
+cqlreplicator --cmd run --max-wcu-traffic 20000 --landing-zone s3://<PROVIDED_BUCKET_NAME> \
+              --writetime-column col2 --region us-east-1 \
+              --src-keyspace ks_test --src-table test_tbl \
+              --trg-keyspace ks_test --trg-table test_tbl_compressed --env ver5 \
+              --target-type keyspaces --json-mapping '{
+                "replication": {
+                  "allColumns": true,
+                  "columns": [],
+                  "useCustomSerializer": false
+                },
+                "keyspaces": {
+                  "compressionConfig": {
+                    "enabled": true,
+                    "compression": "zstd-dict-based",
+                    "compressionLevel": 3,
+                    "compressAllNonPrimaryColumns": true,
+                    "compressNonPrimaryColumns": [""],
+                    "targetNameColumn": "compressedPayload"
+                  }
+                }
+              }'
+```
+
+### Validating zstd dictionary-based compression
+
+After the discovery job generates the dictionary and the replication job compresses data, you can validate the result
+by downloading the dictionary and running a compress/decompress round-trip in a Spark shell.
+
+Step 1: Download the dictionary from S3:
+```shell
+aws s3 cp s3://<S3_LANDING_ZONE>/artifacts/<ks_name>_<table_name>_dictionary.bin /tmp/dictionary.bin
+```
+
+Step 2: Start a Spark shell with the zstd-jni JAR:
+```shell
+spark-shell --jars /path/to/zstd-jni-1.5.7-7.jar
+```
+
+Step 3: Paste the following snippet to compress a sample value, produce a hex string, then decompress and verify:
+```scala
+import com.github.luben.zstd.{Zstd, ZstdDictCompress, ZstdDictDecompress}
+import java.nio.file.{Files, Paths}
+
+// Load the dictionary
+val dictBytes = Files.readAllBytes(Paths.get("/tmp/dictionary.bin"))
+
+// Sample input — use a representative value from your table
+val input = """{"col0": "hello world"}"""
+val inputBytes = input.getBytes("UTF-8")
+
+// Compress
+val dictCompress = new ZstdDictCompress(dictBytes, 3)
+val maxSize = Zstd.compressBound(inputBytes.length).toInt
+val compressedBuffer = new Array[Byte](maxSize)
+val compressedSize = Zstd.compress(compressedBuffer, inputBytes, dictCompress)
+val compressed = java.util.Arrays.copyOf(compressedBuffer, compressedSize.toInt)
+dictCompress.close()
+
+// Hex encode (same format CQLReplicator writes to the target blob column)
+val hex = compressed.map("%02x".format(_)).mkString
+println(s"Compressed hex: 0x$hex")
+println(s"Compressed size: ${compressed.length} bytes (original: ${inputBytes.length} bytes)")
+
+// Decompress
+val dictDecompress = new ZstdDictDecompress(dictBytes)
+val decompressed = Zstd.decompress(compressed, dictDecompress, inputBytes.length)
+dictDecompress.close()
+
+val output = new String(decompressed, "UTF-8")
+println(s"Decompressed: $output")
+println(s"Round-trip OK: ${input == output}")
+```
+
+You can compare the hex output with the blob value stored in the target column to verify CQLReplicator produced the same result.
 
 ## Replicate only selected columns
 if you want to change the replicated columns set `allColumns`:`false`, and set the columns

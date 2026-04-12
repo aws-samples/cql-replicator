@@ -20,6 +20,9 @@ import com.datastax.oss.driver.api.core.{AllNodesFailedException, CqlSession, Dr
 import io.github.resilience4j.core.IntervalFunction
 import io.github.resilience4j.retry.{Retry, RetryConfig}
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
+import com.github.luben.zstd.{Zstd, ZstdDictCompress, ZstdDictDecompress, ZstdDictTrainer}
+import com.amazonaws.services.s3.model.ObjectMetadata
+import java.io.ByteArrayInputStream
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.cassandra._
 import org.apache.spark.sql.functions._
@@ -87,7 +90,12 @@ case class Replication(allColumns: Boolean = true, columns: List[String] = List(
                        pointInTimeReplicationConfig: PointInTimeReplicationConfig = PointInTimeReplicationConfig(),
                        readConfiguration: ReadConfiguration = ReadConfiguration())
 
-case class CompressionConfig(enabled: Boolean = false, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "")
+case class CompressionConfig(enabled: Boolean = false, compression: String = "lz4", compressionLevel: Int = 3, compressNonPrimaryColumns: List[String] = List(""), compressAllNonPrimaryColumns: Boolean = false, targetNameColumn: String = "") {
+  if (!Set("lz4", "zstd-dict-based").contains(compression))
+    throw new CompressionException(s"Unsupported compression algorithm: '$compression'. Supported values are: lz4, zstd-dict-based")
+  if (compressionLevel < 1 || compressionLevel > 22)
+    throw new CompressionException(s"Invalid compressionLevel: $compressionLevel. Must be between 1 and 22")
+}
 
 case class LargeObjectsConfig(enabled: Boolean = false, column: String = "", bucket: String = "", prefix: String = "", enableRefByTimeUUID: Boolean = false, xref: String = "")
 
@@ -648,6 +656,21 @@ object GlueApp {
       }
     }
 
+    def downloadDictionaryFromS3(s3Client: AmazonS3, bucket: String, key: String): Array[Byte] = {
+      Try {
+        val s3Object = s3Client.getObject(bucket, key)
+        val inputStream = s3Object.getObjectContent
+        val bytes = Stream.continually(inputStream.read).takeWhile(_ != -1).map(_.toByte).toArray
+        inputStream.close()
+        bytes
+      } match {
+        case Failure(e) => throw new CompressionException(s"Dictionary not found at s3://$bucket/$key: ${e.getMessage}")
+        case Success(bytes) =>
+          logger.info(s"Downloaded dictionary from s3://$bucket/$key (${bytes.length} bytes)")
+          bytes
+      }
+    }
+
     def stopRequested(bucket: String): Boolean = {
       if (processType == "resize") return false
       val key = processType match {
@@ -721,6 +744,10 @@ object GlueApp {
       }
     }
 
+    // Zstd dictionary broadcast — set before replication starts, accessed via .value inside executors
+    var zstdDictBroadcast: org.apache.spark.broadcast.Broadcast[Array[Byte]] = null
+    var zstdLevel: Int = 3
+
     def compressValues(json: JValue): JValue = {
       if (jsonMapping4s.keyspaces.compressionConfig.enabled) {
         val jPayload = json
@@ -742,7 +769,27 @@ object GlueApp {
         }
         val updatedJson = excludedJson.isEmpty match {
           case false => {
-            val compressedPayload: Array[Byte] = compressWithLZ4B(compact(render(JObject(excludedJson))))
+            val inputStr: String = if (excludedJson.size == 1) {
+              // Single column: extract the raw value (no JSON wrapping or escaping)
+              excludedJson.head._2.values.toString
+            } else {
+              compact(render(JObject(excludedJson)))
+            }
+            val compressedPayload: Array[Byte] = jsonMapping4s.keyspaces.compressionConfig.compression match {
+              case "zstd-dict-based" =>
+                val inputBytes = inputStr.getBytes("UTF-8")
+                val localDictBytes = zstdDictBroadcast.value
+                val dictCompress = new ZstdDictCompress(localDictBytes, zstdLevel)
+                try {
+                  val maxSize = Zstd.compressBound(inputBytes.length).toInt
+                  val output = new Array[Byte](maxSize)
+                  val compressedSize = Zstd.compress(output, inputBytes, dictCompress)
+                  java.util.Arrays.copyOf(output, compressedSize.toInt)
+                } finally {
+                  dictCompress.close()
+                }
+              case _ => compressWithLZ4B(inputStr)
+            }
             filteredJson merge JObject(jsonMapping4s.keyspaces.compressionConfig.targetNameColumn -> JString(binToHex(compressedPayload)))
           }
           case _ => throw new CompressionException("Compressed payload is empty")
@@ -2251,6 +2298,87 @@ object GlueApp {
       }
       groupedPkDF.unpersist()
       primaryKeysDf.unpersist()
+
+      // Dictionary training for zstd-dict-based compression
+      val compressionCfg = jsonMapping4s.keyspaces.compressionConfig
+      if (compressionCfg.compression == "zstd-dict-based") {
+        val dictKey = s"artifacts/${srcKeyspaceName}_${srcTableName}_dictionary.bin"
+        val sampleKey = s"artifacts/${srcKeyspaceName}_${srcTableName}_sample.json"
+
+        if (cleanUpRequested || !s3client.doesObjectExist(bcktName, dictKey)) {
+          // Regenerate dictionary: train from sample, verify, and upload
+          logger.info(s"Training zstd dictionary from s3://$bcktName/$sampleKey")
+          val sampleContent = try {
+            val s3Object = s3client.getObject(bcktName, sampleKey)
+            val content = Source.fromInputStream(s3Object.getObjectContent).mkString
+            s3Object.getObjectContent.close()
+            content
+          } catch {
+            case e: Exception =>
+              throw new CompressionException(s"Sample file not found at s3://$bcktName/$sampleKey: ${e.getMessage}")
+          }
+
+          implicit val formats: DefaultFormats.type = DefaultFormats
+          val samples = parse(sampleContent).extract[List[String]]
+          if (samples.isEmpty) {
+            throw new CompressionException("Sample file contains an empty list; cannot train dictionary")
+          }
+
+          // Calculate total sample size and pad samples if needed for zstd trainer minimum
+          val sampleBytes = samples.map(_.getBytes(StandardCharsets.UTF_8))
+          // Zstd trainer needs substantial data — repeat samples until we have at least 128KB
+          val minTrainingSize = 128 * 1024
+          val paddedSamples = {
+            var buf = sampleBytes
+            while (buf.map(_.length).sum < minTrainingSize) {
+              buf = buf ++ sampleBytes
+            }
+            buf
+          }
+          val totalSampleSize = paddedSamples.map(_.length).sum
+          val dictSize = Math.min(16 * 1024, Math.max(256, totalSampleSize / 8))
+          val trainer = new ZstdDictTrainer(dictSize, totalSampleSize)
+          paddedSamples.foreach { bytes =>
+            trainer.addSample(bytes)
+          }
+          val dictBytes = try {
+            trainer.trainSamples()
+          } catch {
+            case e: com.github.luben.zstd.ZstdException =>
+              throw new CompressionException(s"Dictionary training failed: ${e.getMessage}. Ensure the sample file contains enough entries (at least 10 representative samples)")
+          }
+          if (dictBytes == null || dictBytes.isEmpty) {
+            throw new CompressionException("Dictionary training produced empty result")
+          }
+
+          // Verify dictionary via round-trip
+          val sampleEntry = samples.head
+          val input = sampleEntry.getBytes(StandardCharsets.UTF_8)
+          val dictCompress = new ZstdDictCompress(dictBytes, 3)
+          val dictDecompress = new ZstdDictDecompress(dictBytes)
+          try {
+            val compressed = Zstd.compress(input, dictCompress)
+            val decompressed = Zstd.decompress(compressed, dictDecompress, input.length)
+            if (!java.util.Arrays.equals(input, decompressed)) {
+              throw new CompressionException("Dictionary verification failed: round-trip compress/decompress mismatch")
+            }
+          } finally {
+            dictCompress.close()
+            dictDecompress.close()
+          }
+          logger.info("Dictionary verification succeeded")
+
+          // Upload dictionary to S3
+          val dictInputStream = new ByteArrayInputStream(dictBytes)
+          val metadata = new ObjectMetadata()
+          metadata.setContentLength(dictBytes.length.toLong)
+          s3client.putObject(bcktName, dictKey, dictInputStream, metadata)
+          logger.info(s"Uploaded dictionary to s3://$bcktName/$dictKey")
+        } else {
+          // Reuse existing dictionary
+          logger.info(s"Reusing existing dictionary at s3://$bcktName/$dictKey")
+        }
+      }
     }
 
     cleanupLedger(internalConnectionToTarget, logger, srcKeyspaceName, srcTableName, cleanUpRequested, processType)
@@ -2328,6 +2456,13 @@ object GlueApp {
             }
           }
           case "replication" => {
+            // Eagerly download zstd dictionary if needed (before foreachPartition to avoid serialization issues)
+            if (jsonMapping4s.keyspaces.compressionConfig.enabled && jsonMapping4s.keyspaces.compressionConfig.compression == "zstd-dict-based") {
+              val dictKey = s"artifacts/${srcKeyspaceName}_${srcTableName}_dictionary.bin"
+              val dictBytes = downloadDictionaryFromS3(s3client, bcktName, dictKey)
+              zstdDictBroadcast = sparkSession.sparkContext.broadcast(dictBytes)
+              zstdLevel = jsonMapping4s.keyspaces.compressionConfig.compressionLevel
+            }
             if (replayLog) {
               // Replay inserts
               replayLogs(logger, srcKeyspaceName, srcTableName, bcktName, s3client, currentTile, "insert", internalConnectionToTarget)

@@ -49,11 +49,13 @@ module_init() {
 
   # Uploading the jars
   ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.5.1/spark-cassandra-connector-assembly_2.12-3.5.1.jar"
-  "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
+  "/com/github/luben/zstd-jni/1.5.7-7/zstd-jni-1.5.7-7.jar")
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
   ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
   ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar" "/org/opensearch/driver/opensearch-sql-jdbc/1.4.0.1/opensearch-sql-jdbc-1.4.0.1.jar")
-  S3_PATH_BASE=("${_params[S3_LANDING_ZONE]}/artifacts/spark-cassandra-connector-assembly_2.12-3.5.1.jar" "${_params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
+  S3_PATH_BASE=("${_params[S3_LANDING_ZONE]}/artifacts/spark-cassandra-connector-assembly_2.12-3.5.1.jar" "${_params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
+  "${_params[S3_LANDING_ZONE]}/artifacts/zstd-jni-1.5.7-7.jar")
   S3_PATH_KEYSPACES=("${_params[S3_LANDING_ZONE]}/artifacts/vavr-0.10.4.jar" "${_params[S3_LANDING_ZONE]}/artifacts/resilience4j-retry-1.7.1.jar" "${_params[S3_LANDING_ZONE]}/artifacts/resilience4j-core-1.7.1.jar")
   S3_PATH_MEMORYDB=("${_params[S3_LANDING_ZONE]}/artifacts/jedis-4.4.6.jar")
   S3_PATH_OSS=("${_params[S3_LANDING_ZONE]}/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "${_params[S3_LANDING_ZONE]}/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
@@ -144,12 +146,16 @@ module_init() {
 
   # Create Glue Connector
   local glue_conn_name
+  local conf_string
   local enhanced_monitoring=""
   if [[ "${_params[GLUE_MONITORING]}" == true ]]; then
       enhanced_monitoring=',"--enable-continuous-cloudwatch-log":"true","--enable-continuous-log-filter":"true","--enable-metrics":"true","--enable-observability-metrics":"true"'
   fi
-  local conf_string="spark.files=${_params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${_params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf${astra_path_scb} --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions,org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}.warehouse=${_params[S3_LANDING_ZONE]} --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=100 --conf spark.default.parallelism=100 --conf spark.locality.wait=0${astra_spark_creds}"
-  
+  if [[ ${_params[TARGET_TYPE]} != "dynamodb" ]]; then
+      conf_string="spark.files=${_params[S3_LANDING_ZONE]}/artifacts/KeyspacesConnector.conf,${_params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf${astra_path_scb} --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions,org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}.warehouse=${_params[S3_LANDING_ZONE]} --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=100 --conf spark.default.parallelism=100 --conf spark.locality.wait=0${astra_spark_creds}"
+  else
+      conf_string="spark.files=${_params[S3_LANDING_ZONE]}/artifacts/CassandraConnector.conf${astra_path_scb} --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.extensions=com.datastax.spark.connector.CassandraSparkExtensions,org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.${_params[ICEBERG_CATALOG]}.warehouse=${_params[S3_LANDING_ZONE]} --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true --conf spark.kryoserializer.buffer.max=128m --conf spark.rdd.compress=true --conf spark.cleaner.periodicGC.interval=1min --conf spark.kryo.referenceTracking=false --conf spark.cleaner.referenceTracking.cleanCheckpoints=true --conf spark.task.maxFailures=64 --conf spark.shuffle.file.buffer=1mb --conf spark.io.compression.lz4.blockSize=512kb --conf spark.sql.shuffle.partitions=100 --conf spark.default.parallelism=100 --conf spark.locality.wait=0${astra_spark_creds}"
+  fi 
   if [[ -n "${astra_path_scb:1}" ]]; then
     local default_args=$(jq -n \
       --arg job_lang "scala" \

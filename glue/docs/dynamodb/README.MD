@@ -408,7 +408,44 @@ The payload is compressed by [LZ4](https://fuchsia.googlesource.com/third_party/
 
 ### Compress selected columns
 To minimize the size of large columns in the target DynamoDB table, enable `compressionConfig`.
-All selected columns will be encoded in JSON format and compressed by the LZ4 fast compressor.
+Two compression algorithms are available:
+
+| Algorithm | Use Case | Decompression |
+|-----------|----------|---------------|
+| `lz4` (default) | General-purpose, fast compression with moderate ratio. Good for most workloads | [LZ4DecompressorWithLength](https://javadoc.io/doc/org.lz4/lz4-java/latest/net/jpountz/lz4/LZ4DecompressorWithLength.html) |
+| `zstd-dict-based` | Dictionary-trained compression for higher compression ratios on structured/repetitive data. Requires a sample file for dictionary training | [zstd-jni](https://github.com/luben/zstd-jni) `ZstdDictDecompress` with the generated dictionary |
+
+Use `lz4` when you need fast compression without additional setup. Use `zstd-dict-based` when your data has repetitive patterns (e.g., JSON documents with consistent schemas) and you want better compression ratios at the cost of a one-time dictionary training step.
+
+#### compressionConfig Schema
+
+```json
+{
+  "dynamodb": {
+    "compressionConfig": {
+      "enabled": true,
+      "compression": "zstd-dict-based",
+      "compressionLevel": 3,
+      "compressAllNonPrimaryKeysColumns": true,
+      "compressNonPrimaryColumns": ["col1", "col2"],
+      "targetAttributeName": "compressed_data"
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enables column-level compression |
+| `compression` | string | `"lz4"` | Compression algorithm: `"lz4"` or `"zstd-dict-based"` |
+| `compressionLevel` | integer | `3` | Zstd compression level (1–22). Higher values give better compression at the cost of speed. Ignored for lz4 |
+| `compressAllNonPrimaryKeysColumns` | boolean | `false` | Compress all non-primary-key columns |
+| `compressNonPrimaryColumns` | list[string] | `[""]` | Specific columns to compress (when `compressAllNonPrimaryKeysColumns` is false) |
+| `targetAttributeName` | string | `""` | Target attribute name for the compressed binary data |
+
+If `compression` is omitted, it defaults to `"lz4"`. If `compressionLevel` is outside the range 1–22, the Glue job terminates with an error.
+
+#### LZ4 compression example
 
 ```shell
    cqlreplicator --cmd run --max-wcu-traffic 30000 --landing-zone s3://<BUCKET_NAME> --region us-east-1 \
@@ -423,6 +460,52 @@ All selected columns will be encoded in JSON format and compressed by the LZ4 fa
                      "dynamoDBConnection": {"endpoint":"dynamodb.us-east-1.amazonaws.com","region":"us-east-1"},
                      "compressionConfig": {
                        "enabled": true,
+                       "compressAllNonPrimaryKeysColumns": false,
+                       "compressNonPrimaryColumns": ["col2","col3","col4"],
+                       "targetAttributeName": "compressedPayload"
+                     }
+                   }
+                 }'
+```
+
+#### Zstd dictionary-based compression example
+
+Before running the discovery job with `zstd-dict-based` compression, create and upload a sample file to S3:
+
+1. Create a JSON file named `{ks_name}_{table_name}_sample.json` containing a JSON array of strings:
+
+```json
+[
+  "{\"col1\": \"value1\", \"col2\": 42}",
+  "{\"col1\": \"value2\", \"col2\": 99}",
+  "{\"col1\": \"value3\", \"col2\": 7}"
+]
+```
+
+2. Upload to: `s3://{S3_LANDING_ZONE}/artifacts/{ks_name}_{table_name}_sample.json`
+
+During the discovery job, CQLReplicator trains a zstd dictionary from the sample file, verifies it via a round-trip compress/decompress check, and uploads it to S3 at:
+`s3://{S3_LANDING_ZONE}/artifacts/{ks_name}_{table_name}_dictionary.bin`
+
+Each replication job downloads the dictionary at startup and uses it for all compression operations. You can also download the dictionary and use it in your own application with `ZstdDictDecompress` from [zstd-jni](https://github.com/luben/zstd-jni) for decompression.
+
+Running with `--cleanup-requested` regenerates the dictionary. Without the flag, the existing dictionary is reused.
+
+```shell
+   cqlreplicator --cmd run --max-wcu-traffic 30000 --landing-zone s3://<BUCKET_NAME> --region us-east-1 \
+                 --writetime-column data --src-keyspace ks --src-table tbl \
+                 --trg-keyspace ks --trg-table tbl \
+                 --env ddbdemo --target-type dynamodb \
+                 --json-mapping '{
+                   "replication": {
+                     "dynamoDBPrimaryKey": {"partitionKeyName":"pk","sortKeyName":"sk","separator":"#"}
+                   },
+                   "dynamodb": {
+                     "dynamoDBConnection": {"endpoint":"dynamodb.us-east-1.amazonaws.com","region":"us-east-1"},
+                     "compressionConfig": {
+                       "enabled": true,
+                       "compression": "zstd-dict-based",
+                       "compressionLevel": 5,
                        "compressAllNonPrimaryKeysColumns": false,
                        "compressNonPrimaryColumns": ["col2","col3","col4"],
                        "targetAttributeName": "compressedPayload"
@@ -754,6 +837,8 @@ The complete `--json-mapping` schema for the DynamoDB target:
     },
     "compressionConfig": {
       "enabled": false,
+      "compression": "lz4",
+      "compressionLevel": 3,
       "compressNonPrimaryColumns": [""],
       "compressAllNonPrimaryKeysColumns": false,
       "targetAttributeName": ""

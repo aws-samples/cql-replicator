@@ -5,6 +5,17 @@
 # Required params: SOURCE_KS, SOURCE_TBL, TARGET_KS, TARGET_TBL, S3_LANDING_ZONE, AWS_REGION, TARGET_TYPE
 # Optional params: TILES, TILE, WORKER_TYPE, DISCOVERY_WORKER_TYPE, OVERRIDE_DISCOVERY_WORKERS, WRITETIME_COLUMN, TTL_COLUMN, SAFE_MODE, REPLICATION_POINT_IN_TIME, CLEANUP_REQUESTED, DEFAULT_WORKLOAD_TYPE, SKIP_DISCOVERY, WCU_TRAFFIC, DEFAULT_WORKERS, ROWS_PER_WORKER, COOLING_PERIOD, ICEBERG_CATALOG, LOGGING, REPLAY_LOG, DEFAULT_ENV, JOB_NAME, PROCESS_TYPE_DISCOVERY, PROCESS_TYPE_REPLICATION, PROCESS_TYPE_SAMPLER
 
+# Internal helper — Build optional REPLICATION_POINT_IN_TIME argument fragment.
+# Sets _RPIT_ARG variable: the JSON key-value pair when value > 0, empty otherwise.
+_build_rpit_arg() {
+    local -n _rp=$1
+    local _val="${_rp[REPLICATION_POINT_IN_TIME]:-0}"
+    _RPIT_ARG=""
+    if [[ "$_val" -gt 0 ]] 2>/dev/null; then
+        _RPIT_ARG="\"--REPLICATION_POINT_IN_TIME\":\"'${_val}'\"," 
+    fi
+}
+
 # Internal helper — Start_Discovery logic
 _start_discovery() {
     local -n _params=$1

@@ -152,6 +152,10 @@ function Usage_Exit {
   echo "  --scb                            Astra secure connect bundle is a zip file containing security credentials and certificates required to establish connection to a managed cluster"
   echo "  --logging-level LEVEL            Set Spark log level: ERROR (default), WARN, INFO, DEBUG, ALL"
   echo "  --src-keyspace-list LIST         Comma-separated list of source keyspaces for Glue Catalog cleanup (used with cleanup command)"
+  echo "  --tui                            Launch interactive TUI mode"
+  echo "  --schema, --sc FILE              Supply a schema DDL file for TUI pre-selection (supports file:// prefix)"
+  echo "  --plan                           Enable plan mode (requires --schema); creates a multi-table migration plan"
+  echo "  --migration-plan-name, --mpn NAME  Supply a migration plan name for batch operations (run/request-stop/kill)"
   echo
   echo "Commands:"
   echo "  init        Deploy CQLReplicator Glue job and download jars"
@@ -166,7 +170,7 @@ function Usage_Exit {
   exit 1
 }
 
-(( $#<1 )) && Usage_Exit
+(( $#<1 )) && { Usage_Exit; }
 
 while (( "$#" )); do
   case "$1" in
@@ -387,6 +391,22 @@ while (( "$#" )); do
        params[TIME_SCHEDULE]="$2"
        shift 2
        ;;
+    --schema|--sc)
+      params[SCHEMA_FILE]="${2#file://}"
+      shift 2
+      ;;
+    --plan)
+      params[PLAN_MODE]="true"
+      shift 1
+      ;;
+    --migration-plan-name|--mpn)
+      params[MIGRATION_PLAN_NAME]="$2"
+      shift 2
+      ;;
+    --tui)
+      params[STATE]="tui"
+      shift 1
+      ;;
     --)
       shift
       break
@@ -403,6 +423,12 @@ done
 
 eval set -- "$PARAMS"
 
+# ── Post-parse validation ────────────────────────────────────────────────────
+if [[ "${params[PLAN_MODE]:-}" == "true" && -z "${params[SCHEMA_FILE]:-}" ]]; then
+    log_error "Error: --plan requires --schema to be specified"
+    exit 1
+fi
+
 # ── Dispatch table ───────────────────────────────────────────────────────────
 declare -A dispatch_table=(
     [init]=module_init
@@ -417,6 +443,7 @@ declare -A dispatch_table=(
     [resize]=module_resize
     [scheduled-run]=module_scheduled_run
     [get-failed-jobs]=module_get_failed_jobs
+    [tui]=module_tui
 )
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
@@ -425,4 +452,36 @@ if [[ -z "$handler" ]]; then
     log_error "Unknown command: ${params[STATE]}"
     Usage_Exit
 fi
+
+# ── Batch execution via migration plan (CLI mode) ────────────────────────────
+# When a migration plan name is provided and the command is run/request-stop/kill,
+# load the plan from S3 and execute all table mappings instead of the single-table handler.
+if [[ -n "${params[MIGRATION_PLAN_NAME]:-}" ]]; then
+    case "${params[STATE]}" in
+        run|request-stop|kill)
+            # Load plan from S3
+            if ! _plan_load_from_s3 params; then
+                log_error "Failed to load migration plan '${params[MIGRATION_PLAN_NAME]}' from S3"
+                exit 1
+            fi
+
+            # Serialize and validate the loaded plan
+            _plan_json=$(_plan_serialize params)
+            if [[ $? -ne 0 ]]; then
+                log_error "Failed to serialize the loaded migration plan"
+                exit 1
+            fi
+
+            if ! _plan_validate "$_plan_json" 2>&1; then
+                log_error "Migration plan validation failed"
+                exit 1
+            fi
+
+            # Execute batch for all table mappings
+            _plan_execute_batch params "${params[STATE]}"
+            exit $?
+            ;;
+    esac
+fi
+
 "$handler" params

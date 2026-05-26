@@ -589,6 +589,7 @@ check_security_group_self_referencing() {
     local sg_id="$1"
     sg_rules=$(aws ec2 describe-security-groups \
         --group-ids "$sg_id" \
+        --region "${params[AWS_REGION]}" \
         --query 'SecurityGroups[0]' \
         --output json)
 
@@ -685,7 +686,7 @@ function Init {
       bucket=$(echo "cql-replicator-$AWS_ACCOUNT-${params[AWS_REGION]}${params[DEFAULT_ENV]}" | tr ' [:upper:]' ' [:lower:]')
       params[S3_LANDING_ZONE]="s3://$bucket"
       log_info "Creating a new S3 bucket: ${params[S3_LANDING_ZONE]}"
-      if aws s3 mb "${params[S3_LANDING_ZONE]}" > /dev/null 2>&1
+      if aws s3 mb "${params[S3_LANDING_ZONE]}" --region "${params[AWS_REGION]}" 2>&1
       then
         echo "${params[S3_LANDING_ZONE]}" > "working_bucket.dat"
       else

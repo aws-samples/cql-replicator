@@ -1155,11 +1155,17 @@ object GlueApp {
       shuffledDf
     }
 
-    def persist(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
-      if (jsonMapping4s.keyspaces.writeConfiguration.preShuffleBeforeWrite) {
-        persistToTarget(shuffleDfV2(df), columns, columnsPos, tile, op)
-      } else {
-        persistToTarget(df.coalesce(defaultPartitions), columns, columnsPos, tile, op)
+    def persist(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Long = {
+      val shaped =
+        if (jsonMapping4s.keyspaces.writeConfiguration.preShuffleBeforeWrite) shuffleDfV2(df)
+        else df.coalesce(defaultPartitions)
+      val alreadyCached = shaped.storageLevel != StorageLevel.NONE
+      val cached = if (alreadyCached) shaped else shaped.persist(cachingMode)
+      try {
+        persistToTarget(cached, columns, columnsPos, tile, op)
+        cached.count()
+      } finally {
+        if (!alreadyCached) cached.unpersist(blocking = false)
       }
     }
 
@@ -1580,25 +1586,21 @@ object GlueApp {
                   columnTs match {
                     case ct if ct == "None" && counterColumns.isEmpty => {
                       if (!insertsDf.isEmpty) {
-                        persist(insertsDf, columns, columnsPos, currentTile, "insert")
-                        inserted = insertsDf.count()
+                        inserted = persist(insertsDf, columns, columnsPos, currentTile, "insert")
                       }
                     }
                     case _ => {
                       val updatesDf = newUpdatesDF.drop("ts").persist(cachingMode)
                       if (!(insertsDf.isEmpty && updatesDf.isEmpty)) {
-                        persist(insertsDf, columns, columnsPos, currentTile, "insert")
-                        persist(updatesDf, columns, columnsPos, currentTile, "update")
-                        inserted = insertsDf.count()
-                        updated = updatesDf.count()
+                        inserted = persist(insertsDf, columns, columnsPos, currentTile, "insert")
+                        updated = persist(updatesDf, columns, columnsPos, currentTile, "update")
                       }
                       updatesDf.unpersist()
                     }
                   }
 
                   if (!deletesDf.isEmpty) {
-                    persist(deletesDf, columns, columnsPos, currentTile, "delete")
-                    deleted = deletesDf.count()
+                    deleted = persist(deletesDf, columns, columnsPos, currentTile, "delete")
                   }
 
                   logger.info(s"Delta completed for tile $currentTile: inserts=$inserted, updates=$updated, deletes=$deleted")
@@ -1624,8 +1626,7 @@ object GlueApp {
                   val sourceDf = readIcebergAtSnapshot(sparkSession, icebergTblName, currSnapshotId)
                   val sourceDfV2 = sourceDf.drop("ts")
 
-                  persist(shuffleDfV2(sourceDfV2), columns, columnsPos, currentTile, "insert")
-                  val cnt = sourceDfV2.count()
+                  val cnt = persist(sourceDfV2, columns, columnsPos, currentTile, "insert")
                   logger.info(s"Historical load completed for tile $currentTile: $cnt rows inserted")
 
                   val content = ReplicationStats(currentTile, cnt, 0, 0, 0, org.joda.time.LocalDateTime.now().toString)

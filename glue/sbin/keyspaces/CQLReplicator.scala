@@ -21,6 +21,8 @@ import io.github.resilience4j.core.IntervalFunction
 import io.github.resilience4j.retry.{Retry, RetryConfig}
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
 import org.apache.spark.SparkContext
+import org.apache.spark.scheduler.{SparkListener, SparkListenerTaskEnd}
+import org.apache.spark.util.LongAccumulator
 import org.apache.spark.sql.cassandra._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
@@ -205,7 +207,7 @@ class SupportFunctions {
   }
 }
 
-case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfiguration, dlqConfig: DlqConfig, logger: GlueLogger) {
+case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfiguration, dlqConfig: DlqConfig, logger: GlueLogger, persistedCounter: LongAccumulator) {
 
   private val batch: BatchStatementBuilder = BatchStatement.builder(DefaultBatchType.UNLOGGED)
   private val retryConfig = RetryConfig.custom
@@ -237,7 +239,7 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
     logger.info(s"Executing CQL statement: $statement")
     val resTry = Try(Retry.decorateSupplier(retry, () => flushingClient.execute(statement.toString)).get())
     resTry match {
-      case Success(_) =>
+      case Success(_) => persistedCounter.add(1L)
       case Failure(exception) =>
         logger.error(s"Failed to execute CQL statement after retries: ${exception.getMessage}")
         persistToDlq(dlqConfig, statement.toString)
@@ -265,9 +267,10 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
   }
 
   private def executeCQLStatement(batchStatement: BatchStatement): Unit = {
+    val stmtCount = batchStatement.size()
     val resTry = Try(Retry.decorateSupplier(retry, () => flushingClient.execute(batchStatement)).get())
     resTry match {
-      case Success(_) =>
+      case Success(_) => persistedCounter.add(stmtCount.toLong)
       case Failure(exception) =>
         logger.error(s"Failed to execute CQL batch statement after retries: ${exception.getMessage}")
         batchStatement.asScala.foreach {
@@ -855,7 +858,7 @@ object GlueApp {
       listOfCounters.iterator.map { case (str, long) => (str, long) }.toMap
     }
 
-    def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Unit = {
+    def persistToTarget(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String, persistedCounter: LongAccumulator): Unit = {
       df.rdd.foreachPartition(partition => {
         lazy val customFormat = if (jsonMapping4s.replication.useCustomSerializer) {
           DefaultFormats + new CustomResultSetSerializer
@@ -867,7 +870,7 @@ object GlueApp {
         lazy val cassandraConnPerPar = getDBConnection("CassandraConnector.conf", bcktName, s3ClientOnPartition)
         lazy val keyspacesConnPerPar = getDBConnection("KeyspacesConnector.conf", bcktName, s3ClientOnPartition)
         lazy val dlqConfig = DlqConfig(s3ClientOnPartition, bcktName, s"$srcKeyspaceName/$srcTableName/dlq/$tile/$op")
-        lazy val fl = FlushingSet(keyspacesConnPerPar, jsonMapping4s.keyspaces.writeConfiguration, dlqConfig, logger)
+        lazy val fl = FlushingSet(keyspacesConnPerPar, jsonMapping4s.keyspaces.writeConfiguration, dlqConfig, logger, persistedCounter)
         lazy val maxStatementsPerBatch = jsonMapping4s.keyspaces.writeConfiguration.maxStatementsPerBatch
         lazy val xxHashFactory = XXHashFactory.fastestInstance()
         lazy val xxHash64: XXHash64 = xxHashFactory.hash64()
@@ -1155,16 +1158,39 @@ object GlueApp {
       shuffledDf
     }
 
-    def persist(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String): Long = {
+    def persist(df: DataFrame, columns: scala.collection.immutable.Map[String, String], columnsPos: scala.collection.immutable.SortedSet[(String, Int)], tile: Int, op: String, historicalLoad: Boolean = false): Long = {
       val shaped =
         if (jsonMapping4s.keyspaces.writeConfiguration.preShuffleBeforeWrite) shuffleDfV2(df)
         else df.coalesce(defaultPartitions)
       val alreadyCached = shaped.storageLevel != StorageLevel.NONE
       val cached = if (alreadyCached) shaped else shaped.persist(cachingMode)
+      val persistedCounter = sparkContext.longAccumulator(s"persisted_${op}_tile_$tile")
+      val statsListener = new SparkListener {
+        private var lastReported: Long = 0L
+        override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = {
+          val current = persistedCounter.value
+          if (current > lastReported) {
+            val delta = current - lastReported
+            lastReported = current
+            logger.info(s"Tile $tile $op: $current rows persisted so far")
+            val primaryKeysDelta = if (historicalLoad) delta else 0L
+            val content = op match {
+              case "insert" => ReplicationStats(tile, primaryKeysDelta, 0, delta, 0, org.joda.time.LocalDateTime.now().toString)
+              case "update" => ReplicationStats(tile, 0, delta, 0, 0, org.joda.time.LocalDateTime.now().toString)
+              case "delete" => ReplicationStats(tile, 0, 0, 0, delta, org.joda.time.LocalDateTime.now().toString)
+            }
+            putStats(bcktName, s"$srcKeyspaceName/$srcTableName/stats/replication/$tile", "count.json", content)
+          }
+        }
+      }
+      sparkContext.addSparkListener(statsListener)
       try {
-        persistToTarget(cached, columns, columnsPos, tile, op)
-        cached.count()
+        persistToTarget(cached, columns, columnsPos, tile, op, persistedCounter)
+        val count = persistedCounter.value
+        logger.info(s"Tile $tile $op: $count rows persisted to Amazon Keyspaces")
+        count
       } finally {
+        sparkContext.removeSparkListener(statsListener)
         if (!alreadyCached) cached.unpersist(blocking = false)
       }
     }
@@ -1605,11 +1631,6 @@ object GlueApp {
 
                   logger.info(s"Delta completed for tile $currentTile: inserts=$inserted, updates=$updated, deletes=$deleted")
 
-                  if (updated != 0 || inserted != 0 || deleted != 0) {
-                    val content = ReplicationStats(currentTile, 0, updated, inserted, deleted, org.joda.time.LocalDateTime.now().toString)
-                    putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
-                  }
-
                   insertsDf.unpersist()
                   deletesDf.unpersist()
 
@@ -1626,11 +1647,8 @@ object GlueApp {
                   val sourceDf = readIcebergAtSnapshot(sparkSession, icebergTblName, currSnapshotId)
                   val sourceDfV2 = sourceDf.drop("ts")
 
-                  val cnt = persist(sourceDfV2, columns, columnsPos, currentTile, "insert")
+                  val cnt = persist(sourceDfV2, columns, columnsPos, currentTile, "insert", historicalLoad = true)
                   logger.info(s"Historical load completed for tile $currentTile: $cnt rows inserted")
-
-                  val content = ReplicationStats(currentTile, cnt, 0, 0, 0, org.joda.time.LocalDateTime.now().toString)
-                  putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/replication/$currentTile", "count.json", content)
 
                   markReplicationComplete(session, srcKeyspaceName, srcTableName, currentTile)
                   expireIcebergSnapshots(sparkSession, icebergTblName)
@@ -2291,18 +2309,6 @@ object GlueApp {
           logger.info(s"Cleaned up S3 Iceberg data at s3://$bcktName/$icebergPrefix")
         } match {
           case Failure(e) => logger.warn(s"Failed to clean up S3 Iceberg data: ${e.getMessage}")
-          case Success(_) =>
-        }
-
-        // Delete the database from Glue Catalog
-        Try {
-          glueClient.deleteDatabase(
-            software.amazon.awssdk.services.glue.model.DeleteDatabaseRequest.builder()
-              .name(dbName).build()
-          )
-          logger.info(s"Deleted Glue Catalog database $dbName")
-        } match {
-          case Failure(e) => logger.warn(s"Failed to delete Glue Catalog database $dbName: ${e.getMessage}")
           case Success(_) =>
         }
       } finally {

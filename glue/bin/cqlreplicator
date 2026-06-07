@@ -25,6 +25,7 @@ declare -A params=(
     [KEYS_PER_TILE]=0
     [ROWS_PER_WORKER]=1000000
     [TARGET_TYPE]=keyspaces
+    [TARGET_TYPE_PROVIDED]=false
     [SKIP_GLUE_CONNECTOR]=false
     [SKIP_KEYSPACES_LEDGER]=false
     [REPLICATION_POINT_IN_TIME]=0
@@ -794,6 +795,17 @@ function Init {
     fi
   fi
 
+  if [[ ${params[TARGET_TYPE]} == "keyspaces" ]]; then
+    if [[ -f "$path_to_scala"/PrimaryKeyReconciliation.scala ]]; then
+      aws s3 cp "$path_to_scala"/PrimaryKeyReconciliation.scala \
+        "$glue_bucket_artifacts"/scripts/PrimaryKeyReconciliation${params[DEFAULT_ENV]}.scala \
+        --region "${params[AWS_REGION]}" > /dev/null
+    else
+      log_error "Error: $path_to_scala/PrimaryKeyReconciliation.scala not found"
+      exit 1
+    fi
+  fi
+
   # Upload the SCB file if the source is astra
   if [[ ${params[DEFAULT_SOURCE]} == "astra" ]]; then
     uploader_helper "${params[SCB]}" 0 1 1
@@ -941,6 +953,60 @@ function Init {
             --region "${params[AWS_REGION]}" \
             --default-arguments "$default_args" > /dev/null
     fi
+
+  if [[ ${params[TARGET_TYPE]} == "keyspaces" ]]; then
+    local recon_job_name="PrimaryKeyReconciliation${params[DEFAULT_ENV]}"
+    if aws glue get-job --job-name "$recon_job_name" --region "${params[AWS_REGION]}" > /dev/null 2>&1; then
+      log_info "Glue job '$recon_job_name' already exists; configuration was not modified."
+    else
+      local recon_glue_version
+      if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
+        recon_glue_version="5.1"
+      else
+        recon_glue_version="5.0"
+      fi
+      local recon_default_args
+      recon_default_args=$(echo "$default_args" | jq '.["--class"] = "PrimaryKeyReconciliation"')
+      local -a recon_create_args
+      recon_create_args=(
+        --name "$recon_job_name"
+        --role "${params[GLUE_IAM_ROLE]}"
+        --description "Primary-key reconciliation for keyspaces"
+        --glue-version "$recon_glue_version"
+        --number-of-workers 2
+        --worker-type "${params[WORKER_TYPE]}"
+        --command "Name=glueetl,ScriptLocation=$glue_bucket_artifacts/scripts/PrimaryKeyReconciliation${params[DEFAULT_ENV]}.scala"
+        --execution-property '{"MaxConcurrentRuns": 64}'
+        --max-retries 0
+        --region "${params[AWS_REGION]}"
+        --default-arguments "$recon_default_args"
+      )
+      if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
+        recon_create_args+=(--connections "Connections=$glue_conn_name${params[DEFAULT_ENV]}")
+      fi
+      local recon_create_output
+      if recon_create_output=$(aws glue create-job "${recon_create_args[@]}" 2>&1); then
+        log_info "Created Glue job '$recon_job_name' (Glue $recon_glue_version, MaxRetries=0)."
+      else
+        # Req 18.4: log the missing resource name and AWS error class, exit
+        # non-zero, and leave no partially-configured job behind.
+        local recon_aws_error_class
+        recon_aws_error_class=$(echo "$recon_create_output" | grep -oE '[A-Za-z]+Exception' | head -n 1)
+        if [[ -z "$recon_aws_error_class" ]]; then
+          recon_aws_error_class="UnknownError"
+        fi
+        log_error "Error: failed to create Glue job '$recon_job_name': $recon_aws_error_class"
+        log_error "  iam-role:   ${params[GLUE_IAM_ROLE]}"
+        if [[ ${params[SKIP_GLUE_CONNECTOR]} == false ]]; then
+          log_error "  connector:  $glue_conn_name${params[DEFAULT_ENV]}"
+        fi
+        log_error "  aws-error:  $recon_create_output"
+        # Defensive cleanup so no partial config remains for next init rerun.
+        aws glue delete-job --job-name "$recon_job_name" --region "${params[AWS_REGION]}" > /dev/null 2>&1 || true
+        exit 1
+      fi
+    fi
+  fi
 
   if [[ ${params[SKIP_KEYSPACES_LEDGER]} == true || ${params[TARGET_TYPE]} == "dynamodb" ]]; then
     progress 4 5 "Skipping CQLReplicator's internal keyspace          "
@@ -1472,17 +1538,53 @@ while (( "$#" )); do
       ;;
     --target-type|--ttp)
       params[TARGET_TYPE]="$2"
+      params[TARGET_TYPE_PROVIDED]=true
+      shift 2
+      ;;
+    --retention-days|--rd)
+      params[RETENTION_DAYS]="$2"
+      shift 2
+      ;;
+    --run-id|--rid)
+
+      params[RUN_ID]="$2"
+      shift 2
+      ;;
+    --keep-snapshots|--ks)
+      # Optional KEEP_SNAPSHOTS flag for the reconcile-keys subcommand
+      params[KEEP_SNAPSHOTS]="$2"
+      shift 2
+      ;;
+    --bidirectional|--bd)
+      # Optional BIDIRECTIONAL flag for the reconcile-keys subcommand
+      params[BIDIRECTIONAL]="$2"
+      shift 2
+      ;;
+    --sample-size|--smz)
+      # Optional SAMPLE_SIZE for the reconcile-keys subcommand
+      # Glue-side default is 100.
+      params[SAMPLE_SIZE]="$2"
+      shift 2
+      ;;
+    --max-target-rcus|--mtr)
+      # Optional MAX_TARGET_RCUS for the reconcile-keys subcommand
+      # Glue-side default is 0 (no throttle).
+      params[MAX_TARGET_RCUS]="$2"
+      shift 2
+      ;;
+    --output-prefix-override|--opo)
+      # Optional OUTPUT_PREFIX_OVERRIDE for the reconcile-keys subcommand
+      # Glue-side default is the empty string (use the standard Reconciliation_Prefix).
+      params[OUTPUT_PREFIX_OVERRIDE]="$2"
       shift 2
       ;;
     --json-mapping|--jm)
       JSON_MAPPING="$2"
       echo "$JSON_MAPPING" | jq empty
       log_info "Provided a json mapping configuration $JSON_MAPPING"
-      # Should work for AWS CloudShell, use 0 to disable line wrapping
       if [[ ${params[OS]} == Linux ]]; then
         JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64 -w 0)
       fi
-      # Use base64 without params for MacOS instead
       if [[ ${params[OS]} == Darwin ]]; then
         JSON_MAPPING_B64=$(echo "$JSON_MAPPING" | base64)
       fi
@@ -1594,6 +1696,16 @@ while (( "$#" )); do
 done
 
 eval set -- "$PARAMS"
+
+# Validate that --state/--cmd value is one of the supported subcommands.
+case "${params[STATE]}" in
+  ""|init|run|sample|resize|run-single|request-single-stop|request-stop|kill|scheduled-run|cleanup|stats|get-failed-jobs|reconcile-keys)
+    ;;
+  *)
+    log_error "Unsupported subcommand: ${params[STATE]}"
+    Usage_Exit
+    ;;
+esac
 
 if [[ ${params[STATE]} == run ]]; then
   if [[ ${params[CLEANUP_REQUESTED]} != "true" ]]; then
@@ -1741,4 +1853,257 @@ if [[ ${params[STATE]} == get-failed-jobs ]]; then
   check_input "${params[SOURCE_KS]}" "Error: source keyspace name is empty, must be provided"
   check_input "${params[SOURCE_TBL]}" "Error: source table name is empty, must be provided"
   analyze_logs
+fi
+
+if [[ ${params[STATE]} == reconcile-keys ]]; then
+  # ---------------------------------------------------------------------
+  # `--retention-days` cleanup branch. When the operator
+  # provides --retention-days, the handler runs as a distinct subcommand
+  # action: it ages out historical reconciliation runs under
+  #   <Landing_Zone><source_keyspace>/<source_table>/reconciliation/
+  # and exits WITHOUT submitting a Glue job. The reconciliation job
+  # itself never auto-cleans; cleanup is operator-triggered
+  # only, through this CLI branch.
+  # ---------------------------------------------------------------------
+  if [[ -n "${params[RETENTION_DAYS]:-}" ]]; then
+    # --retention-days must be a base-10 integer in [1, 3650].
+    if ! [[ "${params[RETENTION_DAYS]}" =~ ^[0-9]+$ ]] \
+       || (( params[RETENTION_DAYS] < 1 )) \
+       || (( params[RETENTION_DAYS] > 3650 )); then
+      log_error "--retention-days must be an integer in [1, 3650]; got: ${params[RETENTION_DAYS]}"
+      exit 1
+    fi
+
+    cleanup_required=(
+      "SOURCE_KS:--src-keyspace"
+      "SOURCE_TBL:--src-table"
+      "S3_LANDING_ZONE:--landing-zone"
+      "AWS_REGION:--region"
+    )
+    cleanup_missing=()
+    for entry in "${cleanup_required[@]}"; do
+      key="${entry%%:*}"
+      flag="${entry##*:}"
+      if [[ -z "${params[$key]:-}" ]]; then
+        cleanup_missing+=("$flag")
+      fi
+    done
+    if (( ${#cleanup_missing[@]} > 0 )); then
+      for flag in "${cleanup_missing[@]}"; do
+        log_error "$flag"
+      done
+      exit 1
+    fi
+
+    cleanup_bucket="${params[S3_LANDING_ZONE]:5}"
+    cleanup_prefix="${params[SOURCE_KS]}/${params[SOURCE_TBL]}/reconciliation/"
+    cleanup_region="${params[AWS_REGION]}"
+    retention_days="${params[RETENTION_DAYS]}"
+
+    log_info "Reconciliation cleanup: pruning runs older than ${retention_days} day(s) under s3://${cleanup_bucket}/${cleanup_prefix}"
+
+    iso_to_epoch() {
+      local iso="$1"
+      local out
+      if out=$(date -u -d "$iso" +%s 2>/dev/null); then
+        echo "$out"
+        return 0
+      fi
+      local clean="${iso%%.*}"
+      clean="${clean%Z}"
+      if [[ "$clean" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+        clean="${BASH_REMATCH[1]}"
+      fi
+      date -j -u -f "%Y-%m-%dT%H:%M:%S" "$clean" +%s 2>/dev/null
+    }
+
+    classify_aws_error() {
+      echo "$1" | sed -n 's/.*An error occurred (\([^)]*\)).*/\1/p' | head -1
+    }
+
+    list_output=$(aws s3api list-objects-v2 \
+      --bucket "$cleanup_bucket" \
+      --prefix "$cleanup_prefix" \
+      --delimiter "/" \
+      --region "$cleanup_region" \
+      --query 'CommonPrefixes[].Prefix' \
+      --output text 2>&1)
+    list_rc=$?
+
+    if (( list_rc != 0 )); then
+      list_err=$(classify_aws_error "$list_output")
+      [[ -z "$list_err" ]] && list_err="UnknownError"
+      log_error "S3 list failure under s3://${cleanup_bucket}/${cleanup_prefix}: ${list_err} :: ${list_output}"
+      exit 1
+    fi
+
+    if [[ -z "$list_output" || "$list_output" == "None" ]]; then
+      log_info "no reconciliation runs were found"
+      exit 0
+    fi
+
+    now_epoch=$(date -u +%s)
+    cutoff_epoch=$(( now_epoch - retention_days * 86400 ))
+
+    cleanup_deleted=0
+    cleanup_skipped=0
+    cleanup_failed=0
+
+    for subprefix in $list_output; do
+      report_key="${subprefix}report.json"
+
+      head_output=$(aws s3api head-object \
+        --bucket "$cleanup_bucket" \
+        --key "$report_key" \
+        --region "$cleanup_region" \
+        --query 'LastModified' \
+        --output text 2>&1)
+      head_rc=$?
+
+      if (( head_rc != 0 )); then
+        if echo "$head_output" | grep -qE 'An error occurred \((404|NoSuchKey)\)'; then
+          log_warn "no report.json under s3://${cleanup_bucket}/${subprefix}; skipping"
+          cleanup_skipped=$(( cleanup_skipped + 1 ))
+        else
+          head_err=$(classify_aws_error "$head_output")
+          [[ -z "$head_err" ]] && head_err="UnknownError"
+          log_error "head-object failed for s3://${cleanup_bucket}/${subprefix}: ${head_err} :: ${head_output}"
+          cleanup_failed=$(( cleanup_failed + 1 ))
+        fi
+        continue
+      fi
+
+      last_mod_iso="$head_output"
+      last_mod_epoch=$(iso_to_epoch "$last_mod_iso")
+      if [[ -z "$last_mod_epoch" ]]; then
+        log_error "could not parse report.json LastModified for s3://${cleanup_bucket}/${subprefix}: ${last_mod_iso}"
+        cleanup_failed=$(( cleanup_failed + 1 ))
+        continue
+      fi
+
+      if (( last_mod_epoch < cutoff_epoch )); then
+        rm_output=$(aws s3 rm "s3://${cleanup_bucket}/${subprefix}" \
+          --recursive --region "$cleanup_region" 2>&1)
+        rm_rc=$?
+        if (( rm_rc != 0 )); then
+          rm_err=$(classify_aws_error "$rm_output")
+          [[ -z "$rm_err" ]] && rm_err="UnknownError"
+          log_error "delete failed for s3://${cleanup_bucket}/${subprefix}: ${rm_err} :: ${rm_output}"
+          cleanup_failed=$(( cleanup_failed + 1 ))
+        else
+          log_info "deleted s3://${cleanup_bucket}/${subprefix} (last-modified=${last_mod_iso})"
+          cleanup_deleted=$(( cleanup_deleted + 1 ))
+        fi
+      fi
+    done
+
+    if (( cleanup_failed == 0 )); then
+      log_info "reconciliation cleanup summary: deleted=${cleanup_deleted} skipped=${cleanup_skipped} failed=${cleanup_failed}"
+      exit 0
+    else
+      exit 1
+    fi
+  fi
+
+  reconcile_required=(
+    "SOURCE_KS:--src-keyspace"
+    "SOURCE_TBL:--src-table"
+    "TARGET_KS:--trg-keyspace"
+    "TARGET_TBL:--trg-table"
+    "S3_LANDING_ZONE:--landing-zone"
+    "AWS_REGION:--region"
+    "DEFAULT_ENV:--cqlreplicator-enviroment"
+  )
+
+  reconcile_missing=()
+  for entry in "${reconcile_required[@]}"; do
+    key="${entry%%:*}"
+    flag="${entry##*:}"
+    if [[ -z "${params[$key]:-}" ]]; then
+      reconcile_missing+=("$flag")
+    fi
+  done
+
+  if (( ${#reconcile_missing[@]} > 0 )); then
+    for flag in "${reconcile_missing[@]}"; do
+      log_error "$flag"
+    done
+    exit 1
+  fi
+
+  if [[ "${params[TARGET_TYPE_PROVIDED]:-false}" != "true" ]]; then
+    log_error "--target-type is required for the reconcile-keys subcommand"
+    exit 1
+  fi
+
+  # only `keyspaces` is supported in this release. Any other
+  # value (dynamodb, memorydb, opensearch, parquet, etc.) is rejected
+  # with a message that names the only supported value, so an operator
+  # can quickly correct the invocation.
+  if [[ "${params[TARGET_TYPE]}" != "keyspaces" ]]; then
+    log_error "--target-type=${params[TARGET_TYPE]} is not supported; only \`keyspaces\` is supported in this release"
+    exit 1
+  fi
+
+  reconcile_args_json=$(jq -n \
+    --arg source_ks "${params[SOURCE_KS]}" \
+    --arg source_tbl "${params[SOURCE_TBL]}" \
+    --arg target_ks "${params[TARGET_KS]}" \
+    --arg target_tbl "${params[TARGET_TBL]}" \
+    --arg landing_zone "${params[S3_LANDING_ZONE]}" \
+    --arg total_tiles "${params[TILES]}" \
+    --arg logging "${params[LOGGING]}" \
+    --arg run_id "${params[RUN_ID]:-}" \
+    --arg keep_snapshots "${params[KEEP_SNAPSHOTS]:-}" \
+    --arg bidirectional "${params[BIDIRECTIONAL]:-}" \
+    --arg sample_size "${params[SAMPLE_SIZE]:-}" \
+    --arg max_target_rcus "${params[MAX_TARGET_RCUS]:-}" \
+    --arg output_prefix_override "${params[OUTPUT_PREFIX_OVERRIDE]:-}" \
+    --arg json_mapping "${JSON_MAPPING_B64:-$(echo "None" | base64)}" \
+    '{
+        "--SOURCE_KS": $source_ks,
+        "--SOURCE_TBL": $source_tbl,
+        "--TARGET_KS": $target_ks,
+        "--TARGET_TBL": $target_tbl,
+        "--S3_LANDING_ZONE": $landing_zone,
+        "--TOTAL_TILES": $total_tiles,
+        "--LOGGING": $logging,
+        "--JSON_MAPPING": $json_mapping
+     }
+     + (if $run_id == ""                 then {} else {"--RUN_ID": $run_id} end)
+     + (if $keep_snapshots == ""         then {} else {"--KEEP_SNAPSHOTS": $keep_snapshots} end)
+     + (if $bidirectional == ""          then {} else {"--BIDIRECTIONAL": $bidirectional} end)
+     + (if $sample_size == ""            then {} else {"--SAMPLE_SIZE": $sample_size} end)
+     + (if $max_target_rcus == ""        then {} else {"--MAX_TARGET_RCUS": $max_target_rcus} end)
+     + (if $output_prefix_override == "" then {} else {"--OUTPUT_PREFIX_OVERRIDE": $output_prefix_override} end)')
+  jq_rc=$?
+  if (( jq_rc != 0 )); then
+    log_error "Failed to build StartJobRun --arguments payload (jq exit ${jq_rc})"
+    exit 1
+  fi
+
+  reconcile_job_name="PrimaryKeyReconciliation${params[DEFAULT_ENV]}"
+
+  log_info "Submitting Glue StartJobRun for ${reconcile_job_name}"
+
+  start_run_stderr_file=$(mktemp 2>/dev/null || mktemp -t reconcile-keys-stderr)
+  start_run_stdout=$(aws glue start-job-run \
+    --job-name "$reconcile_job_name" \
+    --region "${params[AWS_REGION]}" \
+    --arguments "$reconcile_args_json" \
+    --output text \
+    2>"$start_run_stderr_file")
+  start_run_rc=$?
+  start_run_stderr=$(cat "$start_run_stderr_file" 2>/dev/null)
+  rm -f "$start_run_stderr_file"
+
+  if (( start_run_rc != 0 )); then
+    aws_err_class=$(echo "$start_run_stderr" | sed -n 's/.*An error occurred (\([^)]*\)).*/\1/p' | head -1)
+    [[ -z "$aws_err_class" ]] && aws_err_class="UnknownError"
+    log_error "StartJobRun for ${reconcile_job_name} failed: ${aws_err_class} :: ${start_run_stderr}"
+    exit 1
+  fi
+
+  echo "$start_run_stdout"
+  exit 0
 fi

@@ -824,5 +824,170 @@ To also clean up Iceberg databases and tables from the Glue Data Catalog, provid
 
 Each keyspace maps to a Glue database named `{keyspace}_db`. Without `--src-keyspace-list`, the Glue Data Catalog databases are not deleted and a warning is displayed.
 
+## Reconcile primary keys
+
+The reconciliation job is an on-demand CQLReplicator job that compares the
+primary-key sets of a source Apache Cassandra table and a target Amazon
+Keyspaces table and produces a JSON report plus Parquet snapshots of the
+source set, the target set, and the set differences. It is **read-only** with
+respect to both Cassandra and Amazon Keyspaces, does not touch
+`migration.ledger`, the per-tile Iceberg snapshot tables, or the replication
+DLQ, and is safe to run concurrently with an active replication job. This
+release supports Keyspaces targets only.
+
+The job is provisioned at `cqlreplicator init` time as a Glue job named
+`PrimaryKeyReconciliation${env}`, using the same Glue version, Glue version,
+IAM role, Glue connector, and `artifacts/` JAR set as the replicator's job.
+The reconciliation Glue job is created with **`MaxRetries = 0`**: a failed run
+is not retried automatically by Glue; the operator reruns it explicitly.
+
+### Invocation
+
+The job is launched through the existing CLI using the dedicated
+`--state/--cmd` value:
+
+```
+--cmd reconcile-keys
+```
+
+### CLI arguments
+
+These are the `cqlreplicator` CLI flags consumed by the `reconcile-keys`
+subcommand (each flag also has a short alias shown in parentheses).
+
+| Flag | Type | Default | Required | Meaning |
+|------|------|---------|----------|---------|
+| `--src-keyspace` (`--sk`) | string | — | yes | Source Cassandra keyspace. |
+| `--src-table` (`--st`) | string | — | yes | Source Cassandra table. |
+| `--trg-keyspace` (`--tk`) | string | — | yes | Target Amazon Keyspaces keyspace. |
+| `--trg-table` (`--tt`) | string | — | yes | Target Amazon Keyspaces table. |
+| `--landing-zone` (`--lz`) | string (`s3://<bucket>/`) | — | yes | Existing CQLReplicator S3 landing zone. The `<bucket>` is reused for `artifacts/` and for the reconciliation outputs. |
+| `--region` (`--sr`) | string | — | yes | AWS region of the Keyspaces target and the Glue job. |
+| `--cqlreplicator-enviroment` (`--env`) | string | — | yes | Environment suffix; selects the `PrimaryKeyReconciliation${env}` Glue job. |
+| `--target-type` (`--ttp`) | string | — | yes | Must be `keyspaces`. Any other value is rejected; the flag must be supplied explicitly for this subcommand (no default is assumed). |
+| `--retention-days` (`--rd`) | integer in `[1, 3650]` | — | no | Switches the subcommand into cleanup mode (see [Cleanup of historical reports](#cleanup-of-historical-reports)). No Glue job is submitted in this mode. |
+| `--run-id` (`--rid`) | string `[A-Za-z0-9_-]`, ≤128 chars | derived from Glue `JOB_RUN_ID` | no | Forwarded as `RUN_ID`; isolates this run's S3 artifacts. |
+| `--keep-snapshots` (`--ks`) | boolean | `true` | no | Forwarded as `KEEP_SNAPSHOTS`. |
+| `--bidirectional` (`--bd`) | boolean | `true` | no | Forwarded as `BIDIRECTIONAL`. When `false`, only source-minus-target is computed. |
+| `--sample-size` (`--smz`) | integer in `[0, 10000]` | `100` | no | Forwarded as `SAMPLE_SIZE`; bounds the sample arrays in the report. |
+| `--max-target-rcus` (`--mtr`) | non-negative integer | `0` (no throttle) | no | Forwarded as `MAX_TARGET_RCUS`; caps the target read rate. |
+| `--output-prefix-override` (`--opo`) | string | empty (use the standard prefix) | no | Forwarded as `OUTPUT_PREFIX_OVERRIDE`; writes under `<override>/<Run_ID>/` instead of the default prefix. |
+| `--json-mapping` (`--jm`) | JSON string | `None` | no | Forwarded base64-encoded as `JSON_MAPPING`. Only `keyspaces.transformation` (filter expression and primary-key transforms) is consulted; it must match the value used at replication time. |
+
+### S3 output layout
+
+All artifacts for a single run land under one prefix,
+`<Reconciliation_Prefix>`, which by default is:
+
+```
+<Landing_Zone><source_keyspace>/<source_table>/reconciliation/<Run_ID>/
+```
+
+When `OUTPUT_PREFIX_OVERRIDE` is non-empty, the prefix is
+`<OUTPUT_PREFIX_OVERRIDE>/<Run_ID>/` instead. The layout under the prefix:
+
+```
+<Reconciliation_Prefix>
+├── source/                                 # Source_Snapshot Parquet
+│   └── group=<n>/part-*.parquet            # rows per file <= KEYS_PER_PARQUET_FILE (10,500,000)
+├── target/                                 # Target_Snapshot Parquet
+│   └── group=<n>/part-*.parquet
+├── diff/
+│   ├── source_minus_target/                # A_Minus_B_Snapshot
+│   │   └── part-*.parquet
+│   └── target_minus_source/                # B_Minus_A_Snapshot, only when BIDIRECTIONAL=true
+│       └── part-*.parquet
+└── report.json                             # Report_Document
+```
+
+Each snapshot Parquet schema is `Effective_Source_PK_Columns` plus a `group`
+integer column, so the tile assignment is recoverable from the file content.
+
+### `report.json` schema
+
+`report.json` is a single JSON object with the following fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `runId` | string | The resolved `Run_ID`. |
+| `runStartedAt` | string | ISO-8601 UTC, millisecond precision, `Z` suffix. |
+| `runFinishedAt` | string | Same format as `runStartedAt`. |
+| `sourceKeyspace` | string | |
+| `sourceTable` | string | |
+| `targetKeyspace` | string | |
+| `targetTable` | string | |
+| `partitionKeyColumns` | array of `{name, type}` | Ordered partition-key columns. |
+| `clusteringKeyColumns` | array of `{name, type}` | Ordered clustering-key columns. |
+| `schemaFingerprint` | string | Fingerprint of the reconciled effective schema. |
+| `totalTiles` | integer | The `TOTAL_TILES` used. |
+| `sourceCount` | integer | Distinct primary keys in the source snapshot. |
+| `targetCount` | integer | Distinct primary keys in the target snapshot. |
+| `intersectionCount` | integer | Size of the source ∩ target intersection. |
+| `sourceMinusTargetCount` | integer | Keys present in source but absent from target. |
+| `targetMinusSourceCount` | integer | Keys present in target but absent from source. **Omitted when `BIDIRECTIONAL` is `false`.** |
+| `sourceMinusTargetSample` | array of PK rows | Up to `SAMPLE_SIZE` rows, sorted deterministically (PK columns ascending, NULLs last). |
+| `targetMinusSourceSample` | array of PK rows | Same shape and ordering. **Omitted when `BIDIRECTIONAL` is `false`.** |
+| `sourceSnapshotPath` | string (`s3://...`) | Path to `source/`. |
+| `targetSnapshotPath` | string (`s3://...`) | Path to `target/`. |
+| `sourceMinusTargetPath` | string (`s3://...`) | Path to `diff/source_minus_target/`. |
+| `targetMinusSourcePath` | string (`s3://...`) | Path to `diff/target_minus_source/`. **Omitted when `BIDIRECTIONAL` is `false`.** |
+| `status` | `"success"` or `"partial"` | `"success"` when all tiles scanned and all writes succeeded; `"partial"` when the run terminated early. |
+| `phase` | one of `preflight`, `source_scan`, `target_scan`, `diff`, `report` | Present only when `status` is `"partial"`. |
+| `failure` | `{exceptionClass, message}` | Present only when `status` is `"partial"`; `message` ≤ 4096 chars. |
+| `jsonMapping` | object | The resolved `JSON_MAPPING` object actually applied at runtime (never the raw base64 string). |
+
+In summary, the three fields `targetMinusSourceCount`,
+`targetMinusSourceSample`, and `targetMinusSourcePath` are omitted from
+`report.json` whenever `BIDIRECTIONAL` is `false`.
+
+### Example
+
+The following invocation reconciles
+`ks_test_cql_replicator.test_cql_replicator` on Cassandra against the same
+keyspace/table on Amazon Keyspaces and prints the resulting Glue `JobRunId`:
+
+```shell
+   cqlreplicator --cmd reconcile-keys \
+                 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --target-type keyspaces --env ver5
+```
+
+When the run finishes, inspect
+`s3://<PROVIDED_BUCKET_NAME>/ks_test_cql_replicator/test_cql_replicator/reconciliation/<Run_ID>/report.json`.
+
+### Cleanup of historical reports
+
+Reconciliation outputs accumulate one `<Run_ID>/` directory per run. To age out
+old runs for a given `(source_keyspace, source_table)` pair, run the
+`reconcile-keys` subcommand with `--retention-days`:
+
+```shell
+   cqlreplicator --cmd reconcile-keys \
+                 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --retention-days 30
+```
+
+- `--retention-days N` accepts an integer in the inclusive range `[1, 3650]`.
+- In cleanup mode no Glue job is submitted. The CLI lists the immediate
+  subdirectories of
+  `<Landing_Zone><source_keyspace>/<source_table>/reconciliation/` and deletes
+  those whose `report.json` was last modified earlier than (CLI start UTC) − N
+  days.
+- A subdirectory without a `report.json` (an in-flight or aborted run) is
+  skipped with a `WARN` line.
+- On a clean run the CLI prints a summary line with the counts of
+  subdirectories deleted, skipped, and failed, for example:
+
+  ```
+  reconciliation cleanup summary: deleted=3 skipped=1 failed=0
+  ```
+
+- If the reconciliation prefix does not exist or contains no subdirectories,
+  the CLI exits zero and prints a single `INFO` line stating that
+  `no reconciliation runs were found`.
+
 ## License
 This tool licensed under the Apache-2 License. See the LICENSE file.

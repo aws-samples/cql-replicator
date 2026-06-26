@@ -824,5 +824,132 @@ To also clean up Iceberg databases and tables from the Glue Data Catalog, provid
 
 Each keyspace maps to a Glue database named `{keyspace}_db`. Without `--src-keyspace-list`, the Glue Data Catalog databases are not deleted and a warning is displayed.
 
+## Reconcile primary keys
+
+The reconciliation job is an on-demand CQLReplicator job that compares the
+primary-key sets of a source Cassandra table and a target Amazon
+Keyspaces table and produces a JSON report plus Parquet snapshots of the
+source set, the target set, and the set differences. It is **read-only** with
+respect to both Cassandra and Amazon Keyspaces, does not touch
+`migration.ledger`, the per-tile Iceberg snapshot tables, or the replication
+DLQ, and is safe to run concurrently with an active replication job. This
+release supports Keyspaces targets only.
+
+The job is provisioned at `cqlreplicator init` time as a Glue job named
+`PrimaryKeyReconciliation${env}`, using the same Glue version, Glue version,
+IAM role, Glue connector, and `artifacts/` JAR set as the replicator's job.
+The reconciliation Glue job is created with **`MaxRetries = 0`**: a failed run
+is not retried automatically by Glue; the operator reruns it explicitly.
+
+### Example
+
+The following invocation reconciles
+`ks_test_cql_replicator.test_cql_replicator` on Cassandra against the same
+keyspace/table on Amazon Keyspaces and prints the resulting Glue `JobRunId`:
+
+```shell
+   cqlreplicator --cmd reconcile-keys \
+                 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
+                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
+                 --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
+                 --target-type keyspaces --env ver5
+```
+
+When the run finishes, inspect
+`s3://<PROVIDED_BUCKET_NAME>/ks_test_cql_replicator/test_cql_replicator/reconciliation/<Run_ID>/report.json`.
+
+### Handling Amazon Keyspaces throttling during reconciliation
+
+The reconciliation target scan reads at `LOCAL_ONE` and honors `--max-target-rcus`
+(the `MAX_TARGET_RCUS` Spark Cassandra Connector read-rate cap). For most runs
+this is enough. If a few hot partitions still get throttled — you will see
+`ReadTimeoutException` in the Glue logs, and the failure analyzer may report
+`Failed to open native connection to Cassandra` — the DataStax driver's default
+retry policy may not be conservative enough.
+
+In that case you can install the AWS Keyspaces sample `AmazonKeyspacesExponentialRetryPolicy`, which retries on the **same** host with
+exponential backoff (instead of the default `RETRY_NEXT`) and is well suited to
+capacity-driven Keyspaces timeouts.
+
+> **Important — this must be a JAR, not inlined in the script.** The Spark
+> Cassandra Connector opens Cassandra sessions on the Spark **executors**, and
+> the driver loads `advanced.retry-policy.class` by name **on each executor**.
+> A class compiled into the Glue Scala script lives only on the **driver**, so
+> referencing it from `KeyspacesConnector.conf` fails on executors with
+> `Can't find class com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy`.
+> The class must be on the executor classpath, which means it has to be a JAR
+> supplied via `--extra-jars`.
+
+#### 1. Build the retry-policy JAR
+
+The policy lives in the AWS Keyspaces driver-helpers samples. Build it (or pull
+the prebuilt artifact) so you get a small JAR containing
+`com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy` and
+`com.aws.ssa.keyspaces.retry.KeyspacesRetryOption`:
+
+```shell
+   git clone https://github.com/aws-samples/amazon-keyspaces-java-driver-helpers.git
+   cd amazon-keyspaces-java-driver-helpers
+   mvn -q -DskipTests package
+   # produces target/amazon-keyspaces-helpers-<version>.jar
+```
+
+The DataStax driver must be `provided` (it is already on the Glue classpath via
+`spark-cassandra-connector-assembly`), so the helper JAR stays thin and does not
+shade a conflicting driver.
+
+#### 2. Publish the JAR to the artifacts prefix
+
+Upload it next to the connector JARs the `init` flow publishes:
+
+```shell
+   aws s3 cp target/amazon-keyspaces-helpers-<version>.jar \
+     s3://<PROVIDED_BUCKET_NAME>/artifacts/amazon-keyspaces-helpers-<version>.jar \
+     --region us-east-1
+```
+
+#### 3. Add the JAR to `--extra-jars` for both Glue jobs
+
+The reconciliation job (`PrimaryKeyReconciliation${env}`) and the replicator job
+(`CQLReplicator${env}`) share `KeyspacesConnector.conf`, so the JAR must be on the
+classpath of both (driver **and** executors). Update each job's `--extra-jars`
+default argument to include the new JAR (keep all existing entries and append the
+helper JAR, comma separated):
+
+```shell
+   aws glue update-job --job-name PrimaryKeyReconciliation${env} --region us-east-1 \
+     --job-update '{"DefaultArguments":{"--extra-jars":"<existing jars>,s3://<PROVIDED_BUCKET_NAME>/artifacts/amazon-keyspaces-helpers-<version>.jar", ...}}'
+```
+
+Glue distributes `--extra-jars` to the driver and every executor, which is what
+makes the class resolvable on the executor sessions the connector opens.
+
+#### 4. Reference the policy in `KeyspacesConnector.conf`
+
+Add the `advanced.retry-policy` block and re-upload the conf to
+`s3://<PROVIDED_BUCKET_NAME>/artifacts/KeyspacesConnector.conf`:
+
+```hocon
+   advanced.retry-policy {
+     class        = com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy
+     max-attempts = 16
+     min-wait     = 10 milliseconds
+     max-wait     = 100 milliseconds
+   }
+```
+
+#### 5. Verify
+
+On the next reconciliation run the driver logs the resolved policy:
+
+```
+   target driver retry policy (advanced.retry-policy.class): com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy
+```
+
+If you instead see `Can't find class ...` on an executor, the JAR is not on
+`--extra-jars` (step 3) — fix that before re-running. To roll back, remove the
+`advanced.retry-policy` block from `KeyspacesConnector.conf`; the driver falls
+back to its default retry policy and no JAR is required.
+
 ## License
 This tool licensed under the Apache-2 License. See the LICENSE file.

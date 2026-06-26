@@ -500,6 +500,17 @@ object TargetScanner {
 
   val ReadThrottleParam: String = "spark.cassandra.input.readsPerSec"
 
+  /**
+   * Spark Cassandra Connector read-consistency override. The reconciliation
+   * target scan only enumerates primary keys for a set comparison, so it reads
+   * at `LOCAL_ONE` to minimize Amazon Keyspaces RCU consumption and
+   * partition/capacity pressure. The connector applies this consistency to
+   * every read statement, overriding the `LOCAL_QUORUM` default declared in
+   * `KeyspacesConnector.conf` (`basic.request.consistency`) for this job only.
+   */
+  val ReadConsistencyParam: String = "spark.cassandra.input.consistency.level"
+  val TargetReadConsistency: String = "LOCAL_ONE"
+
   def projectTarget(df: DataFrame, targetPks: Seq[(String, String)]): DataFrame =
     df.select(targetPks.map { case (name, _) => col(name) }: _*)
 
@@ -570,6 +581,17 @@ object TargetScanner {
     val readDf: DataFrame =
       try {
         spark.conf.set("spark.cassandra.connection.config.profile.path", trgConnConfName)
+        // Override the KeyspacesConnector.conf LOCAL_QUORUM default with
+        // LOCAL_ONE for the target scan: reconciliation only needs to read
+        // primary keys, so LOCAL_ONE halves the RCU cost per read and reduces
+        // partition-capacity pressure (Req 6.x target read is set-membership
+        // only). The connector sets this consistency on every read statement.
+        spark.conf.set(ReadConsistencyParam, TargetReadConsistency)
+        logger.info(
+          s"TargetScanner: read consistency overridden to $TargetReadConsistency " +
+            s"via $ReadConsistencyParam (overrides the KeyspacesConnector.conf " +
+            s"basic.request.consistency default for the target scan)"
+        )
         val projection = targetPks.map(_._1)
         logger.info(
           s"TargetScanner: reading $trgKs.$trgTbl projecting " +
@@ -1324,11 +1346,17 @@ object PrimaryKeyReconciliation {
   )
 
   val RequiredJarNames: Seq[String] = Seq(
+    // Only the jars the Reconciliation_Job itself loads are verified here.
+    // The Spark Cassandra Connector assembly backs the source/target scans,
+    // and the SigV4 auth plugin authenticates to Amazon Keyspaces (referenced
+    // by KeyspacesConnector.conf). resilience4j-retry / resilience4j-core /
+    // vavr are intentionally NOT listed: they are the replicator's retry
+    // dependencies (CQLReplicator.scala), and the reconciliation code never
+    // references them, so requiring them at bootstrap would be a needless
+    // coupling. They may still sit on the shared classpath; they are just not
+    // a precondition for this job.
     "spark-cassandra-connector-assembly_2.12-3.5.1.jar",
-    "aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar",
-    "vavr-0.10.4.jar",
-    "resilience4j-retry-1.7.1.jar",
-    "resilience4j-core-1.7.1.jar"
+    "aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
   )
 
   /** Resolved bootstrap context returned by [[bootstrap]]. */
@@ -1538,6 +1566,30 @@ object PrimaryKeyReconciliation {
   private val SourceLabel: String = "source"
   private val TargetLabel: String = "target"
 
+  /**
+   * Logs, via `GlueLogger` (so it always appears in the Glue driver output
+   * regardless of slf4j/log4j levels), the retry policy the driver resolved
+   * from the connector config of an already-built `CqlSession`. Useful to
+   * confirm whether a custom retry policy (e.g.
+   * `com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy`,
+   * supplied as a jar on `--extra-jars`) is in effect, or the DataStax
+   * default. Reads are best-effort: any failure is logged at WARN and
+   * swallowed so it never affects the run.
+   */
+  private def logResolvedRetryPolicy(conn: CqlSession, side: String, logger: GlueLogger): Unit = {
+    Try {
+      val retryClass = conn.getContext.getConfig.getDefaultProfile.getString(
+        com.datastax.oss.driver.api.core.config.DefaultDriverOption.RETRY_POLICY_CLASS, "<unset>")
+      logger.info(s"$side driver retry policy (advanced.retry-policy.class): $retryClass")
+    } match {
+      case Success(_) => ()
+      case Failure(t) =>
+        logger.warn(
+          s"Could not read the $side retry-policy configuration: " +
+            s"${t.getClass.getName}: ${t.getMessage}")
+    }
+  }
+
   def preflightAndReconcile(
       parsed: ResolvedArgs,
       bootstrapped: BootstrapContext,
@@ -1547,6 +1599,10 @@ object PrimaryKeyReconciliation {
       getDBConnection("CassandraConnector.conf", bootstrapped.bucketName, bootstrapped.s3client)
     val targetConn: CqlSession =
       getDBConnection("KeyspacesConnector.conf", bootstrapped.bucketName, bootstrapped.s3client)
+    // Log, in the Glue output, which retry policy the Keyspaces driver
+    // resolved from KeyspacesConnector.conf (the DataStax default unless a
+    // custom policy jar is supplied on --extra-jars and configured).
+    logResolvedRetryPolicy(targetConn, TargetLabel, logger)
 
     def runPreflight(side: String, conn: CqlSession, ks: String, tbl: String): Unit = {
       try {

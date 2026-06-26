@@ -827,7 +827,7 @@ Each keyspace maps to a Glue database named `{keyspace}_db`. Without `--src-keys
 ## Reconcile primary keys
 
 The reconciliation job is an on-demand CQLReplicator job that compares the
-primary-key sets of a source Apache Cassandra table and a target Amazon
+primary-key sets of a source Cassandra table and a target Amazon
 Keyspaces table and produces a JSON report plus Parquet snapshots of the
 source set, the target set, and the set differences. It is **read-only** with
 respect to both Cassandra and Amazon Keyspaces, does not touch
@@ -840,105 +840,6 @@ The job is provisioned at `cqlreplicator init` time as a Glue job named
 IAM role, Glue connector, and `artifacts/` JAR set as the replicator's job.
 The reconciliation Glue job is created with **`MaxRetries = 0`**: a failed run
 is not retried automatically by Glue; the operator reruns it explicitly.
-
-### Invocation
-
-The job is launched through the existing CLI using the dedicated
-`--state/--cmd` value:
-
-```
---cmd reconcile-keys
-```
-
-### CLI arguments
-
-These are the `cqlreplicator` CLI flags consumed by the `reconcile-keys`
-subcommand (each flag also has a short alias shown in parentheses).
-
-| Flag | Type | Default | Required | Meaning |
-|------|------|---------|----------|---------|
-| `--src-keyspace` (`--sk`) | string | — | yes | Source Cassandra keyspace. |
-| `--src-table` (`--st`) | string | — | yes | Source Cassandra table. |
-| `--trg-keyspace` (`--tk`) | string | — | yes | Target Amazon Keyspaces keyspace. |
-| `--trg-table` (`--tt`) | string | — | yes | Target Amazon Keyspaces table. |
-| `--landing-zone` (`--lz`) | string (`s3://<bucket>/`) | — | yes | Existing CQLReplicator S3 landing zone. The `<bucket>` is reused for `artifacts/` and for the reconciliation outputs. |
-| `--region` (`--sr`) | string | — | yes | AWS region of the Keyspaces target and the Glue job. |
-| `--cqlreplicator-enviroment` (`--env`) | string | — | yes | Environment suffix; selects the `PrimaryKeyReconciliation${env}` Glue job. |
-| `--target-type` (`--ttp`) | string | — | yes | Must be `keyspaces`. Any other value is rejected; the flag must be supplied explicitly for this subcommand (no default is assumed). |
-| `--retention-days` (`--rd`) | integer in `[1, 3650]` | — | no | Switches the subcommand into cleanup mode (see [Cleanup of historical reports](#cleanup-of-historical-reports)). No Glue job is submitted in this mode. |
-| `--run-id` (`--rid`) | string `[A-Za-z0-9_-]`, ≤128 chars | derived from Glue `JOB_RUN_ID` | no | Forwarded as `RUN_ID`; isolates this run's S3 artifacts. |
-| `--keep-snapshots` (`--ks`) | boolean | `true` | no | Forwarded as `KEEP_SNAPSHOTS`. |
-| `--bidirectional` (`--bd`) | boolean | `true` | no | Forwarded as `BIDIRECTIONAL`. When `false`, only source-minus-target is computed. |
-| `--sample-size` (`--smz`) | integer in `[0, 10000]` | `100` | no | Forwarded as `SAMPLE_SIZE`; bounds the sample arrays in the report. |
-| `--max-target-rcus` (`--mtr`) | non-negative integer | `0` (no throttle) | no | Forwarded as `MAX_TARGET_RCUS`; caps the target read rate. |
-| `--output-prefix-override` (`--opo`) | string | empty (use the standard prefix) | no | Forwarded as `OUTPUT_PREFIX_OVERRIDE`; writes under `<override>/<Run_ID>/` instead of the default prefix. |
-| `--json-mapping` (`--jm`) | JSON string | `None` | no | Forwarded base64-encoded as `JSON_MAPPING`. Only `keyspaces.transformation` (filter expression and primary-key transforms) is consulted; it must match the value used at replication time. |
-
-### S3 output layout
-
-All artifacts for a single run land under one prefix,
-`<Reconciliation_Prefix>`, which by default is:
-
-```
-<Landing_Zone><source_keyspace>/<source_table>/reconciliation/<Run_ID>/
-```
-
-When `OUTPUT_PREFIX_OVERRIDE` is non-empty, the prefix is
-`<OUTPUT_PREFIX_OVERRIDE>/<Run_ID>/` instead. The layout under the prefix:
-
-```
-<Reconciliation_Prefix>
-├── source/                                 # Source_Snapshot Parquet
-│   └── group=<n>/part-*.parquet            # rows per file <= KEYS_PER_PARQUET_FILE (10,500,000)
-├── target/                                 # Target_Snapshot Parquet
-│   └── group=<n>/part-*.parquet
-├── diff/
-│   ├── source_minus_target/                # A_Minus_B_Snapshot
-│   │   └── part-*.parquet
-│   └── target_minus_source/                # B_Minus_A_Snapshot, only when BIDIRECTIONAL=true
-│       └── part-*.parquet
-└── report.json                             # Report_Document
-```
-
-Each snapshot Parquet schema is `Effective_Source_PK_Columns` plus a `group`
-integer column, so the tile assignment is recoverable from the file content.
-
-### `report.json` schema
-
-`report.json` is a single JSON object with the following fields:
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `runId` | string | The resolved `Run_ID`. |
-| `runStartedAt` | string | ISO-8601 UTC, millisecond precision, `Z` suffix. |
-| `runFinishedAt` | string | Same format as `runStartedAt`. |
-| `sourceKeyspace` | string | |
-| `sourceTable` | string | |
-| `targetKeyspace` | string | |
-| `targetTable` | string | |
-| `partitionKeyColumns` | array of `{name, type}` | Ordered partition-key columns. |
-| `clusteringKeyColumns` | array of `{name, type}` | Ordered clustering-key columns. |
-| `schemaFingerprint` | string | Fingerprint of the reconciled effective schema. |
-| `totalTiles` | integer | The `TOTAL_TILES` used. |
-| `sourceCount` | integer | Distinct primary keys in the source snapshot. |
-| `targetCount` | integer | Distinct primary keys in the target snapshot. |
-| `intersectionCount` | integer | Size of the source ∩ target intersection. |
-| `sourceMinusTargetCount` | integer | Keys present in source but absent from target. |
-| `targetMinusSourceCount` | integer | Keys present in target but absent from source. **Omitted when `BIDIRECTIONAL` is `false`.** |
-| `sourceMinusTargetSample` | array of PK rows | Up to `SAMPLE_SIZE` rows, sorted deterministically (PK columns ascending, NULLs last). |
-| `targetMinusSourceSample` | array of PK rows | Same shape and ordering. **Omitted when `BIDIRECTIONAL` is `false`.** |
-| `sourceSnapshotPath` | string (`s3://...`) | Path to `source/`. |
-| `targetSnapshotPath` | string (`s3://...`) | Path to `target/`. |
-| `sourceMinusTargetPath` | string (`s3://...`) | Path to `diff/source_minus_target/`. |
-| `targetMinusSourcePath` | string (`s3://...`) | Path to `diff/target_minus_source/`. **Omitted when `BIDIRECTIONAL` is `false`.** |
-| `status` | `"success"` or `"partial"` | `"success"` when all tiles scanned and all writes succeeded; `"partial"` when the run terminated early. |
-| `phase` | one of `preflight`, `source_scan`, `target_scan`, `diff`, `report` | Present only when `status` is `"partial"`. |
-| `failure` | `{exceptionClass, message}` | Present only when `status` is `"partial"`; `message` ≤ 4096 chars. |
-| `jsonMapping` | object | The resolved `JSON_MAPPING` object actually applied at runtime (never the raw base64 string). |
-
-In summary, the three fields `targetMinusSourceCount`,
-`targetMinusSourceSample`, and `targetMinusSourcePath` are omitted from
-`report.json` whenever `BIDIRECTIONAL` is `false`.
 
 ### Example
 
@@ -957,37 +858,98 @@ keyspace/table on Amazon Keyspaces and prints the resulting Glue `JobRunId`:
 When the run finishes, inspect
 `s3://<PROVIDED_BUCKET_NAME>/ks_test_cql_replicator/test_cql_replicator/reconciliation/<Run_ID>/report.json`.
 
-### Cleanup of historical reports
+### Handling Amazon Keyspaces throttling during reconciliation
 
-Reconciliation outputs accumulate one `<Run_ID>/` directory per run. To age out
-old runs for a given `(source_keyspace, source_table)` pair, run the
-`reconcile-keys` subcommand with `--retention-days`:
+The reconciliation target scan reads at `LOCAL_ONE` and honors `--max-target-rcus`
+(the `MAX_TARGET_RCUS` Spark Cassandra Connector read-rate cap). For most runs
+this is enough. If a few hot partitions still get throttled — you will see
+`ReadTimeoutException` in the Glue logs, and the failure analyzer may report
+`Failed to open native connection to Cassandra` — the DataStax driver's default
+retry policy may not be conservative enough.
+
+In that case you can install the AWS Keyspaces sample `AmazonKeyspacesExponentialRetryPolicy`, which retries on the **same** host with
+exponential backoff (instead of the default `RETRY_NEXT`) and is well suited to
+capacity-driven Keyspaces timeouts.
+
+> **Important — this must be a JAR, not inlined in the script.** The Spark
+> Cassandra Connector opens Cassandra sessions on the Spark **executors**, and
+> the driver loads `advanced.retry-policy.class` by name **on each executor**.
+> A class compiled into the Glue Scala script lives only on the **driver**, so
+> referencing it from `KeyspacesConnector.conf` fails on executors with
+> `Can't find class com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy`.
+> The class must be on the executor classpath, which means it has to be a JAR
+> supplied via `--extra-jars`.
+
+#### 1. Build the retry-policy JAR
+
+The policy lives in the AWS Keyspaces driver-helpers samples. Build it (or pull
+the prebuilt artifact) so you get a small JAR containing
+`com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy` and
+`com.aws.ssa.keyspaces.retry.KeyspacesRetryOption`:
 
 ```shell
-   cqlreplicator --cmd reconcile-keys \
-                 --landing-zone s3://<PROVIDED_BUCKET_NAME> --region us-east-1 \
-                 --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
-                 --retention-days 30
+   git clone https://github.com/aws-samples/amazon-keyspaces-java-driver-helpers.git
+   cd amazon-keyspaces-java-driver-helpers
+   mvn -q -DskipTests package
+   # produces target/amazon-keyspaces-helpers-<version>.jar
 ```
 
-- `--retention-days N` accepts an integer in the inclusive range `[1, 3650]`.
-- In cleanup mode no Glue job is submitted. The CLI lists the immediate
-  subdirectories of
-  `<Landing_Zone><source_keyspace>/<source_table>/reconciliation/` and deletes
-  those whose `report.json` was last modified earlier than (CLI start UTC) − N
-  days.
-- A subdirectory without a `report.json` (an in-flight or aborted run) is
-  skipped with a `WARN` line.
-- On a clean run the CLI prints a summary line with the counts of
-  subdirectories deleted, skipped, and failed, for example:
+The DataStax driver must be `provided` (it is already on the Glue classpath via
+`spark-cassandra-connector-assembly`), so the helper JAR stays thin and does not
+shade a conflicting driver.
 
-  ```
-  reconciliation cleanup summary: deleted=3 skipped=1 failed=0
-  ```
+#### 2. Publish the JAR to the artifacts prefix
 
-- If the reconciliation prefix does not exist or contains no subdirectories,
-  the CLI exits zero and prints a single `INFO` line stating that
-  `no reconciliation runs were found`.
+Upload it next to the connector JARs the `init` flow publishes:
+
+```shell
+   aws s3 cp target/amazon-keyspaces-helpers-<version>.jar \
+     s3://<PROVIDED_BUCKET_NAME>/artifacts/amazon-keyspaces-helpers-<version>.jar \
+     --region us-east-1
+```
+
+#### 3. Add the JAR to `--extra-jars` for both Glue jobs
+
+The reconciliation job (`PrimaryKeyReconciliation${env}`) and the replicator job
+(`CQLReplicator${env}`) share `KeyspacesConnector.conf`, so the JAR must be on the
+classpath of both (driver **and** executors). Update each job's `--extra-jars`
+default argument to include the new JAR (keep all existing entries and append the
+helper JAR, comma separated):
+
+```shell
+   aws glue update-job --job-name PrimaryKeyReconciliation${env} --region us-east-1 \
+     --job-update '{"DefaultArguments":{"--extra-jars":"<existing jars>,s3://<PROVIDED_BUCKET_NAME>/artifacts/amazon-keyspaces-helpers-<version>.jar", ...}}'
+```
+
+Glue distributes `--extra-jars` to the driver and every executor, which is what
+makes the class resolvable on the executor sessions the connector opens.
+
+#### 4. Reference the policy in `KeyspacesConnector.conf`
+
+Add the `advanced.retry-policy` block and re-upload the conf to
+`s3://<PROVIDED_BUCKET_NAME>/artifacts/KeyspacesConnector.conf`:
+
+```hocon
+   advanced.retry-policy {
+     class        = com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy
+     max-attempts = 16
+     min-wait     = 10 milliseconds
+     max-wait     = 100 milliseconds
+   }
+```
+
+#### 5. Verify
+
+On the next reconciliation run the driver logs the resolved policy:
+
+```
+   target driver retry policy (advanced.retry-policy.class): com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy
+```
+
+If you instead see `Can't find class ...` on an executor, the JAR is not on
+`--extra-jars` (step 3) — fix that before re-running. To roll back, remove the
+`advanced.retry-policy` block from `KeyspacesConnector.conf`; the driver falls
+back to its default retry policy and no JAR is required.
 
 ## License
 This tool licensed under the Apache-2 License. See the LICENSE file.

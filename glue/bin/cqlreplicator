@@ -26,6 +26,8 @@ declare -A params=(
     [ROWS_PER_WORKER]=1000000
     [TARGET_TYPE]=keyspaces
     [TARGET_TYPE_PROVIDED]=false
+    [RECON_WORKERS]=0
+    [RECON_WORKER_TYPE]=""
     [SKIP_GLUE_CONNECTOR]=false
     [SKIP_KEYSPACES_LEDGER]=false
     [REPLICATION_POINT_IN_TIME]=0
@@ -450,6 +452,8 @@ function Usage_Exit {
   echo "  --json-mapping, --jm JSON        Set the JSON mapping configuration"
   echo "  --start-replication-from, --srf TIME  Set the replication start time"
   echo "  --override-rows-per-worker, --orw NUMBER  Override rows per worker"
+  echo "  --recon-workers, --rw NUMBER     reconcile-keys: per-run Glue worker (DPU) count override (0=use job default)"
+  echo "  --recon-worker-type, --rwt TYPE  reconcile-keys: per-run Glue worker type override (e.g. G.2X)"
   echo "  --skip-glue-connector, --sgc     Skip Glue connector"
   echo "  --skip-keyspaces-ledger, --skl   Skip Keyspaces ledger"
   echo "  --replication-stats-enabled, --rse  Enable replication stats"
@@ -1578,6 +1582,24 @@ while (( "$#" )); do
       params[OUTPUT_PREFIX_OVERRIDE]="$2"
       shift 2
       ;;
+    --recon-workers|--rw)
+      # Optional number of Glue workers (DPUs) for the reconcile-keys
+      # StartJobRun. When > 0 it overrides the job's create-time
+      # --number-of-workers for this run only. Default 0 means "use the
+      # job's configured worker count" (no per-run override). Unlike the
+      # replicator's discovery/replication worker math, reconciliation
+      # capacity is a single flat knob.
+      params[RECON_WORKERS]="$2"
+      shift 2
+      ;;
+    --recon-worker-type|--rwt)
+      # Optional Glue worker type for the reconcile-keys StartJobRun
+      # (e.g. G.1X, G.2X, G.4X, G.8X). When non-empty it overrides the
+      # job's create-time --worker-type for this run only. Default empty
+      # means "use the job's configured worker type".
+      params[RECON_WORKER_TYPE]="$2"
+      shift 2
+      ;;
     --json-mapping|--jm)
       JSON_MAPPING="$2"
       echo "$JSON_MAPPING" | jq empty
@@ -2084,12 +2106,33 @@ if [[ ${params[STATE]} == reconcile-keys ]]; then
 
   reconcile_job_name="PrimaryKeyReconciliation${params[DEFAULT_ENV]}"
 
+  # Optional per-run capacity overrides (Glue StartJobRun accepts
+  # --number-of-workers / --worker-type to override the job's create-time
+  # values for a single run). When --recon-workers is 0 (default) and
+  # --recon-worker-type is empty, no override is passed and the run uses
+  # the worker count/type pinned at `cqlreplicator init`.
+  recon_run_overrides=()
+  if [[ -n "${params[RECON_WORKERS]:-}" && "${params[RECON_WORKERS]}" != "0" ]]; then
+    if ! [[ "${params[RECON_WORKERS]}" =~ ^[1-9][0-9]*$ ]]; then
+      log_error "--recon-workers must be a positive integer; got '${params[RECON_WORKERS]}'"
+      exit 1
+    fi
+    recon_run_overrides+=(--number-of-workers "${params[RECON_WORKERS]}")
+  fi
+  if [[ -n "${params[RECON_WORKER_TYPE]:-}" ]]; then
+    recon_run_overrides+=(--worker-type "${params[RECON_WORKER_TYPE]}")
+  fi
+
   log_info "Submitting Glue StartJobRun for ${reconcile_job_name}"
+  if (( ${#recon_run_overrides[@]} > 0 )); then
+    log_info "Per-run capacity override: ${recon_run_overrides[*]}"
+  fi
 
   start_run_stderr_file=$(mktemp 2>/dev/null || mktemp -t reconcile-keys-stderr)
   start_run_stdout=$(aws glue start-job-run \
     --job-name "$reconcile_job_name" \
     --region "${params[AWS_REGION]}" \
+    "${recon_run_overrides[@]}" \
     --arguments "$reconcile_args_json" \
     --output text \
     2>"$start_run_stderr_file")

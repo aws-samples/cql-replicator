@@ -1165,27 +1165,46 @@ object GlueApp {
       val alreadyCached = shaped.storageLevel != StorageLevel.NONE
       val cached = if (alreadyCached) shaped else shaped.persist(cachingMode)
       val persistedCounter = sparkContext.longAccumulator(s"persisted_${op}_tile_$tile")
-      val statsListener = new SparkListener {
-        private var lastReported: Long = 0L
-        override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = {
-          val current = persistedCounter.value
-          if (current > lastReported) {
-            val delta = current - lastReported
-            lastReported = current
-            logger.info(s"Tile $tile $op: $current rows persisted so far")
-            val primaryKeysDelta = if (historicalLoad) delta else 0L
-            val content = op match {
-              case "insert" => ReplicationStats(tile, primaryKeysDelta, 0, delta, 0, org.joda.time.LocalDateTime.now().toString)
-              case "update" => ReplicationStats(tile, 0, delta, 0, 0, org.joda.time.LocalDateTime.now().toString)
-              case "delete" => ReplicationStats(tile, 0, 0, 0, delta, org.joda.time.LocalDateTime.now().toString)
-            }
-            putStats(bcktName, s"$srcKeyspaceName/$srcTableName/stats/replication/$tile", "count.json", content)
+      // Tracks how many rows have already been flushed to the per-tile
+      // replication stats object, so each onTaskEnd callback and the
+      // authoritative final flush below write only the incremental delta
+      // exactly once.
+      val lastReported = new java.util.concurrent.atomic.AtomicLong(0L)
+      // Per-invocation lock so concurrent onTaskEnd callbacks and the
+      // post-action flush are mutually exclusive (a delta is never lost or
+      // double-counted) without serialising flushes across other tiles.
+      val statsFlushLock = new Object()
+      def flushReplicationStats(): Unit = statsFlushLock.synchronized {
+        val current = persistedCounter.value
+        val prev = lastReported.get
+        if (current > prev) {
+          val delta = current - prev
+          lastReported.set(current)
+          logger.info(s"Tile $tile $op: $current rows persisted so far")
+          val primaryKeysDelta = if (historicalLoad) delta else 0L
+          val content = op match {
+            case "insert" => ReplicationStats(tile, primaryKeysDelta, 0, delta, 0, org.joda.time.LocalDateTime.now().toString)
+            case "update" => ReplicationStats(tile, 0, delta, 0, 0, org.joda.time.LocalDateTime.now().toString)
+            case "delete" => ReplicationStats(tile, 0, 0, 0, delta, org.joda.time.LocalDateTime.now().toString)
           }
+          putStats(bcktName, s"$srcKeyspaceName/$srcTableName/stats/replication/$tile", "count.json", content)
         }
+      }
+      val statsListener = new SparkListener {
+        override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = flushReplicationStats()
       }
       sparkContext.addSparkListener(statsListener)
       try {
         persistToTarget(cached, columns, columnsPos, tile, op, persistedCounter)
+        // Authoritative final flush. Once persistToTarget's action returns,
+        // every successful task's accumulator update has been merged on the
+        // driver, but the SparkListenerBus delivers onTaskEnd events
+        // asynchronously -- the last events can still be in flight when the
+        // listener is removed in `finally`, so their deltas would otherwise
+        // never be written. Flushing here against the now-final accumulator
+        // value guarantees the stats object reflects the full persisted
+        // count (fixes the replicated-vs-discovered stats undercount).
+        flushReplicationStats()
         val count = persistedCounter.value
         logger.info(s"Tile $tile $op: $count rows persisted to Amazon Keyspaces")
         count

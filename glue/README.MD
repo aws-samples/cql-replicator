@@ -40,7 +40,7 @@ Direct migration to Amazon Keyspaces, offering a fully managed, serverless Cassa
 - [AstraDB to Amazon Keyspaces](docs/astra/README.MD)
 
 ## Complementary Solutions 
-Additional connectors for specific use cases including data lakes (S3), search capabilities (OpenSearch), and in-memory performance (MemoryDB):
+Additional connectors for specific use cases including Amazon S3 and Amazon DynamoDB:
 - [Apache Cassandra to Amazon S3](docs/s3/README.MD)
 - [Apache Cassandra to Amazon DynamoDB](docs/dynamodb/README.MD)(experimental)
   - [Cutover Prerequisites](docs/keyspaces/cqlreplicator-cutover-prerequisites.md)

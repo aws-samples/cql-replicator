@@ -1,6 +1,6 @@
-# Cutover Prerequisites
+# Cutover
 
-## Cutover Prerequisites
+## Prerequisites
 
 Before initiating the cutover phase, verify that the following requirements are met. Skipping these checks may result in false positives during reconciliation (ghost inserts/deletes) or incomplete data in the target.
 

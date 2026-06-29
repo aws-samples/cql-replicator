@@ -609,7 +609,7 @@ In order to preserve existing records during the bulk migration phase set `readB
                                       --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator_filtered_columns --env ver5 \
                                       --target-type keyspaces --json-mapping '{
                                           "keyspaces": {
-                                              readBeforeWrite: true
+                                              "readBeforeWrite": true
                                           }
                                         }'
 ```

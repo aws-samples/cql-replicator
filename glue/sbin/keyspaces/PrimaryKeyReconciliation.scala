@@ -11,8 +11,9 @@ import com.amazonaws.services.glue.log.GlueLogger
 import com.amazonaws.services.glue.util.{GlueArgParser, Job}
 import com.amazonaws.services.s3.model.ListObjectsV2Request
 import com.amazonaws.services.s3.{AmazonS3, AmazonS3ClientBuilder}
-import com.datastax.oss.driver.api.core.CqlSession
+import com.datastax.oss.driver.api.core.{CqlIdentifier, CqlSession}
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader
+import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata
 
 import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
@@ -95,30 +96,6 @@ final case class PKTransform(columnName: String,
                              alias: Option[String],
                              keepSource: Boolean)
 
-/**
- * The resolved view of `JSON_MAPPING` consumed by the rest of the
- * Reconciliation_Job. `effectiveSourcePks` is the canonical schema
- * used by `Source_Scanner`, `Target_Scanner`, and `Diff_Engine` after
- * preflight; for the `"None"` / `enabled=false` short-circuits it
- * equals the source-side Primary_Key_Columns unchanged.
- *
- * @param filterExpr         the Spark SQL filter expression to apply to
- *                           the source DataFrame, or `None` when the
- *                           mapping omits or empties `filterExpression`.
- * @param filterColumns      source-side columns the source scan must
- *                           project alongside `effectiveSourcePks` to
- *                           evaluate `filterExpr`. Empty when no filter
- *                           is in effect or when no `addNonPrimaryKeyColumns`
- *                           are declared.
- * @param pkTransforms       the ordered list of PK_Transforms to apply
- *                           to the source DataFrame. Order matches the
- *                           operator-supplied `transformExpressions`
- *                           array (filtered to PK entries only).
- * @param effectiveSourcePks the post-transform PK column-name / type
- *                           pairs in declared order, with each
- *                           PK_Transform's column replaced in-place by
- *                           `(alias-or-columnName, post-transform-type)`.
- */
 final case class EffectiveMapping(filterExpr: Option[String],
                                   filterColumns: Set[String],
                                   pkTransforms: Seq[PKTransform],
@@ -142,28 +119,6 @@ object JsonMappingResolver {
       )
   }
 
-  /**
-   * Resolves `rawJsonMapping` against `sourcePks` per the algorithm in
-   * the object scaladoc. Throws [[JsonMappingException]] on any
-   * structural-validation failure; the caller is responsible for
-   * logging the exception class+message at `ERROR` and exiting with
-   * the `JSON_MAPPING_FAIL` (E6) exit class.
-   *
-   * @param rawJsonMapping the raw `JSON_MAPPING` argument value. May be
-   *                       `"None"` (the documented default), a base64
-   *                       encoding of the JSON document (with arbitrary
-   *                       inserted `\r`, `\n`, `\r\n` whitespace), or
-   *                       `null` (treated identically to `"None"`).
-   * @param sourcePks      the source-side `Primary_Key_Columns` as
-   *                       `(name, type)` pairs in declared order, as
-   *                       returned by `inferKeys(srcConn, "primaryKeys",
-   *                       ks, tbl)`.
-   * @param logger         used to emit the Req 19.5 INFO log line for
-   *                       each non-PK `transformExpression` that is
-   *                       dropped from `pkTransforms`.
-   * @return the resolved [[EffectiveMapping]] consumed by
-   *         `Source_Scanner`, `Target_Scanner`, and `Diff_Engine`.
-   */
   def resolve(
       rawJsonMapping: String,
       sourcePks: Seq[(String, String)],
@@ -411,20 +366,6 @@ object SourceScanner {
       .repartition(totalTiles, col("group"))
   }
 
-  /**
-   * @param spark          the active SparkSession.
-   * @param srcConnConfName the Spark Cassandra Connector config profile file
-   *                        name (`"CassandraConnector.conf"`) published under
-   *                        `s3://<bucket>/artifacts/` and verified at bootstrap.
-   * @param srcKs          source keyspace.
-   * @param srcTbl         source table.
-   * @param mapping        the resolved [[EffectiveMapping]] from
-   *                       [[JsonMappingResolver.resolve]].
-   * @param totalTiles     `TOTAL_TILES` in `[1, 1024]`.
-   * @return a DataFrame whose schema is
-   *         `Effective_Source_PK_Columns ++ ("group", IntegerType)`,
-   *         repartitioned on `group` into `totalTiles` partitions.
-   */
   def scan(
       spark: SparkSession,
       srcConnConfName: String,
@@ -521,27 +462,6 @@ object TargetScanner {
       .repartition(totalTiles, col("group"))
   }
 
-  /**
-   * Read the target primary-key columns, partition them on the same `group`
-   * expression as `Source_Scanner`, and repartition on `group` into exactly
-   * `totalTiles` partitions.
-   *
-   * @param spark          the active SparkSession.
-   * @param trgConnConfName the Spark Cassandra Connector config profile file
-   *                        name (`"KeyspacesConnector.conf"`) published under
-   *                        `s3://<bucket>/artifacts/` and verified at bootstrap.
-   * @param trgKs          target keyspace.
-   * @param trgTbl         target table.
-   * @param targetPks      the target-side primary-key `(name, type)` pairs in
-   *                       declared order (after the Req 4.8 clustering-key
-   *                       projection); names and types match
-   *                       `Effective_Source_PK_Columns` per Req 4.5 / 4.6.
-   * @param totalTiles     `TOTAL_TILES` in `[1, 1024]`.
-   * @param maxTargetRcus  `MAX_TARGET_RCUS` in `[0, Int.MaxValue]`; `0`
-   *                       disables throttling.
-   * @return a DataFrame whose schema is `targetPks ++ ("group", IntegerType)`,
-   *         repartitioned on `group` into `totalTiles` partitions.
-   */
   def scan(
       spark: SparkSession,
       trgConnConfName: String,
@@ -581,11 +501,6 @@ object TargetScanner {
     val readDf: DataFrame =
       try {
         spark.conf.set("spark.cassandra.connection.config.profile.path", trgConnConfName)
-        // Override the KeyspacesConnector.conf LOCAL_QUORUM default with
-        // LOCAL_ONE for the target scan: reconciliation only needs to read
-        // primary keys, so LOCAL_ONE halves the RCU cost per read and reduces
-        // partition-capacity pressure (Req 6.x target read is set-membership
-        // only). The connector sets this consistency on every read statement.
         spark.conf.set(ReadConsistencyParam, TargetReadConsistency)
         logger.info(
           s"TargetScanner: read consistency overridden to $TargetReadConsistency " +
@@ -1056,8 +971,12 @@ object PrimaryKeyReconciliation {
       case multiple    => multiple.map(c => s"writetime($c)").mkString("greatest(", ", ", ") as ts")
     }
 
+    def tableMetadata(cc: CqlSession, ks: String, tbl: String): TableMetadata =
+      cc.getMetadata.getKeyspace(CqlIdentifier.fromInternal(ks)).get
+        .getTable(CqlIdentifier.fromInternal(tbl)).get
+
     def inferKeys(cc: CqlSession, keyType: String, ks: String, tbl: String, columnTs: String, writetimeCols: Seq[String] = Seq.empty): Seq[Map[String, String]] = {
-      val meta = cc.getMetadata.getKeyspace(ks).get.getTable(tbl).get
+      val meta = tableMetadata(cc, ks, tbl)
       keyType match {
         case "partitionKeys" =>
           meta.getPartitionKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase))
@@ -1080,19 +999,37 @@ object PrimaryKeyReconciliation {
         val c1 = Option(connection)
         c1.isEmpty match {
           case false => {
-            c1.get.getMetadata.getKeyspace(keyspace).isPresent match {
+            val meta = c1.get.getMetadata
+            val ksMeta = meta.getKeyspace(CqlIdentifier.fromInternal(keyspace))
+            ksMeta.isPresent match {
               case true => {
-                c1.get.getMetadata.getKeyspace(keyspace).get.getTable(table).isPresent match {
+                ksMeta.get.getTable(CqlIdentifier.fromInternal(table)).isPresent match {
                   case true => {
-                    logger.info(s"the $dir table $table exists")
+                    logger.info(s"the $dir table ${CqlIdentifiers.toCql(table)} exists")
                   }
                   case false => {
-                    logErrorAndExit(s"ERROR: the $dir table $table does not exist", -1)
+                    // Surface the case-sensitivity hint: a same-name-different-case table is the
+                    // usual cause, and the fix is to quote the name on the command line.
+                    val tables = ksMeta.get.getTables.asScala.keys.map(_.asInternal).toList
+                    val caseHint = tables.filter(_.equalsIgnoreCase(table)) match {
+                      case Nil => ""
+                      case similar =>
+                        s". A table with different letter case exists: ${similar.map(CqlIdentifiers.toCql).mkString(", ")}." +
+                          s" Case-sensitive names must be double-quoted, e.g. --src-table '${CqlIdentifiers.toCql(similar.head)}'"
+                    }
+                    logErrorAndExit(s"ERROR: the $dir table ${CqlIdentifiers.toCql(table)} does not exist in keyspace ${CqlIdentifiers.toCql(keyspace)}$caseHint", -1)
                   }
                 }
               }
               case false => {
-                logErrorAndExit(s"ERROR: the $dir keyspace $keyspace does not exist", -2)
+                val keyspaces = meta.getKeyspaces.asScala.keys.map(_.asInternal).toList
+                val caseHint = keyspaces.filter(_.equalsIgnoreCase(keyspace)) match {
+                  case Nil => ""
+                  case similar =>
+                    s". A keyspace with different letter case exists: ${similar.map(CqlIdentifiers.toCql).mkString(", ")}." +
+                      s" Case-sensitive names must be double-quoted, e.g. --src-keyspace '${CqlIdentifiers.toCql(similar.head)}'"
+                }
+                logErrorAndExit(s"ERROR: the $dir keyspace ${CqlIdentifiers.toCql(keyspace)} does not exist$caseHint", -2)
               }
             }
           }
@@ -1111,8 +1048,60 @@ object PrimaryKeyReconciliation {
       }
     }
 
-  /** Parsed and validated argument bundle returned by [[parseArgs]]. */
-  final case class ResolvedArgs(
+  final /**
+ * CQL identifier handling for case-sensitive (quoted) keyspace and table names.
+ *
+ * Two conventions coexist in this job and they are NOT interchangeable:
+ *  - the Java driver metadata API (getKeyspace/getTable) and CQL statement text expect the
+ *    *CQL form*, i.e. double-quoted when the name is not all-lowercase. Bare names are
+ *    lowercased by the driver, so `ApplicationProfile` resolves to `applicationprofile`.
+ *  - spark-cassandra-connector (cassandraFormat/cassandraTable) expects the *internal form*,
+ *    i.e. the exact case with no quotes. Passing a quoted name there makes the quote
+ *    characters part of the name and yields a NoSuchTableException.
+ *
+ * Names are therefore normalized once to the internal form and converted per consumer.
+ */
+object CqlIdentifiers {
+  private val BareLowercase = "^[a-z][a-z0-9_]*$".r
+
+  /** True when the operator supplied an explicitly quoted CQL identifier. */
+  def isQuoted(raw: String): Boolean = {
+    val t = raw.trim
+    t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")
+  }
+
+  /** Converts operator input to the internal (exact-case, unquoted) form. */
+  def toInternal(raw: String): String = {
+    val t = raw.trim
+    if (isQuoted(t)) t.substring(1, t.length - 1).replace("\"\"", "\"") else t
+  }
+
+  /** Renders an internal name as CQL text, double-quoting only when required. */
+  def toCql(internal: String): String =
+    if (BareLowercase.pattern.matcher(internal).matches()) internal
+    else "\"" + internal.replace("\"", "\"\"") + "\""
+
+  /** Lowercased, identifier-safe name for Glue Catalog / Iceberg objects, which are not case-sensitive. */
+  def toGlueName(internal: String): String =
+    internal.toLowerCase.replaceAll("[^a-z0-9_]", "_")
+
+  /**
+   * Picks the schema name that matches the operator input. A quoted name is matched
+   * verbatim; a bare name is matched case-sensitively first and then case-insensitively so
+   * that invocations relying on the driver's historic lowercasing keep working.
+   */
+  def resolve(raw: String, available: Iterable[String]): Option[String] = {
+    val wanted = toInternal(raw)
+    if (isQuoted(raw)) available.find(_ == wanted)
+    else
+      available.find(_ == wanted).orElse {
+        val matches = available.filter(_.equalsIgnoreCase(wanted)).toList
+        if (matches.size == 1) matches.headOption else matches.find(_ == wanted.toLowerCase)
+      }
+  }
+}
+
+case class ResolvedArgs(
       jobName: String,
       sourceKs: String,
       sourceTbl: String,
@@ -1312,10 +1301,10 @@ object PrimaryKeyReconciliation {
 
     Right(ResolvedArgs(
       jobName = resolvedRequired("JOB_NAME"),
-      sourceKs = resolvedRequired("SOURCE_KS"),
-      sourceTbl = resolvedRequired("SOURCE_TBL"),
-      targetKs = resolvedRequired("TARGET_KS"),
-      targetTbl = resolvedRequired("TARGET_TBL"),
+      sourceKs = CqlIdentifiers.toInternal(resolvedRequired("SOURCE_KS")),
+      sourceTbl = CqlIdentifiers.toInternal(resolvedRequired("SOURCE_TBL")),
+      targetKs = CqlIdentifiers.toInternal(resolvedRequired("TARGET_KS")),
+      targetTbl = CqlIdentifiers.toInternal(resolvedRequired("TARGET_TBL")),
       s3LandingZone = resolvedRequired("S3_LANDING_ZONE"),
       totalTiles = totalTiles,
       logging = logging,
@@ -1346,15 +1335,6 @@ object PrimaryKeyReconciliation {
   )
 
   val RequiredJarNames: Seq[String] = Seq(
-    // Only the jars the Reconciliation_Job itself loads are verified here.
-    // The Spark Cassandra Connector assembly backs the source/target scans,
-    // and the SigV4 auth plugin authenticates to Amazon Keyspaces (referenced
-    // by KeyspacesConnector.conf). resilience4j-retry / resilience4j-core /
-    // vavr are intentionally NOT listed: they are the replicator's retry
-    // dependencies (CQLReplicator.scala), and the reconciliation code never
-    // references them, so requiring them at bootstrap would be a needless
-    // coupling. They may still sit on the shared classpath; they are just not
-    // a precondition for this job.
     "spark-cassandra-connector-assembly_2.12-3.5.1.jar",
     "aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
   )
@@ -1394,17 +1374,6 @@ object PrimaryKeyReconciliation {
     }
   }
 
-  /**
-   * Compute the effective Reconciliation_Prefix for a run.
-   *
-   * @param bucketName           landing-zone bucket (from [[parseBucketName]]).
-   * @param sourceKs             source keyspace (default-prefix path segment).
-   * @param sourceTbl            source table (default-prefix path segment).
-   * @param runId                the validated `Run_ID` (Req 8.1 / 8.2).
-   * @param outputPrefixOverride the raw `OUTPUT_PREFIX_OVERRIDE` value (may be
-   *                             empty / whitespace-only, meaning "no override").
-   * @return the resolved [[ReconciliationPrefix]].
-   */
   def computeReconciliationPrefix(
       bucketName: String,
       sourceKs: String,
@@ -1566,16 +1535,6 @@ object PrimaryKeyReconciliation {
   private val SourceLabel: String = "source"
   private val TargetLabel: String = "target"
 
-  /**
-   * Logs, via `GlueLogger` (so it always appears in the Glue driver output
-   * regardless of slf4j/log4j levels), the retry policy the driver resolved
-   * from the connector config of an already-built `CqlSession`. Useful to
-   * confirm whether a custom retry policy (e.g.
-   * `com.aws.ssa.keyspaces.retry.AmazonKeyspacesExponentialRetryPolicy`,
-   * supplied as a jar on `--extra-jars`) is in effect, or the DataStax
-   * default. Reads are best-effort: any failure is logged at WARN and
-   * swallowed so it never affects the run.
-   */
   private def logResolvedRetryPolicy(conn: CqlSession, side: String, logger: GlueLogger): Unit = {
     Try {
       val retryClass = conn.getContext.getConfig.getDefaultProfile.getString(
@@ -1743,14 +1702,6 @@ object PrimaryKeyReconciliation {
     digest.map("%02x".format(_)).mkString
   }
 
-  /**
-   * Best-effort delete of every S3 object under the source-snapshot key
-   * prefix `<prefix.keyPrefix>source/`, so a failed source write leaves no
-   * partial Source_Snapshot behind (Req 14.1). Failures here are logged at
-   * WARN and swallowed — the subsequent partial-report write is the
-   * operator-visible signal, and the prefix is overwritten on the next
-   * Glue retry of the same `Run_ID` (Req 5.10) regardless.
-   */
   def cleanupSourceSnapshot(
       s3client: AmazonS3,
       prefix: ReconciliationPrefix,

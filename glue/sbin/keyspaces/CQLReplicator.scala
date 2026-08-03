@@ -14,9 +14,10 @@ import com.amazonaws.{AmazonServiceException, ClientConfiguration, SdkClientExce
 import com.datastax.oss.driver.api.core.`type`.{DataType, DataTypes}
 import com.datastax.oss.driver.api.core.config.DriverConfigLoader
 import com.datastax.oss.driver.api.core.cql.{BatchStatement, BatchStatementBuilder, DefaultBatchType, SimpleStatement}
+import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata
 import com.datastax.oss.driver.api.core.servererrors._
 import com.datastax.oss.driver.api.core.uuid.Uuids
-import com.datastax.oss.driver.api.core.{AllNodesFailedException, CqlSession, DriverException, NoNodeAvailableException}
+import com.datastax.oss.driver.api.core.{AllNodesFailedException, CqlIdentifier, CqlSession, DriverException, NoNodeAvailableException}
 import io.github.resilience4j.core.IntervalFunction
 import io.github.resilience4j.retry.{Retry, RetryConfig}
 import net.jpountz.lz4.{LZ4Compressor, LZ4CompressorWithLength, LZ4Factory}
@@ -67,6 +68,41 @@ class PreFlightCheckException(val message: String, val errorCode: Int, val cause
   def this(message: String, cause: Throwable) = this(message, 0, cause)
 
   override def toString: String = s"PreFlightCheckException($errorCode, $message)"
+}
+
+object CqlIdentifiers {
+  private val BareLowercase = "^[a-z][a-z0-9_]*$".r
+
+  /** True when the operator supplied an explicitly quoted CQL identifier. */
+  def isQuoted(raw: String): Boolean = {
+    val t = raw.trim
+    t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")
+  }
+
+  /** Converts operator input to the internal (exact-case, unquoted) form. */
+  def toInternal(raw: String): String = {
+    val t = raw.trim
+    if (isQuoted(t)) t.substring(1, t.length - 1).replace("\"\"", "\"") else t
+  }
+
+  /** Renders an internal name as CQL text, double-quoting only when required. */
+  def toCql(internal: String): String =
+    if (BareLowercase.pattern.matcher(internal).matches()) internal
+    else "\"" + internal.replace("\"", "\"\"") + "\""
+
+  /** Lowercased, identifier-safe name for Glue Catalog / Iceberg objects, which are not case-sensitive. */
+  def toGlueName(internal: String): String =
+    internal.toLowerCase.replaceAll("[^a-z0-9_]", "_")
+
+  def resolve(raw: String, available: Iterable[String]): Option[String] = {
+    val wanted = toInternal(raw)
+    if (isQuoted(raw)) available.find(_ == wanted)
+    else
+      available.find(_ == wanted).orElse {
+        val matches = available.filter(_.equalsIgnoreCase(wanted)).toList
+        if (matches.size == 1) matches.headOption else matches.find(_ == wanted.toLowerCase)
+      }
+  }
 }
 
 sealed trait Stats
@@ -383,8 +419,12 @@ object GlueApp {
       case multiple    => multiple.map(c => s"writetime($c)").mkString("greatest(", ", ", ") as ts")
     }
 
+    def tableMetadata(cc: CqlSession, ks: String, tbl: String): TableMetadata =
+      cc.getMetadata.getKeyspace(CqlIdentifier.fromInternal(ks)).get
+        .getTable(CqlIdentifier.fromInternal(tbl)).get
+
     def inferKeys(cc: CqlSession, keyType: String, ks: String, tbl: String, columnTs: String, writetimeCols: Seq[String] = Seq.empty): Seq[Map[String, String]] = {
-      val meta = cc.getMetadata.getKeyspace(ks).get.getTable(tbl).get
+      val meta = tableMetadata(cc, ks, tbl)
       keyType match {
         case "partitionKeys" =>
           meta.getPartitionKey.asScala.map(x => Map(x.getName.toString -> x.getType.toString.toLowerCase))
@@ -398,8 +438,7 @@ object GlueApp {
     }
 
     def getAllColumns(cc: CqlSession, ks: String, tbl: String): Seq[scala.collection.immutable.Map[String, String]] = {
-      cc.getMetadata.getKeyspace(ks).get().
-        getTable(tbl).get().
+      tableMetadata(cc, ks, tbl).
         getColumns.entrySet.asScala.
         map(x => Map(x.getKey.toString -> x.getValue.getType.toString)).toSeq
     }
@@ -428,19 +467,37 @@ object GlueApp {
         val c1 = Option(connection)
         c1.isEmpty match {
           case false => {
-            c1.get.getMetadata.getKeyspace(keyspace).isPresent match {
+            val meta = c1.get.getMetadata
+            val ksMeta = meta.getKeyspace(CqlIdentifier.fromInternal(keyspace))
+            ksMeta.isPresent match {
               case true => {
-                c1.get.getMetadata.getKeyspace(keyspace).get.getTable(table).isPresent match {
+                ksMeta.get.getTable(CqlIdentifier.fromInternal(table)).isPresent match {
                   case true => {
-                    logger.info(s"the $dir table $table exists")
+                    logger.info(s"the $dir table ${CqlIdentifiers.toCql(table)} exists")
                   }
                   case false => {
-                    logErrorAndExit(s"ERROR: the $dir table $table does not exist", -1)
+                    // Surface the case-sensitivity hint: a same-name-different-case table is the
+                    // usual cause, and the fix is to quote the name on the command line.
+                    val tables = ksMeta.get.getTables.asScala.keys.map(_.asInternal).toList
+                    val caseHint = tables.filter(_.equalsIgnoreCase(table)) match {
+                      case Nil => ""
+                      case similar =>
+                        s". A table with different letter case exists: ${similar.map(CqlIdentifiers.toCql).mkString(", ")}." +
+                          s" Case-sensitive names must be double-quoted, e.g. --src-table '${CqlIdentifiers.toCql(similar.head)}'"
+                    }
+                    logErrorAndExit(s"ERROR: the $dir table ${CqlIdentifiers.toCql(table)} does not exist in keyspace ${CqlIdentifiers.toCql(keyspace)}$caseHint", -1)
                   }
                 }
               }
               case false => {
-                logErrorAndExit(s"ERROR: the $dir keyspace $keyspace does not exist", -2)
+                val keyspaces = meta.getKeyspaces.asScala.keys.map(_.asInternal).toList
+                val caseHint = keyspaces.filter(_.equalsIgnoreCase(keyspace)) match {
+                  case Nil => ""
+                  case similar =>
+                    s". A keyspace with different letter case exists: ${similar.map(CqlIdentifiers.toCql).mkString(", ")}." +
+                      s" Case-sensitive names must be double-quoted, e.g. --src-keyspace '${CqlIdentifiers.toCql(similar.head)}'"
+                }
+                logErrorAndExit(s"ERROR: the $dir keyspace ${CqlIdentifiers.toCql(keyspace)} does not exist$caseHint", -2)
               }
             }
           }
@@ -502,11 +559,16 @@ object GlueApp {
     val processType = args("PROCESS_TYPE") // discovery or replication
     val patternForSingleQuotes = "(.*text.*)|(.*date.*)|(.*timestamp.*)|(.*inet.*)".r
 
-    // Business configuration
-    val srcTableName = args("SOURCE_TBL")
-    val srcKeyspaceName = args("SOURCE_KS")
-    val trgTableName = args("TARGET_TBL")
-    val trgKeyspaceName = args("TARGET_KS")
+    val srcTableName = CqlIdentifiers.toInternal(args("SOURCE_TBL"))
+    val srcKeyspaceName = CqlIdentifiers.toInternal(args("SOURCE_KS"))
+    val trgTableName = CqlIdentifiers.toInternal(args("TARGET_TBL"))
+    val trgKeyspaceName = CqlIdentifiers.toInternal(args("TARGET_KS"))
+
+    // CQL-quoted forms for use inside statement text.
+    val srcTableNameCql = CqlIdentifiers.toCql(srcTableName)
+    val srcKeyspaceNameCql = CqlIdentifiers.toCql(srcKeyspaceName)
+    val trgTableNameCql = CqlIdentifiers.toCql(trgTableName)
+    val trgKeyspaceNameCql = CqlIdentifiers.toCql(trgKeyspaceName)
     val landingZone = args("S3_LANDING_ZONE")
     val icebergCatalog = args("ICEBERG_CATALOG")
 
@@ -826,9 +888,9 @@ object GlueApp {
       // Validate input parameters
       require(Option(cls).exists(_.trim.nonEmpty), "Column list (cls) cannot be null or empty")
       val query = if (!jsonMapping4s.replication.useCustomSerializer) {
-        s"SELECT json $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc"
+        s"SELECT json $cls FROM $srcKeyspaceNameCql.$srcTableNameCql WHERE $wc"
       } else {
-        s"SELECT $cls FROM $srcKeyspaceName.$srcTableName WHERE $wc"
+        s"SELECT $cls FROM $srcKeyspaceNameCql.$srcTableNameCql WHERE $wc"
       }
 
       val emptyResult = ""
@@ -931,7 +993,7 @@ object GlueApp {
                 if (counterColumns.nonEmpty) {
                   val counterValues = getCounters(row)
                   val setStmt = counterValues.map(m => s"${m._1}=${m._1}+${m._2}").mkString(",")
-                  val counterCqlStmt = s"UPDATE $trgKeyspaceName.$trgTableName SET $setStmt WHERE $whereClause"
+                  val counterCqlStmt = s"UPDATE $trgKeyspaceNameCql.$trgTableNameCql SET $setStmt WHERE $whereClause"
                   fl.executeCQLStatement(counterCqlStmt)
                 } else {
                   processNonCounterRow(row, whereClause)
@@ -977,7 +1039,7 @@ object GlueApp {
                 } else {
                   whereClause
                 }
-                val cqlStatement = s"DELETE FROM $trgKeyspaceName.$trgTableName WHERE $deleteWhereClause"
+                val cqlStatement = s"DELETE FROM $trgKeyspaceNameCql.$trgTableNameCql WHERE $deleteWhereClause"
                 if (maxStatementsPerBatch > 1)
                   fl.add(cqlStatement)
                 else
@@ -1010,14 +1072,14 @@ object GlueApp {
           val backToJsonRow = backToCQLStatementWithoutTs(json4sRow)
           jsonMapping4s.keyspaces.largeObjectsConfig.enabled match {
             case false =>
-              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow' $tsSuffix$cas"
+              val cqlStatement = s"INSERT INTO $trgKeyspaceNameCql.$trgTableNameCql JSON '$backToJsonRow' $tsSuffix$cas"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
               else
                 fl.executeCQLStatement(cqlStatement)
             case _ =>
               val updatedJsonRow = compact(render(offloadToS3(parse(backToJsonRow), s3ClientOnPartition, whereClause)))
-              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$updatedJsonRow' $tsSuffix$cas"
+              val cqlStatement = s"INSERT INTO $trgKeyspaceNameCql.$trgTableNameCql JSON '$updatedJsonRow' $tsSuffix$cas"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
               else
@@ -1039,7 +1101,7 @@ object GlueApp {
                 val rawTtl = getTTLvalue(json4sRow)
                 if (rawTtl == null) 0 else rawTtl
               }
-              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow'$cas USING TTL $ttlVal"
+              val cqlStatement = s"INSERT INTO $trgKeyspaceNameCql.$trgTableNameCql JSON '$backToJsonRow'$cas USING TTL $ttlVal"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
               else
@@ -1051,7 +1113,7 @@ object GlueApp {
                 val rawTtl = getTTLvalue(json4sRow)
                 if (rawTtl == null) 0 else rawTtl
               }
-              val cqlStatement = s"INSERT INTO $trgKeyspaceName.$trgTableName JSON '$backToJsonRow'$cas USING TTL $ttlVal"
+              val cqlStatement = s"INSERT INTO $trgKeyspaceNameCql.$trgTableNameCql JSON '$backToJsonRow'$cas USING TTL $ttlVal"
               if (maxStatementsPerBatch > 1)
                 fl.add(cqlStatement)
               else
@@ -1218,7 +1280,9 @@ object GlueApp {
 
     /** Fully qualified Iceberg table name in Glue Catalog, per tile. */
     def icebergTableName(ksName: String, tblName: String, tile: Int): String = {
-      s"$icebergCatalog.${ksName}_db.${tblName}_tile_${tile}_pk_snapshots"
+      // Glue Catalog databases/tables are lowercase-only, so mixed-case CQL names are folded
+      // to a safe form. Must stay in sync with the cleanup path below.
+      s"$icebergCatalog.${CqlIdentifiers.toGlueName(ksName)}_db.${CqlIdentifiers.toGlueName(tblName)}_tile_${tile}_pk_snapshots"
     }
 
     /** Maps Cassandra types to Spark SQL types for Iceberg table creation. */
@@ -1782,7 +1846,7 @@ object GlueApp {
       )
 
       val srcTableForDiscovery = jsonMapping4s.replication.useMaterializedView match {
-        case mv if mv.enabled => mv.mvName
+        case mv if mv.enabled => CqlIdentifiers.toInternal(mv.mvName)
         case _ => srcTableName
       }
 
@@ -1864,7 +1928,7 @@ object GlueApp {
       logger.info("Using custom varint reader for primary keys")
 
       val srcTableForDiscovery = jsonMapping4s.replication.useMaterializedView match {
-        case mv if mv.enabled => mv.mvName
+        case mv if mv.enabled => CqlIdentifiers.toInternal(mv.mvName)
         case _ => srcTableName
       }
 
@@ -2118,7 +2182,7 @@ object GlueApp {
 
           // Task 3.2: Create Iceberg database and ensure all tile tables exist sequentially
           // (same pattern as keysDiscoveryProcess to avoid Glue Catalog concurrency conflicts)
-          val dbName = s"$icebergCatalog.${srcKeyspaceName}_db"
+          val dbName = s"$icebergCatalog.${CqlIdentifiers.toGlueName(srcKeyspaceName)}_db"
           sparkSession.sql(s"CREATE DATABASE IF NOT EXISTS $dbName")
           for (tile <- 0 until totalTiles) {
             ensureIcebergTableExists(sparkSession, srcKeyspaceName, srcTableName, tile, pkColumnsForIceberg, landingZone)
@@ -2248,7 +2312,7 @@ object GlueApp {
       val ledgerConnection = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
       try {
         // Create database and all per-tile tables sequentially to avoid Glue Catalog concurrency conflicts
-        val dbName = s"$icebergCatalog.${srcKeyspaceName}_db"
+        val dbName = s"$icebergCatalog.${CqlIdentifiers.toGlueName(srcKeyspaceName)}_db"
         sparkSession.sql(s"CREATE DATABASE IF NOT EXISTS $dbName")
         for (tile <- 0 until totalTiles) {
           ensureIcebergTableExists(sparkSession, srcKeyspaceName, srcTableName, tile, pkColumnsForIceberg, landingZone)
@@ -2257,6 +2321,7 @@ object GlueApp {
         // Data writes can run in parallel — each tile writes to its own independent table
         val tiles = (0 until totalTiles).toList.par
         tiles.foreach(tile => {
+          try {
           logger.info(s"Processing tile $tile")
           val icebergTblName = icebergTableName(srcKeyspaceName, srcTableName, tile)
 
@@ -2283,6 +2348,13 @@ object GlueApp {
             val content = DiscoveryStats(tile, tileCount, org.joda.time.LocalDateTime.now().toString)
             putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
           }
+          } catch {
+            case e: Throwable =>
+              val sw = new java.io.StringWriter()
+              e.printStackTrace(new java.io.PrintWriter(sw))
+              logger.error(s"Tile $tile failed during discovery: ${e.getClass.getName}: ${e.getMessage}\n$sw")
+              throw new RuntimeException(s"Tile $tile failed during discovery: ${e.getMessage}", e)
+          }
         })
       } finally {
         ledgerConnection.close()
@@ -2295,7 +2367,7 @@ object GlueApp {
 
     // Clean up Iceberg tables and S3 data when --cr flag is used
     if (processType.equals("discovery") && cleanUpRequested) {
-      val dbName = s"${srcKeyspaceName}_db"
+      val dbName = s"${CqlIdentifiers.toGlueName(srcKeyspaceName)}_db"
 
       // Use fully qualified SDK v2 classes to avoid conflicts with Glue ETL library
       val glueClient = software.amazon.awssdk.services.glue.GlueClient.create()
@@ -2303,7 +2375,7 @@ object GlueApp {
       try {
         // Delete per-tile Iceberg tables from Glue Catalog
         for (tile <- 0 until totalTiles) {
-          val catalogTblName = s"${srcTableName}_tile_${tile}_pk_snapshots"
+          val catalogTblName = s"${CqlIdentifiers.toGlueName(srcTableName)}_tile_${tile}_pk_snapshots"
           Try {
             glueClient.deleteTable(
               software.amazon.awssdk.services.glue.model.DeleteTableRequest.builder()

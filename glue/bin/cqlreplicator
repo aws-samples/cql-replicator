@@ -138,6 +138,20 @@ function check_input() {
   return 0
 }
 
+# Normalizes a CQL keyspace/table name to its internal (exact-case, unquoted) form.
+function normalize_cql_identifier() {
+  local raw=$1
+  if [[ ${#raw} -ge 2 && ${raw:0:1} == '"' && ${raw: -1} == '"' ]]; then
+    raw=${raw:1:${#raw}-2}
+  fi
+  # Reject characters that cannot be carried through the JSON arguments payload.
+  if [[ $raw == *'"'* || $raw == *\\* ]]; then
+    log_error "Error: unsupported character in CQL identifier '$raw' (double quotes and backslashes are not supported)"
+    exit 1
+  fi
+  printf '%s' "$raw"
+}
+
 function max_value() {
   local rs=0
   if [[ $1 -gt $2 ]]; then
@@ -1473,19 +1487,19 @@ while (( "$#" )); do
       shift 2
       ;;
     --src-keyspace|--sk)
-      params[SOURCE_KS]="$2"
+      params[SOURCE_KS]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --src-table|--st)
-      params[SOURCE_TBL]="$2"
+      params[SOURCE_TBL]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --trg-keyspace|--tk)
-      params[TARGET_KS]="$2"
+      params[TARGET_KS]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --trg-table|--tt)
-      params[TARGET_TBL]="$2"
+      params[TARGET_TBL]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --inc-traffic|--it)

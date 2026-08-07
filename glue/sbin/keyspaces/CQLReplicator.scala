@@ -70,8 +70,25 @@ class PreFlightCheckException(val message: String, val errorCode: Int, val cause
   override def toString: String = s"PreFlightCheckException($errorCode, $message)"
 }
 
+/**
+ * Identifier handling for case-sensitive (quoted) keyspace, table, and column
+ * names.
+ *
+ * Four incompatible conventions are in play; mixing them up is the root cause
+ * of the case-sensitivity defects, so every conversion goes through here:
+ *
+ *  - internal form -- exact case, no quotes ("MyCol" -> MyCol). What the driver
+ *    metadata API returns from asInternal(), and what the
+ *    spark-cassandra-connector expects in cassandraFormat/cassandraTable.
+ *  - CQL form -- double-quoted when the name is not a bare lowercase
+ *    identifier (MyCol -> "MyCol"). Required in CQL statement text AND used as
+ *    the JSON key by both `SELECT JSON` and CustomResultSetSerializer.
+ *  - Spark SQL form -- backtick-quoted. See toSparkName; do NOT feed CQL form
+ *    to selectExpr/col.
+ *  - Glue form -- lowercase-folded, since Glue Catalog / Iceberg names are not
+ *    case-sensitive. See toGlueName.
+ */
 object CqlIdentifiers {
-  private val BareLowercase = "^[a-z][a-z0-9_]*$".r
 
   /** True when the operator supplied an explicitly quoted CQL identifier. */
   def isQuoted(raw: String): Boolean = {
@@ -85,23 +102,66 @@ object CqlIdentifiers {
     if (isQuoted(t)) t.substring(1, t.length - 1).replace("\"\"", "\"") else t
   }
 
-  /** Renders an internal name as CQL text, double-quoting only when required. */
+  /**
+   * Renders an internal name as CQL text, double-quoting only when required.
+   *
+   * Delegates to the driver rather than matching a regex: a hand-rolled
+   * "is it all lowercase" test leaves CQL reserved words such as `order` and
+   * `table` unquoted, which the server then refuses to parse.
+   */
   def toCql(internal: String): String =
-    if (BareLowercase.pattern.matcher(internal).matches()) internal
-    else "\"" + internal.replace("\"", "\"\"") + "\""
+    CqlIdentifier.fromInternal(internal).asCql(true)
 
-  /** Lowercased, identifier-safe name for Glue Catalog / Iceberg objects, which are not case-sensitive. */
-  def toGlueName(internal: String): String =
-    internal.toLowerCase.replaceAll("[^a-z0-9_]", "_")
+  /**
+   * The JSON payload key for a column.
+   *
+   * Verified against Amazon Keyspaces: `SELECT JSON` keys a case-sensitive
+   * column in quoted CQL form (`"MyCol"`) and a lowercase one bare
+   * (`lowercol`), and `INSERT ... JSON` accepts only that same form.
+   */
+  def jsonKey(internal: String): String = toCql(internal)
 
-  def resolve(raw: String, available: Iterable[String]): Option[String] = {
-    val wanted = toInternal(raw)
-    if (isQuoted(raw)) available.find(_ == wanted)
-    else
-      available.find(_ == wanted).orElse {
-        val matches = available.filter(_.equalsIgnoreCase(wanted)).toList
-        if (matches.size == 1) matches.headOption else matches.find(_ == wanted.toLowerCase)
-      }
+  /**
+   * The JSON payload key for the `ttl(...)` pseudo-column.
+   *
+   * Verified against Amazon Keyspaces: when the column is case-sensitive the
+   * WHOLE pseudo-column is quoted while the inner argument stays bare --
+   * `"ttl(MyTtl)"`, NOT `ttl("MyTtl")`. A column that needs no quoting yields
+   * the fully bare `ttl(myttl)`, so the decision to quote is driven by the
+   * column name alone, not by the parentheses.
+   */
+  def ttlJsonKey(internal: String): String = {
+    val pseudoColumn = s"ttl($internal)"
+    if (toCql(internal) == internal) pseudoColumn
+    else "\"" + pseudoColumn.replace("\"", "\"\"") + "\""
+  }
+
+  /**
+   * Renders an internal name for use in Spark SQL expressions, which quote
+   * with backticks rather than double quotes.
+   */
+  def toSparkName(internal: String): String =
+    "`" + internal.replace("`", "``") + "`"
+
+  /**
+   * Lowercased, identifier-safe name for Glue Catalog / Iceberg objects, which
+   * are not case-sensitive.
+   *
+   * Folding is lossy, so a short hash of the internal name is appended
+   * whenever folding actually changed something. Without it `MyTable` and
+   * `mytable` -- or `my-table` and `my_table` -- would collide on a single
+   * Iceberg table and silently interleave two tables' rows.
+   *
+   * Names that are already legal lowercase identifiers are returned unchanged,
+   * so existing all-lowercase deployments keep their current Glue table names.
+   * Names that needed folding do change, but replication of a case-sensitive
+   * table could not previously complete at all, so there is no working
+   * deployment to migrate.
+   */
+  def toGlueName(internal: String): String = {
+    val folded = internal.toLowerCase.replaceAll("[^a-z0-9_]", "_")
+    if (folded == internal) folded
+    else s"${folded}_${Integer.toHexString(internal.hashCode)}"
   }
 }
 
@@ -231,12 +291,18 @@ class SupportFunctions {
         convertUDTtoText(updatedJson, tail)
     }
 
+    // The callers pass internal (unquoted) column names, but the payload keys
+    // these helpers match against are in CQL form, so a case-sensitive column
+    // would never match and its blob/UDT repair would be skipped silently.
+    val binKeys = binColumns.map(CqlIdentifiers.jsonKey)
+    val udtKeys = utdColumns.map(CqlIdentifiers.jsonKey)
+
     val transformedResult = if (binColumns.isEmpty && utdColumns.isEmpty) {
       parse(input)
     } else {
       val json = parse(input)
-      val correctedBins = if (binColumns.nonEmpty) correctEmptyBin(json, binColumns) else json
-      val convertedUdt = if (utdColumns.nonEmpty) convertUDTtoText(correctedBins, utdColumns) else correctedBins
+      val correctedBins = if (binKeys.nonEmpty) correctEmptyBin(json, binKeys) else json
+      val convertedUdt = if (udtKeys.nonEmpty) convertUDTtoText(correctedBins, udtKeys) else correctedBins
       convertedUdt
     }
     transformedResult
@@ -341,10 +407,15 @@ case class FlushingSet(flushingClient: CqlSession, internalConfig: WriteConfigur
 
 object GlueApp {
   def main(sysArgs: Array[String]): Unit = {
-    val patternWhereClauseToMap: Regex = """(\w+)=['"]?(.*?)['"]?(?: and |$)""".r
+    // The left side accepts either a bare identifier or a double-quoted
+    // (case-sensitive) one, since WHERE clauses now quote such column names.
+    // With a bare-only `\w+` the match failed outright for quoted identifiers,
+    // silently changing the large-object S3 key layout.
+    val patternWhereClauseToMap: Regex =
+      """(?:"(?:[^"]|"")*"|\w+)=['"]?(.*?)['"]?(?: and |$)""".r
 
     def convertCassandraKeyToGenericKey(input: String): String = {
-      patternWhereClauseToMap.findAllIn(input).matchData.map { m => s"${m.group(2)}" }.mkString(":")
+      patternWhereClauseToMap.findAllIn(input).matchData.map { m => s"${m.group(1)}" }.mkString(":")
     }
 
     def isLogObjectPresent(ksName: String,
@@ -414,10 +485,26 @@ object GlueApp {
       connection
     }
 
+    // The column arguments are quoted where required: inside CQL statement text
+    // a case-sensitive name must appear as writetime("MyCol"). Note this differs
+    // from the JSON key the server returns, where the whole pseudo-column is
+    // quoted instead -- see CqlIdentifiers.ttlJsonKey.
     def buildWritetimeExpression(columns: Seq[String]): String = columns match {
-      case Seq(single) => s"writetime($single) as ts"
-      case multiple    => multiple.map(c => s"writetime($c)").mkString("greatest(", ", ", ") as ts")
+      case Seq(single) => s"writetime(${CqlIdentifiers.toCql(single)}) as ts"
+      case multiple    => multiple.map(c => s"writetime(${CqlIdentifiers.toCql(c)})")
+        .mkString("greatest(", ", ", ") as ts")
     }
+
+    /**
+     * Renders a `selectExpr` element. Most elements are plain column names and
+     * must be backtick-quoted so a case-sensitive name is not folded, but
+     * `inferKeys("primaryKeysWithTS", ...)` appends the writetime expression
+     * built by [[buildWritetimeExpression]] as one more element. That one is a
+     * SQL expression, not an identifier, so it must be passed through verbatim.
+     */
+    def toSelectExpr(writetimeCols: Seq[String])(element: String): String =
+      if (writetimeCols.nonEmpty && element == buildWritetimeExpression(writetimeCols)) element
+      else CqlIdentifiers.toSparkName(element)
 
     def tableMetadata(cc: CqlSession, ks: String, tbl: String): TableMetadata =
       cc.getMetadata.getKeyspace(CqlIdentifier.fromInternal(ks)).get
@@ -453,7 +540,65 @@ object GlueApp {
             UdtConversion(), WriteConfiguration()))
         case _ =>
           implicit val formats: DefaultFormats.type = DefaultFormats
-          parse(s).extract[JsonMapping]
+          normalizeMappingIdentifiers(parse(s).extract[JsonMapping])
+      }
+    }
+
+    /**
+     * Strips the optional surrounding double quotes from every column name in
+     * the mapping, so operators can write "MyCol" the same way they do for
+     * --src-table. Downstream code then holds internal names uniformly and
+     * converts per consumer via CqlIdentifiers.
+     */
+    def normalizeMappingIdentifiers(m: JsonMapping): JsonMapping = {
+      def norm(c: String): String = CqlIdentifiers.toInternal(c)
+      val ks = m.keyspaces
+      m.copy(
+        replication = m.replication.copy(columns = m.replication.columns.map(norm)),
+        keyspaces = ks.copy(
+          compressionConfig = ks.compressionConfig.copy(
+            compressNonPrimaryColumns = ks.compressionConfig.compressNonPrimaryColumns.map(norm),
+            targetNameColumn = norm(ks.compressionConfig.targetNameColumn)),
+          largeObjectsConfig = ks.largeObjectsConfig.copy(
+            column = norm(ks.largeObjectsConfig.column),
+            xref = norm(ks.largeObjectsConfig.xref)),
+          transformation = ks.transformation.copy(
+            addNonPrimaryKeyColumns = ks.transformation.addNonPrimaryKeyColumns.map(norm),
+            transformExpressions = ks.transformation.transformExpressions.map(t =>
+              t.copy(columnName = norm(t.columnName), alias = norm(t.alias)))),
+          udtConversion = ks.udtConversion.copy(columns = ks.udtConversion.columns.map(norm))))
+    }
+
+    /**
+     * Validates that every operator-supplied column name exists on the source
+     * table, with a case-sensitivity hint when only the letter case differs.
+     *
+     * Without this, a mis-cased column name surfaces much later as a confusing
+     * CQL error, or -- for the JSON payload paths -- as silently skipped work.
+     */
+    def preFlightCheckColumns(connection: CqlSession,
+                              keyspace: String,
+                              table: String,
+                              namedColumns: Seq[(String, String)],
+                              logger: GlueLogger): Unit = {
+      val available = connection.getMetadata
+        .getKeyspace(CqlIdentifier.fromInternal(keyspace)).get
+        .getTable(CqlIdentifier.fromInternal(table)).get
+        .getColumns.asScala.keys.map(_.asInternal).toList
+
+      namedColumns.filter { case (_, c) => c.nonEmpty && c != "None" }.foreach { case (origin, col) =>
+        if (!available.contains(col)) {
+          val caseHint = available.filter(_.equalsIgnoreCase(col)) match {
+            case Nil => s". Available columns: ${available.map(CqlIdentifiers.toCql).mkString(", ")}"
+            case similar =>
+              s". A column with different letter case exists: ${similar.map(CqlIdentifiers.toCql).mkString(", ")}." +
+                s" Case-sensitive names must be double-quoted, e.g. $origin '${CqlIdentifiers.toCql(similar.head)}'"
+          }
+          val message = s"ERROR: the column ${CqlIdentifiers.toCql(col)} from $origin does not exist in " +
+            s"${CqlIdentifiers.toCql(keyspace)}.${CqlIdentifiers.toCql(table)}$caseHint"
+          logger.error(message)
+          throw new PreFlightCheckException(message, -5)
+        }
       }
     }
 
@@ -617,7 +762,13 @@ object GlueApp {
     val counterColumns: List[String] = allColumnsFromSource.flatMap(_.filter(_._2 == "COUNTER").keys).toList
     val pkFinalWithoutTs = if (writetimeColumns.nonEmpty) pkFinal.filterNot(_ == buildWritetimeExpression(writetimeColumns)) else pkFinal
     val pks = if (writetimeColumns.nonEmpty) pkFinal.filterNot(_ == buildWritetimeExpression(writetimeColumns)) else pkFinal
-    val cond = pks.map(x => col(s"head.$x") === col(s"tail.$x")).reduce(_ && _)
+    // The alias prefix stays bare so col() reads it as a qualifier, while the
+    // column part is backticked so a case-sensitive name is not folded and a
+    // name containing a dot is not misread as a nested field.
+    val cond = pks.map { x =>
+      val c = CqlIdentifiers.toSparkName(x)
+      col(s"head.$c") === col(s"tail.$c")
+    }.reduce(_ && _)
     val columns = inferKeys(internalConnectionToSource, "primaryKeys", srcKeyspaceName, srcTableName, columnTs).flatten.toMap
     val columnsPos = scala.collection.immutable.TreeSet(columns.keys.toArray: _*).zipWithIndex
     val jsonMappingRaw = new String(Base64.getDecoder.decode(jsonMapping.replaceAll("\\r\\n|\\r|\\n", "")), StandardCharsets.UTF_8)
@@ -629,9 +780,38 @@ object GlueApp {
     logger.info(s"Compute resources: Instances $instances, Cores: $cores")
 
     val jsonMapping4s = parseJSONMapping(jsonMappingRaw.replaceAll("\\r\\n|\\r|\\n", ""))
+
+    // Validate the operator-supplied column names now that the mapping is
+    // parsed, so a mis-cased name fails fast with an actionable message.
+    {
+      val ksCfg = jsonMapping4s.keyspaces
+      val named =
+        writetimeColumns.map("--writetime-column" -> _) ++
+          Seq("--ttl-column" -> ttlColumn) ++
+          (if (jsonMapping4s.replication.allColumns) Seq.empty
+           else jsonMapping4s.replication.columns.map("JSON_MAPPING replication.columns" -> _)) ++
+          (if (ksCfg.udtConversion.enabled)
+             ksCfg.udtConversion.columns.map("JSON_MAPPING udtConversion.columns" -> _)
+           else Seq.empty) ++
+          (if (ksCfg.largeObjectsConfig.enabled)
+             Seq("JSON_MAPPING largeObjectsConfig.column" -> ksCfg.largeObjectsConfig.column)
+           else Seq.empty) ++
+          (if (ksCfg.compressionConfig.enabled && !ksCfg.compressionConfig.compressAllNonPrimaryColumns)
+             ksCfg.compressionConfig.compressNonPrimaryColumns
+               .map("JSON_MAPPING compressionConfig.compressNonPrimaryColumns" -> _)
+           else Seq.empty) ++
+          (if (ksCfg.transformation.enabled)
+             ksCfg.transformation.transformExpressions
+               .map("JSON_MAPPING transformExpressions.columnName" -> _.columnName)
+           else Seq.empty)
+      preFlightCheckColumns(internalConnectionToSource, srcKeyspaceName, srcTableName, named, logger)
+    }
+
     val replicatedColumns = jsonMapping4s match {
       case JsonMapping(Replication(true, _, _, _, _, _, _), _) => "*"
-      case rep => rep.replication.columns.mkString(",")
+      // Operator-supplied names are already internal form; render as CQL so
+      // case-sensitive columns are quoted in the SELECT list.
+      case rep => rep.replication.columns.map(CqlIdentifiers.toCql).mkString(",")
     }
 
     def cleanupLedger(cc: CqlSession,
@@ -657,11 +837,12 @@ object GlueApp {
     val selectStmtWithTTL = ttlColumn match {
       case s if s.equals("None") => ""
       case s if (!s.equals("None") && replicatedColumns.equals("*")) => {
-        val lstColumns = allColumnsFromSource.flatMap(_.keys).toSeq :+ s"ttl($ttlColumn)"
+        val lstColumns = allColumnsFromSource.flatMap(_.keys).toSeq
+          .map(CqlIdentifiers.toCql) :+ s"ttl(${CqlIdentifiers.toCql(ttlColumn)})"
         lstColumns.mkString(",")
       }
       case s if !(s.equals("None") || replicatedColumns.equals("*")) => {
-        val lstColumns = s"$replicatedColumns,ttl($ttlColumn)"
+        val lstColumns = s"$replicatedColumns,ttl(${CqlIdentifiers.toCql(ttlColumn)})"
         lstColumns
       }
     }
@@ -675,7 +856,7 @@ object GlueApp {
       case s if !s.equals("None")
         && jsonMapping4s.replication.replicateWithTimestamp
         && replicatedColumns.equals("*") =>
-        allColumnsFromSource.flatMap(_.keys) :+ writetimeExpr mkString ", "
+        allColumnsFromSource.flatMap(_.keys).map(CqlIdentifiers.toCql) :+ writetimeExpr mkString ", "
       case s if !s.equals("None")
         && jsonMapping4s.replication.replicateWithTimestamp
         && !replicatedColumns.equals("*") =>
@@ -743,10 +924,11 @@ object GlueApp {
 
     def offloadToS3(jPayload: org.json4s.JValue, s3ClientOnPartition: com.amazonaws.services.s3.AmazonS3, whereClause: String): JValue = {
       val localConfig = jsonMapping4s.keyspaces.largeObjectsConfig
-      val columnName = localConfig.column
+      // These index into the JSON payload, whose keys are in CQL form.
+      val columnName = CqlIdentifiers.jsonKey(localConfig.column)
       val bucket = removeS3prefixIfPresent(localConfig.bucket)
       val prefix = removeLeadingEndingSlashes(localConfig.prefix)
-      val xrefColumnName = localConfig.xref
+      val xrefColumnName = CqlIdentifiers.jsonKey(localConfig.xref)
       val key = Uuids.timeBased().toString
       val largeObject = Base64.getEncoder.encodeToString(compressWithLZ4B((jPayload \ columnName).values.toString))
 
@@ -789,14 +971,16 @@ object GlueApp {
     def compressValues(json: JValue): JValue = {
       if (jsonMapping4s.keyspaces.compressionConfig.enabled) {
         val jPayload = json
-        val compressColumns = jsonMapping4s.keyspaces.compressionConfig.compressAllNonPrimaryColumns match {
+        // Both branches yield internal names; they are compared against payload
+        // keys below, so convert the whole set to payload-key form.
+        val compressColumns = (jsonMapping4s.keyspaces.compressionConfig.compressAllNonPrimaryColumns match {
           case true => {
             val acfs = allColumnsFromSource.flatMap(_.keys).toSet
             val excludePks = columns.map(x => x._1.toString).toSet
             acfs.filterNot(excludePks.contains(_))
           }
           case _ => jsonMapping4s.keyspaces.compressionConfig.compressNonPrimaryColumns.toSet
-        }
+        }).map(CqlIdentifiers.jsonKey)
         val filteredJson = jPayload.removeField {
           case (key, _) =>
             compressColumns.contains(key)
@@ -808,7 +992,9 @@ object GlueApp {
         val updatedJson = excludedJson.isEmpty match {
           case false => {
             val compressedPayload: Array[Byte] = compressWithLZ4B(compact(render(JObject(excludedJson))))
-            filteredJson merge JObject(jsonMapping4s.keyspaces.compressionConfig.targetNameColumn -> JString(binToHex(compressedPayload)))
+            filteredJson merge JObject(
+              CqlIdentifiers.jsonKey(jsonMapping4s.keyspaces.compressionConfig.targetNameColumn) ->
+                JString(binToHex(compressedPayload)))
           }
           case _ => throw new CompressionException("Compressed payload is empty")
         }
@@ -847,7 +1033,7 @@ object GlueApp {
     }
 
     def getTTLvalue(jvalue: org.json4s.JValue): BigInt = {
-      val jvalueByKey = jvalue \ s"ttl($ttlColumn)"
+      val jvalueByKey = jvalue \ CqlIdentifiers.ttlJsonKey(ttlColumn)
       jvalueByKey match {
         case JInt(values) => values
         case _ => 0
@@ -875,7 +1061,7 @@ object GlueApp {
     }
 
     def backToCQLStatementWithoutTTL(jvalue: org.json4s.JValue): String = {
-      val filteredJson = filterOutColumn(jvalue, s"ttl($ttlColumn)")
+      val filteredJson = filterOutColumn(jvalue, CqlIdentifiers.ttlJsonKey(ttlColumn))
       compact(render(filteredJson))
     }
 
@@ -961,7 +1147,7 @@ object GlueApp {
           if (rules.isEmpty) return inputJson
 
           rules.foldLeft(inputJson) { (currentJson, rule) =>
-            (currentJson \ rule.columnName) match {
+            (currentJson \ CqlIdentifiers.jsonKey(rule.columnName)) match {
               case JNothing => currentJson
               case value =>
                 val stringValue = value.values.toString
@@ -974,12 +1160,16 @@ object GlueApp {
                 }
                 if (rule.alias.nonEmpty) {
                   if (rule.keepSource) {
-                    currentJson merge JObject(rule.alias -> newValue)
+                    currentJson merge JObject(CqlIdentifiers.jsonKey(rule.alias) -> newValue)
                   } else {
-                    currentJson.removeField { case (k, _) => k == rule.columnName } merge JObject(rule.alias -> newValue)
+                    currentJson
+                      .removeField { case (k, _) => k == CqlIdentifiers.jsonKey(rule.columnName) }
+                      .merge(JObject(CqlIdentifiers.jsonKey(rule.alias) -> newValue))
                   }
                 } else {
-                  currentJson.transformField { case (k, _) if k == rule.columnName => (k, newValue) }
+                  currentJson.transformField {
+                    case (k, _) if k == CqlIdentifiers.jsonKey(rule.columnName) => (k, newValue)
+                  }
                 }
             }
           }
@@ -992,7 +1182,10 @@ object GlueApp {
               case "insert" | "update" =>
                 if (counterColumns.nonEmpty) {
                   val counterValues = getCounters(row)
-                  val setStmt = counterValues.map(m => s"${m._1}=${m._1}+${m._2}").mkString(",")
+                  val setStmt = counterValues.map { m =>
+                    val col = CqlIdentifiers.toCql(m._1)
+                    s"$col=$col+${m._2}"
+                  }.mkString(",")
                   val counterCqlStmt = s"UPDATE $trgKeyspaceNameCql.$trgTableNameCql SET $setStmt WHERE $whereClause"
                   fl.executeCQLStatement(counterCqlStmt)
                 } else {
@@ -1012,7 +1205,7 @@ object GlueApp {
                         case "string" | "text" | "inet" | "varchar" | "ascii" => s"'${originalValue.replace("'", "''")}'"
                         case _ => originalValue
                       }
-                      whereConditions += s"$originalColName=$formattedValue"
+                      whereConditions += s"${CqlIdentifiers.toCql(originalColName)}=$formattedValue"
                     }
                   }
 
@@ -1031,7 +1224,7 @@ object GlueApp {
                         case "md5" | "sha-1" | "sha1" | "sha-2" | "sha2" | "sha-256" | "sha256" => s"'${hashedValue.replace("'", "''")}'" // text - with quotes
                         case _ => s"'${hashedValue.replace("'", "''")}'" // default to text
                       }
-                      whereConditions += s"$aliasColName=$formattedValue"
+                      whereConditions += s"${CqlIdentifiers.toCql(aliasColName)}=$formattedValue"
                     }
                   }
 
@@ -1202,7 +1395,9 @@ object GlueApp {
           }
           case _ => throw new CassandraTypeException(s"Unrecognized data type $colType")
         }
-        whereStmt.append(s"$colName=$v")
+        // colName stays in internal form above (Spark row lookups need it); the
+        // CQL form is only used here, in the emitted statement text.
+        whereStmt.append(s"${CqlIdentifiers.toCql(colName)}=$v")
         el._2 match {
           case i if i < columns.size - 1 => whereStmt.append(" and ")
           case _ =>
@@ -1308,7 +1503,8 @@ object GlueApp {
      * Creates the Iceberg table for a specific tile if it doesn't exist.
      * Schema: primary key columns + ts (bigint)
      * One table per tile for snapshot isolation.
-     * Location: s3://{landingZone}/{ks}/{tbl}/iceberg/tile_{tile}/
+     * Location: s3://{landingZone}/{ks}/{tbl}/iceberg/tile_{tile}/ where {ks}
+     * and {tbl} are Glue-folded, matching the catalog name.
      */
     def ensureIcebergTableExists(
       spark: SparkSession,
@@ -1320,12 +1516,15 @@ object GlueApp {
     ): Unit = {
       val tableName = icebergTableName(ksName, tblName, tile)
       val columnDefs = pkColumns.map { c =>
-        val name = c("name")
+        // Spark SQL DDL quotes with backticks, not double quotes.
+        val name = CqlIdentifiers.toSparkName(c("name"))
         val sparkType = cassandraTypeToSparkSql(c("type"))
         s"$name $sparkType"
       }.mkString(", ")
       val lzPath = lz.stripSuffix("/")
-      val location = s"$lzPath/$ksName/$tblName/iceberg/tile_$tile/"
+      // Folded like the catalog name: using the raw names here would put two
+      // case-differing tables that share one Glue table at different prefixes.
+      val location = s"$lzPath/${CqlIdentifiers.toGlueName(ksName)}/${CqlIdentifiers.toGlueName(tblName)}/iceberg/tile_$tile/"
       val createSql =
         s"""CREATE TABLE IF NOT EXISTS $tableName (
            |  $columnDefs,
@@ -1873,35 +2072,39 @@ object GlueApp {
       val primaryKeysDf = columnTs match {
         case ts if ts == "None" && counterColumns.isEmpty =>
           baseDF
-            .selectExpr(filterColumns.map(c => c): _*)
+            .selectExpr(filterColumns.map(toSelectExpr(writetimeColumns)): _*)
             .withColumn("ts", lit(0))
 
         case ts if ts != "None" && replicationPointInTime == 0 =>
           baseDF
-            .selectExpr(filterColumns.map(c => c): _*)
+            .selectExpr(filterColumns.map(toSelectExpr(writetimeColumns)): _*)
 
         case ts if ts != "None" && replicationPointInTime > 0 =>
           baseDF
-            .selectExpr(filterColumns.map(c => c): _*)
+            .selectExpr(filterColumns.map(toSelectExpr(writetimeColumns)): _*)
             .filter($"ts".isNotNull && pointInTimePredicate($"ts"))
 
         case ts if ts == "None" && counterColumns.nonEmpty =>
           val selectedColumns = pkFinal ++ counterColumns
           baseDF
-            .selectExpr(selectedColumns.map(c => c): _*)
+            .selectExpr(selectedColumns.map(toSelectExpr(writetimeColumns)): _*)
             .withColumn("ts", lit(0))
-            .withColumn("counter_hash", xxhash64(counterColumns.map(c => col(c)): _*))
+            .withColumn("counter_hash",
+              xxhash64(counterColumns.map(c => col(CqlIdentifiers.toSparkName(c))): _*))
       }
 
       val groupingExpr = abs(xxhash64(concat(
         pkFinalWithoutTs.map { colName =>
+          // schema(...) is a literal field lookup and takes the internal name,
+          // while col(...) parses its argument and needs the backticked form.
+          val sparkCol = col(CqlIdentifiers.toSparkName(colName))
           baseDF.schema(colName).dataType match {
             case struct: StructType =>
               // For tuple types, extract fields and concatenate
-              val fields = struct.fieldNames.map(field => col(colName).getField(field).cast("string"))
+              val fields = struct.fieldNames.map(field => sparkCol.getField(field).cast("string"))
               concat(lit("("), concat_ws(",", fields: _*), lit(")"))
             case _ =>
-              col(colName).cast("string")
+              sparkCol.cast("string")
           }
         }: _*
       ))) % totalTiles

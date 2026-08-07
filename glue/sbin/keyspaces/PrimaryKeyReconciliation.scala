@@ -49,6 +49,76 @@ class UnknownPKTransformRuleException(val rule: String)
   )
 
 
+/**
+ * Identifier handling for case-sensitive (quoted) keyspace, table and column
+ * names.
+ *
+ * Four conventions coexist in this job and they are NOT interchangeable:
+ *  - the Java driver metadata API (getKeyspace/getTable) and CQL statement
+ *    text expect the *CQL form*, i.e. double-quoted when the name is not a
+ *    bare lowercase identifier. Bare names are lowercased by the driver, so
+ *    `ApplicationProfile` resolves to `applicationprofile`.
+ *  - spark-cassandra-connector (cassandraFormat/cassandraTable) expects the
+ *    *internal form*, i.e. the exact case with no quotes. Passing a quoted
+ *    name there makes the quote characters part of the name and yields a
+ *    NoSuchTableException.
+ *  - Spark SQL expressions quote with backticks. See toSparkName. `col(name)`
+ *    parses its argument, so an unquoted `a.b` becomes a nested-field lookup.
+ *  - Glue Catalog objects are case-insensitive. See toGlueName.
+ *
+ * Names are normalized once to the internal form and converted per consumer.
+ *
+ * Kept in sync with the copy in CQLReplicator.scala: the two files are
+ * uploaded as independent standalone Glue scripts, so they cannot share a
+ * compilation unit.
+ */
+object CqlIdentifiers {
+
+  /** True when the operator supplied an explicitly quoted CQL identifier. */
+  def isQuoted(raw: String): Boolean = {
+    val t = raw.trim
+    t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")
+  }
+
+  /** Converts operator input to the internal (exact-case, unquoted) form. */
+  def toInternal(raw: String): String = {
+    val t = raw.trim
+    if (isQuoted(t)) t.substring(1, t.length - 1).replace("\"\"", "\"") else t
+  }
+
+  /**
+   * Renders an internal name as CQL text, double-quoting only when required.
+   *
+   * Delegates to the driver rather than matching a regex: a hand-rolled
+   * "is it all lowercase" test leaves CQL reserved words such as `order` and
+   * `table` unquoted, which the server then refuses to parse.
+   */
+  def toCql(internal: String): String =
+    CqlIdentifier.fromInternal(internal).asCql(true)
+
+  /**
+   * Renders an internal name for use in Spark SQL expressions, which quote
+   * with backticks rather than double quotes.
+   */
+  def toSparkName(internal: String): String =
+    "`" + internal.replace("`", "``") + "`"
+
+  /**
+   * Lowercased, identifier-safe name for Glue Catalog / Iceberg objects,
+   * which are not case-sensitive.
+   *
+   * Folding is lossy, so a short hash of the internal name is appended
+   * whenever folding actually changed something, to keep names that differ
+   * only by case (or only by punctuation) from colliding on one Glue object.
+   */
+  def toGlueName(internal: String): String = {
+    val folded = internal.toLowerCase.replaceAll("[^a-z0-9_]", "_")
+    if (folded == internal) folded
+    else s"${folded}_${Integer.toHexString(internal.hashCode)}"
+  }
+}
+
+
 object PKTransformDispatcher {
 
   /**
@@ -341,7 +411,8 @@ object SourceScanner {
 
   def applyTransforms(df: DataFrame, mapping: EffectiveMapping): DataFrame =
     mapping.pkTransforms.foldLeft(df) { (acc, t) =>
-      val (transformedCol, _) = PKTransformDispatcher(t.rule, col(t.columnName))
+      val (transformedCol, _) =
+        PKTransformDispatcher(t.rule, col(CqlIdentifiers.toSparkName(t.columnName)))
       t.alias match {
         case Some(aliasName) => acc.withColumn(aliasName, transformedCol)
         case None            => acc.withColumn(t.columnName, transformedCol)
@@ -350,10 +421,13 @@ object SourceScanner {
 
 
   def projectEffective(df: DataFrame, mapping: EffectiveMapping): DataFrame =
-    df.select(mapping.effectiveSourcePks.map { case (name, _) => col(name) }: _*)
+    df.select(mapping.effectiveSourcePks.map {
+      case (name, _) => col(CqlIdentifiers.toSparkName(name))
+    }: _*)
 
   def groupColumn(effectivePkNames: Seq[String], totalTiles: Int): Column = {
-    val parts: Seq[Column] = effectivePkNames.map(n => col(n).cast(StringType))
+    val parts: Seq[Column] =
+      effectivePkNames.map(n => col(CqlIdentifiers.toSparkName(n)).cast(StringType))
     (abs(xxhash64(concat(parts: _*))) % totalTiles).cast(IntegerType)
   }
 
@@ -387,7 +461,7 @@ object SourceScanner {
         spark.read
           .cassandraFormat(srcTbl, srcKs)
           .load()
-          .select(projection.map(col): _*)
+          .select(projection.map(n => col(CqlIdentifiers.toSparkName(n))): _*)
       } catch {
         case NonFatal(t) =>
           logger.error(
@@ -453,7 +527,7 @@ object TargetScanner {
   val TargetReadConsistency: String = "LOCAL_ONE"
 
   def projectTarget(df: DataFrame, targetPks: Seq[(String, String)]): DataFrame =
-    df.select(targetPks.map { case (name, _) => col(name) }: _*)
+    df.select(targetPks.map { case (name, _) => col(CqlIdentifiers.toSparkName(name)) }: _*)
 
   def applyPipeline(targetDf: DataFrame, targetPks: Seq[(String, String)], totalTiles: Int): DataFrame = {
     val projected = projectTarget(targetDf, targetPks)
@@ -515,7 +589,7 @@ object TargetScanner {
         spark.read
           .cassandraFormat(trgTbl, trgKs)
           .load()
-          .select(projection.map(col): _*)
+          .select(projection.map(n => col(CqlIdentifiers.toSparkName(n))): _*)
       } catch {
         case NonFatal(t) =>
           logger.error(
@@ -599,8 +673,9 @@ object DiffEngine {
   ): Seq[Row] = {
     if (sampleSize <= 0) Seq.empty
     else {
-      val projected = diffDf.select(effectivePkCols.map(col): _*)
-      val ordered = projected.orderBy(effectivePkCols.map(c => asc_nulls_last(c)): _*)
+      val projected = diffDf.select(effectivePkCols.map(n => col(CqlIdentifiers.toSparkName(n))): _*)
+      val ordered =
+        projected.orderBy(effectivePkCols.map(c => asc_nulls_last(CqlIdentifiers.toSparkName(c))): _*)
       ordered.limit(sampleSize).collect().toSeq
     }
   }
@@ -967,8 +1042,9 @@ object PrimaryKeyReconciliation {
     }
 
     def buildWritetimeExpression(columns: Seq[String]): String = columns match {
-      case Seq(single) => s"writetime($single) as ts"
-      case multiple    => multiple.map(c => s"writetime($c)").mkString("greatest(", ", ", ") as ts")
+      case Seq(single) => s"writetime(${CqlIdentifiers.toCql(single)}) as ts"
+      case multiple    => multiple.map(c => s"writetime(${CqlIdentifiers.toCql(c)})")
+        .mkString("greatest(", ", ", ") as ts")
     }
 
     def tableMetadata(cc: CqlSession, ks: String, tbl: String): TableMetadata =
@@ -1048,60 +1124,8 @@ object PrimaryKeyReconciliation {
       }
     }
 
-  final /**
- * CQL identifier handling for case-sensitive (quoted) keyspace and table names.
- *
- * Two conventions coexist in this job and they are NOT interchangeable:
- *  - the Java driver metadata API (getKeyspace/getTable) and CQL statement text expect the
- *    *CQL form*, i.e. double-quoted when the name is not all-lowercase. Bare names are
- *    lowercased by the driver, so `ApplicationProfile` resolves to `applicationprofile`.
- *  - spark-cassandra-connector (cassandraFormat/cassandraTable) expects the *internal form*,
- *    i.e. the exact case with no quotes. Passing a quoted name there makes the quote
- *    characters part of the name and yields a NoSuchTableException.
- *
- * Names are therefore normalized once to the internal form and converted per consumer.
- */
-object CqlIdentifiers {
-  private val BareLowercase = "^[a-z][a-z0-9_]*$".r
-
-  /** True when the operator supplied an explicitly quoted CQL identifier. */
-  def isQuoted(raw: String): Boolean = {
-    val t = raw.trim
-    t.length >= 2 && t.startsWith("\"") && t.endsWith("\"")
-  }
-
-  /** Converts operator input to the internal (exact-case, unquoted) form. */
-  def toInternal(raw: String): String = {
-    val t = raw.trim
-    if (isQuoted(t)) t.substring(1, t.length - 1).replace("\"\"", "\"") else t
-  }
-
-  /** Renders an internal name as CQL text, double-quoting only when required. */
-  def toCql(internal: String): String =
-    if (BareLowercase.pattern.matcher(internal).matches()) internal
-    else "\"" + internal.replace("\"", "\"\"") + "\""
-
-  /** Lowercased, identifier-safe name for Glue Catalog / Iceberg objects, which are not case-sensitive. */
-  def toGlueName(internal: String): String =
-    internal.toLowerCase.replaceAll("[^a-z0-9_]", "_")
-
-  /**
-   * Picks the schema name that matches the operator input. A quoted name is matched
-   * verbatim; a bare name is matched case-sensitively first and then case-insensitively so
-   * that invocations relying on the driver's historic lowercasing keep working.
-   */
-  def resolve(raw: String, available: Iterable[String]): Option[String] = {
-    val wanted = toInternal(raw)
-    if (isQuoted(raw)) available.find(_ == wanted)
-    else
-      available.find(_ == wanted).orElse {
-        val matches = available.filter(_.equalsIgnoreCase(wanted)).toList
-        if (matches.size == 1) matches.headOption else matches.find(_ == wanted.toLowerCase)
-      }
-  }
-}
-
-case class ResolvedArgs(
+  /** Parsed and validated argument bundle returned by [[parseArgs]]. */
+  final case class ResolvedArgs(
       jobName: String,
       sourceKs: String,
       sourceTbl: String,

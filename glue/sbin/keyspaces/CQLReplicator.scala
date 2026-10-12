@@ -1975,6 +1975,34 @@ object GlueApp {
      * Stores the Iceberg snapshot ID in the 'location' field.
      * Rotates the previous 'curr' entry to 'prev' before writing the new 'curr'.
      */
+    // Ledger statements run against Amazon Keyspaces, which can return a
+    // transient ServerError that the driver's default retry policy does NOT
+    // retry. One such error must not abort a discovery cycle, so every ledger
+    // statement goes through this bounded exponential-backoff retry (same
+    // exception set as FlushingSet uses for data writes).
+    val ledgerRetry: Retry = {
+      val r = Retry.of("ledger", RetryConfig.custom
+        .maxAttempts(8)
+        .intervalFunction(IntervalFunction.ofExponentialBackoff(Duration.ofMillis(100), 2.0))
+        .retryExceptions(
+          classOf[WriteFailureException],
+          classOf[WriteTimeoutException],
+          classOf[ServerError],
+          classOf[UnavailableException],
+          classOf[NoNodeAvailableException],
+          classOf[AllNodesFailedException],
+          classOf[DriverException]
+        )
+        .build())
+      r.getEventPublisher.onRetry(event =>
+        logger.warn(s"Retrying a ledger statement (attempt ${event.getNumberOfRetryAttempts}): " +
+          s"${event.getLastThrowable.getMessage}"))
+      r
+    }
+
+    def ledgerExecute(session: CqlSession, statement: String): com.datastax.oss.driver.api.core.cql.ResultSet =
+      Retry.decorateSupplier(ledgerRetry, () => session.execute(statement)).get()
+
     def recordDiscoverySnapshot(
       session: CqlSession,
       ksName: String,
@@ -1982,7 +2010,7 @@ object GlueApp {
       tile: Int,
       snapshotId: Long
     ): Unit = {
-      val existingCurr = Option(session.execute(
+      val existingCurr = Option(ledgerExecute(session,
         s"SELECT location, load_status FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$ksName' and tbl='$tblName' and tile=$tile and ver='curr'"
       ).one())
 
@@ -1990,14 +2018,14 @@ object GlueApp {
         case Some(row) =>
           val oldSnapshotId = row.getString("location")
           val oldLoadStatus = Option(row.getString("load_status")).getOrElse("")
-          session.execute(
+          ledgerExecute(session,
             s"BEGIN UNLOGGED BATCH " +
               s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$ksName','$tblName',$tile,'SUCCESS',toTimestamp(now()),'$oldSnapshotId','prev','$oldLoadStatus',toTimestamp(now()));" +
               s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$ksName','$tblName',$tile,'SUCCESS',toTimestamp(now()),'${snapshotId.toString}','curr','','');" +
               s"APPLY BATCH;"
           )
         case None =>
-          session.execute(
+          ledgerExecute(session,
             s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$ksName','$tblName',$tile,'SUCCESS',toTimestamp(now()),'${snapshotId.toString}','curr','','')"
           )
       }
@@ -2663,7 +2691,7 @@ object GlueApp {
     }
 
     def getCurrentIcebergTilesCount(ledgerSession: CqlSession): Int = {
-      val rs = ledgerSession.execute(
+      val rs = ledgerExecute(ledgerSession,
         s"SELECT tile FROM $internalMigrationKeyspace.$internalMigrationTable " +
           s"WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName' AND ver='curr' ALLOW FILTERING"
       )
@@ -2705,7 +2733,7 @@ object GlueApp {
             .persist(cachingMode)
 
           // Task 3.2: Clear existing ledger entries before writing new tile entries (Req 8.1, 8.2)
-          ledgerConnection.execute(s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName'")
+          ledgerExecute(ledgerConnection, s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName'")
 
           // Task 3.2: Create Iceberg database and ensure all tile tables exist sequentially
           // (same pattern as keysDiscoveryProcess to avoid Glue Catalog concurrency conflicts)
@@ -2735,7 +2763,7 @@ object GlueApp {
               val snapshotIdOpt = currentIcebergSnapshotId(sparkSession, icebergTblName)
               snapshotIdOpt match {
                 case Some(snapshotId) =>
-                  ledgerConnection.execute(
+                  ledgerExecute(ledgerConnection,
                     s"BEGIN UNLOGGED BATCH " +
                       s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile,'SUCCESS',toTimestamp(now()),'${snapshotId.toString}','prev','SUCCESS',toTimestamp(now()));" +
                       s"INSERT INTO $internalMigrationKeyspace.$internalMigrationTable(ks,tbl,tile,offload_status,dt_offload,location,ver,load_status,dt_load) VALUES('$srcKeyspaceName','$srcTableName',$tile,'SUCCESS',toTimestamp(now()),'${snapshotId.toString}','curr','','');" +
@@ -2786,7 +2814,7 @@ object GlueApp {
             for (tile <- totalTiles until currentNumTiles) {
               dropIcebergTileTable(sparkSession, srcKeyspaceName, srcTableName, tile)
               Try {
-                ledgerConnection.execute(
+                ledgerExecute(ledgerConnection,
                   s"DELETE FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' AND tbl='$srcTableName' AND tile=$tile"
                 )
               } match {
@@ -2847,13 +2875,14 @@ object GlueApp {
 
         // Data writes can run in parallel — each tile writes to its own independent table
         val tiles = (0 until totalTiles).toList.par
+        val failedTiles = new java.util.concurrent.ConcurrentLinkedQueue[Int]()
         tiles.foreach(tile => {
           try {
           logger.info(s"Processing tile $tile")
           val icebergTblName = icebergTableName(srcKeyspaceName, srcTableName, tile)
 
           // Check if replication has consumed the current snapshot for this tile
-          val currEntry = Option(ledgerConnection.execute(
+          val currEntry = Option(ledgerExecute(ledgerConnection,
             s"SELECT load_status FROM $internalMigrationKeyspace.$internalMigrationTable WHERE ks='$srcKeyspaceName' and tbl='$srcTableName' and tile=$tile and ver='curr'"
           ).one())
           val currLoadStatus = currEntry.map(r => Option(r.getString("load_status")).getOrElse("")).getOrElse("")
@@ -2876,13 +2905,27 @@ object GlueApp {
             putStats(landingZone.replaceAll("s3://", ""), s"$srcKeyspaceName/$srcTableName/stats/discovery/$tile", "count.json", content)
           }
           } catch {
+            // One tile's failure must not abort the other tiles or kill the
+            // job: the ledger was not advanced for this tile, so the next
+            // discovery cycle picks it up again.
             case e: Throwable =>
               val sw = new java.io.StringWriter()
               e.printStackTrace(new java.io.PrintWriter(sw))
               logger.error(s"Tile $tile failed during discovery: ${e.getClass.getName}: ${e.getMessage}\n$sw")
-              throw new RuntimeException(s"Tile $tile failed during discovery: ${e.getMessage}", e)
+              failedTiles.add(tile)
           }
         })
+        if (!failedTiles.isEmpty) {
+          val failed = failedTiles.asScala.toList.sorted.mkString(", ")
+          if (workloadType.equals("batch")) {
+            // A batch run ends after this pass, so a skipped tile would be
+            // silently incomplete: fail the run.
+            throw new RuntimeException(s"Discovery failed for tile(s) $failed")
+          } else {
+            logger.warn(s"Discovery failed for tile(s) $failed in this cycle; " +
+              s"the ledger was not advanced for them, so the next cycle retries them")
+          }
+        }
       } finally {
         ledgerConnection.close()
       }

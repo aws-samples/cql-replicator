@@ -12,7 +12,7 @@ import com.amazonaws.services.s3.model.{GetObjectRequest, ListObjectsV2Request}
 import com.amazonaws.services.s3.{AmazonS3, AmazonS3ClientBuilder}
 import com.amazonaws.{AmazonServiceException, ClientConfiguration, SdkClientException}
 import com.datastax.oss.driver.api.core.`type`.{DataType, DataTypes}
-import com.datastax.oss.driver.api.core.config.DriverConfigLoader
+import com.datastax.oss.driver.api.core.config.{DriverConfigLoader, DriverOption}
 import com.datastax.oss.driver.api.core.cql.{BatchStatement, BatchStatementBuilder, DefaultBatchType, SimpleStatement}
 import com.datastax.oss.driver.api.core.metadata.schema.TableMetadata
 import com.datastax.oss.driver.api.core.servererrors._
@@ -46,6 +46,9 @@ import scala.util.hashing.MurmurHash3
 import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try}
 import net.jpountz.xxhash.{XXHashFactory, XXHash64}
+// Cross-account Keyspaces auth. Defined in a scoped `package` block further down
+// this file, because the driver cannot reflectively load a default-package class.
+import com.amazon.cqlreplicator.{CrossAccountSigV4AuthProvider => CrossAccountAuth}
 
 class LargeObjectException(s: String) extends RuntimeException(s)
 
@@ -162,6 +165,238 @@ object CqlIdentifiers {
     val folded = internal.toLowerCase.replaceAll("[^a-z0-9_]", "_")
     if (folded == internal) folded
     else s"${folded}_${Integer.toHexString(internal.hashCode)}"
+  }
+}
+
+
+// =====================================================================
+// Cross-account authentication for an Amazon Keyspaces SOURCE.
+//
+// `aws-sigv4-auth-cassandra-java-driver-plugin` 4.0.9 -- the version pinned by
+// glue/bin/cqlreplicator -- reads exactly ONE driver option
+// (`advanced.auth-provider.aws-region`) and SILENTLY IGNORES `aws-role-arn`.
+// There is no newer release to upgrade to. So replicating from a Keyspaces
+// table in another account requires a provider that reads the role ARN itself
+// and hands assumed-role credentials to 4.0.9's
+// (AwsCredentialsProvider, String) constructor.
+//
+// Referenced from the driver conf, NOT wired in code:
+//
+//   advanced.auth-provider {
+//     class        = com.amazon.cqlreplicator.CrossAccountSigV4AuthProvider
+//     aws-region   = us-east-1
+//     aws-role-arn = "arn:aws:iam::<source-account>:role/<source-read-role>"
+//   }
+//
+// Going through the conf is what makes this work on BOTH read paths: the
+// direct CqlSession sessions and the spark-cassandra-connector, which builds
+// its own sessions via CassandraConnectionFactory and would ignore any
+// CqlSessionBuilder.withAuthProvider call.
+//
+// The class name MUST be fully qualified. The driver's Reflection.resolveClass
+// resolves an unqualified name ONLY against its own package
+// (com.datastax.oss.driver.internal.core.auth) and never tries the bare name,
+// so a provider in the default package -- where every other top-level class in
+// this file lives -- could never load. Hence the scoped `package` block, which
+// leaves GlueApp (and `--class GlueApp`) exactly where it is.
+//
+// BACKWARD COMPATIBILITY: with no `aws-role-arn` this is behaviourally
+// identical to SigV4AuthProvider and never touches STS at all, so it is safe
+// to name in any conf, including a same-account KeyspacesConnector.conf.
+// Migrations from self-managed Cassandra are unaffected: they keep using
+// CassandraConnector.conf as-is and never load this class.
+//
+// Verified on the real Glue 5.0 runtime (see glue/sbin/keyspaces/smoke/):
+// reflective load, the full STS closure, and a genuine cross-account
+// AssumeRole whose credentials STS confirms belong to the target account.
+// =====================================================================
+package com.amazon.cqlreplicator {
+
+  import com.datastax.oss.driver.api.core.auth.{AuthProvider, Authenticator}
+  import com.datastax.oss.driver.api.core.config.DriverOption
+  import com.datastax.oss.driver.api.core.context.DriverContext
+  import com.datastax.oss.driver.api.core.metadata.EndPoint
+  import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider
+  import software.aws.mcs.auth.SigV4AuthProvider
+
+  import scala.util.Try
+
+  /**
+   * Raised when cross-account auth is configured but unusable.
+   *
+   * Deliberately declared here rather than reusing this file's
+   * PreFlightCheckException: classes in the DEFAULT package are not accessible
+   * from a named package, so the existing exception types cannot be referenced
+   * from inside this block.
+   */
+  class CrossAccountAuthException(message: String) extends RuntimeException(message)
+
+  /**
+   * Delegating AuthProvider that adds cross-account role assumption to the
+   * sigv4 plugin 4.0.9.
+   *
+   * Refresh needs no bespoke logic: SigV4Authenticator.initialResponse() calls
+   * resolveCredentials() per authentication rather than once at construction,
+   * so a background-refreshing STS provider covers multi-hour runs and
+   * reconnects pick up rotated credentials.
+   *
+   * Serialization is a non-issue for the same reason the conf indirection is
+   * used: neither StsClient nor the credentials provider is serializable, but
+   * the driver constructs this class itself in whichever JVM loads the profile,
+   * so the executor-side per-partition sessions get their own instance and no
+   * Spark closure ever captures one.
+   */
+  class CrossAccountSigV4AuthProvider(context: DriverContext) extends AuthProvider {
+
+    private val profile = context.getConfig.getDefaultProfile
+
+    /**
+     * DriverExecutionProfile is keyed by DriverOption, not by raw String, so
+     * each path is wrapped in a tiny anonymous option -- the same technique the
+     * 4.0.9 plugin uses for its own `aws-region`.
+     */
+    private def opt(path: String): DriverOption = new DriverOption {
+      override def getPath: String = path
+    }
+
+    private val RegionOption = opt("advanced.auth-provider.aws-region")
+    private val RoleArnOption = opt("advanced.auth-provider.aws-role-arn")
+
+    private val region: String =
+      if (profile.isDefined(RegionOption)) profile.getString(RegionOption) else ""
+
+    private val roleArn: String =
+      if (profile.isDefined(RoleArnOption)) profile.getString(RoleArnOption).trim else ""
+
+    /**
+     * GATE: with no role ARN, STS is never referenced and its classes are
+     * never loaded. This is what keeps same-account and Cassandra-source
+     * deployments working on any Glue image, whether or not it bundles the AWS
+     * SDK v2 `sts` module.
+     */
+    private val delegate: SigV4AuthProvider =
+      if (roleArn.isEmpty) {
+        if (region.isEmpty) new SigV4AuthProvider() else new SigV4AuthProvider(region)
+      } else {
+        new SigV4AuthProvider(
+          CrossAccountSigV4AuthProvider.assumeRoleCredentials(roleArn, region), region)
+      }
+
+    override def newAuthenticator(endPoint: EndPoint, serverAuthenticator: String): Authenticator =
+      delegate.newAuthenticator(endPoint, serverAuthenticator)
+
+    override def onMissingChallenge(endPoint: EndPoint): Unit =
+      delegate.onMissingChallenge(endPoint)
+
+    override def close(): Unit = delegate.close()
+  }
+
+  object CrossAccountSigV4AuthProvider {
+
+    val ProviderFqn = "com.amazon.cqlreplicator.CrossAccountSigV4AuthProvider"
+    val StockProviderFqn = "software.aws.mcs.auth.SigV4AuthProvider"
+
+    private val StsClientClass = "software.amazon.awssdk.services.sts.StsClient"
+    private val AssumeRoleRequestClass = "software.amazon.awssdk.services.sts.model.AssumeRoleRequest"
+    private val StsProviderClass =
+      "software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider"
+
+    /** True when the AWS SDK v2 STS module is usable on this classpath. */
+    def stsAvailable: Boolean = Try(Class.forName(StsClientClass)).isSuccess
+
+    /**
+     * Background-refreshing assumed-role credentials.
+     *
+     * ---------------------------------------------------------------------
+     * WHY REFLECTION.
+     *
+     * A STATIC reference to StsClient would make this whole file
+     * uncompilable on any Glue image that does not bundle the AWS SDK v2
+     * `sts` module -- breaking every user of this script, including
+     * Cassandra-to-Keyspaces migrations that never enable cross-account auth.
+     * Glue 5.0 happens to ship a fat aws-sdk-java-bundle jar containing sts,
+     * but that is an image detail, not a contract.
+     *
+     * Reflection keeps sts a RUNTIME dependency of one code path, reached
+     * only when `aws-role-arn` is actually configured. The trade-off is that
+     * these calls are not type-checked, so the reflective surface is kept
+     * deliberately small and is exercised end-to-end by the probe under
+     * glue/sbin/keyspaces/smoke/ against a real Glue runtime.
+     * ---------------------------------------------------------------------
+     */
+    def assumeRoleCredentials(roleArn: String, region: String): AwsCredentialsProvider = {
+      if (!stsAvailable) {
+        throw new CrossAccountAuthException(
+          s"advanced.auth-provider.aws-role-arn is set to '$roleArn', which requires the " +
+            s"AWS SDK v2 STS module ($StsClientClass), but it is not on the classpath of this " +
+            "Glue image. Either run on a Glue version that bundles the AWS SDK v2 " +
+            "(Glue 5.0 does), or remove aws-role-arn to authenticate with the job role's " +
+            "own credentials.")
+      }
+
+      val stsClient = newStsClient(region, credentials = None)
+
+      val reqBuilder = staticCall(AssumeRoleRequestClass, "builder")
+      invoke(reqBuilder, "roleArn", roleArn)
+      invoke(reqBuilder, "roleSessionName", "cqlreplicator")
+      invoke(reqBuilder, "durationSeconds", Integer.valueOf(3600))
+      val request = invoke(reqBuilder, "build")
+
+      val provBuilder = staticCall(StsProviderClass, "builder")
+      invoke(provBuilder, "stsClient", stsClient)
+      invoke(provBuilder, "refreshRequest", request)
+      // Refresh ahead of expiry, so no bespoke refresh loop is needed.
+      invoke(provBuilder, "asyncCredentialUpdateEnabled", java.lang.Boolean.TRUE)
+      invoke(provBuilder, "build").asInstanceOf[AwsCredentialsProvider]
+    }
+
+    /**
+     * An StsClient, optionally signing with the supplied credentials. Returned
+     * as AnyRef because StsClient cannot be named statically.
+     */
+    def newStsClient(region: String, credentials: Option[AwsCredentialsProvider]): AnyRef = {
+      val builder = staticCall(StsClientClass, "builder")
+      if (region.nonEmpty) {
+        val regionObj = Class.forName("software.amazon.awssdk.regions.Region")
+          .getMethod("of", classOf[String]).invoke(null, region)
+        invoke(builder, "region", regionObj)
+      }
+      credentials.foreach(c => invoke(builder, "credentialsProvider", c))
+      invoke(builder, "build")
+    }
+
+    /** Invoke a no-arg static factory (`builder()`) on a class named at runtime. */
+    private def staticCall(className: String, method: String): AnyRef =
+      Class.forName(className).getMethod(method).invoke(null)
+
+    /**
+     * Invoke `name` on `target`, resolving overloads by arity then by whether
+     * the parameter accepts the supplied argument. AWS SDK builders overload
+     * most setters with a Consumer<Builder> variant, so arity alone is
+     * ambiguous; primitives are matched via their wrapper because
+     * Class.isInstance is always false for a primitive class.
+     */
+    private def invoke(target: AnyRef, name: String, args: AnyRef*): AnyRef = {
+      val candidates = target.getClass.getMethods
+        .filter(m => m.getName == name && m.getParameterCount == args.size)
+      val chosen = candidates
+        .find(m => m.getParameterTypes.zip(args).forall { case (p, a) => accepts(p, a) })
+        .orElse(candidates.headOption)
+        .getOrElse(throw new NoSuchMethodException(
+          s"${target.getClass.getName}.$name/${args.size}"))
+      chosen.setAccessible(true)
+      chosen.invoke(target, args: _*)
+    }
+
+    private def accepts(param: Class[_], arg: AnyRef): Boolean =
+      if (arg == null) !param.isPrimitive
+      else if (!param.isPrimitive) param.isInstance(arg)
+      else param.getName match {
+        case "boolean" => arg.isInstanceOf[java.lang.Boolean]
+        case "int" => arg.isInstanceOf[java.lang.Integer]
+        case "long" => arg.isInstanceOf[java.lang.Long]
+        case _ => false
+      }
   }
 }
 
@@ -485,6 +720,78 @@ object GlueApp {
       connection
     }
 
+    /**
+     * Warns about auth-provider settings the driver would accept but silently
+     * not honour.
+     *
+     * The motivating case: `aws-role-arn` set while `class` is still the stock
+     * software.aws.mcs.auth.SigV4AuthProvider. Plugin 4.0.9 reads only
+     * `aws-region`, so the role ARN is ignored WITHOUT any error and the job
+     * authenticates as the Glue job role -- succeeding against a same-account
+     * table and failing confusingly against a cross-account one.
+     *
+     * Read through the driver's own config loader rather than by scanning the
+     * text. HOCON retains settings the driver has no DriverOption for -- which
+     * is how the provider itself reads `aws-role-arn` -- so a typed lookup sees
+     * everything a regex would, and unlike a regex it is scoped to the
+     * auth-provider section. That matters: the shipped CassandraConnector.conf
+     * sets an unqualified `class = ExponentialReconnectionPolicy` under
+     * advanced.reconnection-policy, which a whole-file scan for `class =` would
+     * misread as an auth-provider misconfiguration.
+     *
+     * Warn-only -- a parse failure must never block a replication run.
+     */
+    def checkAuthProviderConfig(connectionConfName: String, bucketName: String,
+                                s3client: AmazonS3, logger: GlueLogger): Unit = Try {
+      val conf = s3client.getObjectAsString(bucketName, s"artifacts/$connectionConfName")
+      val profile = DriverConfigLoader.fromString(conf).getInitialConfig.getDefaultProfile
+
+      def opt(path: String): DriverOption = new DriverOption {
+        override def getPath: String = path
+      }
+      def readString(path: String): String = {
+        val o = opt(path)
+        if (profile.isDefined(o)) profile.getString(o).trim else ""
+      }
+
+      val roleArn = readString("advanced.auth-provider.aws-role-arn")
+      val hasRoleArn = roleArn.nonEmpty
+      val providerClass = readString("advanced.auth-provider.class")
+
+      if (hasRoleArn && providerClass == CrossAccountAuth.StockProviderFqn) {
+        logger.warn(
+          s"$connectionConfName sets advanced.auth-provider.aws-role-arn but class is " +
+            s"${CrossAccountAuth.StockProviderFqn}, which IGNORES it (plugin 4.0.9 reads only " +
+            s"aws-region). The connection will authenticate as this Glue job's own role, NOT the " +
+            s"role in aws-role-arn. For cross-account access set class = ${CrossAccountAuth.ProviderFqn}.")
+      }
+
+      if (hasRoleArn && providerClass == CrossAccountAuth.ProviderFqn && !CrossAccountAuth.stsAvailable) {
+        logger.warn(
+          s"$connectionConfName requests cross-account auth but the AWS SDK v2 STS module is not " +
+            s"on the classpath of this Glue image; opening the connection will fail. Use Glue 5.0 " +
+            s"or remove aws-role-arn.")
+      }
+
+      // An unqualified name resolves ONLY against the driver's own auth package
+      // (com.datastax.oss.driver.internal.core.auth); the bare name is never
+      // tried. Short names of the driver's built-in providers are therefore
+      // legitimate, so only flag one that package does not contain.
+      val driverAuthPackage = "com.datastax.oss.driver.internal.core.auth"
+      if (providerClass.nonEmpty && !providerClass.contains(".") &&
+        Try(Class.forName(s"$driverAuthPackage.$providerClass")).isFailure) {
+        logger.warn(
+          s"$connectionConfName sets advanced.auth-provider.class = '$providerClass', which is not " +
+            s"fully qualified and is not a built-in driver provider. Unqualified names are resolved " +
+            s"only against $driverAuthPackage, so this will fail to load. Use a fully-qualified " +
+            s"class name -- e.g. ${CrossAccountAuth.ProviderFqn} for cross-account access.")
+      }
+    } match {
+      case Failure(t) =>
+        logger.info(s"Could not inspect auth-provider settings in $connectionConfName: ${t.getMessage}")
+      case Success(_) => ()
+    }
+
     // The column arguments are quoted where required: inside CQL statement text
     // a case-sensitive name must appear as writetime("MyCol"). Note this differs
     // from the JSON key the server returns, where the whole pseudo-column is
@@ -739,6 +1046,12 @@ object GlueApp {
     //AmazonS3Client to check if a stop request was issued
     val s3ClientConf = new ClientConfiguration().withRetryPolicy(RetryPolicy.builder().withMaxErrorRetry(5).build())
     val s3client = AmazonS3ClientBuilder.standard().withClientConfiguration(s3ClientConf).build()
+
+    // Inspected BEFORE the connections are opened: an ignored aws-role-arn is
+    // what makes a cross-account misconfiguration fail, so the warning has to be
+    // in the log ahead of the failure it explains.
+    checkAuthProviderConfig("CassandraConnector.conf", bcktName, s3client, logger)
+    checkAuthProviderConfig("KeyspacesConnector.conf", bcktName, s3client, logger)
 
     val internalConnectionToSource = getDBConnection("CassandraConnector.conf", bcktName, s3client)
     val internalConnectionToTarget = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)

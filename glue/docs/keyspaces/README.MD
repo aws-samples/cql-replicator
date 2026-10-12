@@ -1,5 +1,11 @@
 # Replicate workload to Amazon Keyspaces
 
+This guide covers replicating from an Apache Cassandra cluster into Amazon
+Keyspaces. If your **source** is an Amazon Keyspaces table in a *different* AWS
+account, see [cross-account-replication.md](cross-account-replication.md)
+instead — that topology needs a different source connection configuration and
+has its own limitations.
+
 ## Prepare the configuration files
 In order to connect to Amazon Keyspaces and the Cassandra cluster you need configure reference 
 configuration files `../glue/conf/CassandraConnector.conf` and `../glue/conf/KeyspacesConnector.conf` 

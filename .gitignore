@@ -19,3 +19,11 @@ gradle-app.setting
 # Cache of project
 .gradletasknamecache
 /.kiro/
+# scala-cli / BSP build output
+.scala-build/
+.bsp/
+# Local scratch: throwaway smoke scripts, backups, local bucket pointer
+.tmp_*
+.tmp-*
+*.bak
+working_bucket.dat

@@ -1732,8 +1732,10 @@ object GlueApp {
       val shaped =
         if (jsonMapping4s.keyspaces.writeConfiguration.preShuffleBeforeWrite) shuffleDfV2(df)
         else df.coalesce(defaultPartitions)
-      val alreadyCached = shaped.storageLevel != StorageLevel.NONE
-      val cached = if (alreadyCached) shaped else shaped.persist(cachingMode)
+      // `shaped` is always a freshly derived DataFrame (repartition or
+      // coalesce), so its storage level is always NONE and it is never
+      // caller-cached: persist unconditionally and unpersist in the finally.
+      val cached = shaped.persist(cachingMode)
       val persistedCounter = sparkContext.longAccumulator(s"persisted_${op}_tile_$tile")
       // Tracks how many rows have already been flushed to the per-tile
       // replication stats object, so each onTaskEnd callback and the
@@ -1780,7 +1782,7 @@ object GlueApp {
         count
       } finally {
         sparkContext.removeSparkListener(statsListener)
-        if (!alreadyCached) cached.unpersist(blocking = false)
+        cached.unpersist(blocking = false)
       }
     }
 

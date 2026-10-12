@@ -170,6 +170,14 @@ function normalize_cql_identifier_list() {
   printf '%s' "$out"
 }
 
+# Bucket name from the S3 landing zone: strips the s3:// scheme and anything
+# from the first slash on. A fixed ${VAR:5} broke on a trailing slash or a
+# key prefix and produced an invalid --bucket value.
+function landing_zone_bucket() {
+  local b="${params[S3_LANDING_ZONE]#s3://}"
+  printf '%s' "${b%%/*}"
+}
+
 function max_value() {
   local rs=0
   if [[ $1 -gt $2 ]]; then
@@ -480,7 +488,7 @@ function Usage_Exit {
   echo "  --glue-iam-role, --gir ROLE      Set the Glue IAM role"
   echo "  --availability-zone, --az ZONE   Set the availability zone"
   echo "  --target-az, --taz ZONE          Set the target availability zone"
-  echo "  --target-type, --ttp TYPE        Set the target type"
+  echo "  --target-type, --ttp TYPE        Set the target type (keyspaces, dynamodb, parquet)"
   echo "  --json-mapping, --jm JSON        Set the JSON mapping configuration"
   echo "  --start-replication-from, --srf TIME  Set the replication start time"
   echo "  --override-rows-per-worker, --orw NUMBER  Override rows per worker"
@@ -745,12 +753,8 @@ function Init {
   ARTIFACTS_BASE=("/com/datastax/spark/spark-cassandra-connector-assembly_2.12/3.5.1/spark-cassandra-connector-assembly_2.12-3.5.1.jar"
   "/software/aws/mcs/aws-sigv4-auth-cassandra-java-driver-plugin/4.0.9/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   ARTIFACTS_KEYSPACES=("/io/vavr/vavr/0.10.4/vavr-0.10.4.jar" "/io/github/resilience4j/resilience4j-retry/1.7.1/resilience4j-retry-1.7.1.jar" "/io/github/resilience4j/resilience4j-core/1.7.1/resilience4j-core-1.7.1.jar")
-  ARTIFACTS_MEMORYDB=("/redis/clients/jedis/4.4.6/jedis-4.4.6.jar")
-  ARTIFACTS_OSS=("/org/opensearch/client/opensearch-spark-30_2.12/1.0.1/opensearch-spark-30_2.12-1.0.1.jar" "/org/opensearch/driver/opensearch-sql-jdbc/1.4.0.1/opensearch-sql-jdbc-1.4.0.1.jar")
   S3_PATH_BASE=("${params[S3_LANDING_ZONE]}/artifacts/spark-cassandra-connector-assembly_2.12-3.5.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar")
   S3_PATH_KEYSPACES=("${params[S3_LANDING_ZONE]}/artifacts/vavr-0.10.4.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-retry-1.7.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/resilience4j-core-1.7.1.jar")
-  S3_PATH_MEMORYDB=("${params[S3_LANDING_ZONE]}/artifacts/jedis-4.4.6.jar")
-  S3_PATH_OSS=("${params[S3_LANDING_ZONE]}/artifacts/opensearch-spark-30_2.12-1.0.1.jar" "${params[S3_LANDING_ZONE]}/artifacts/opensearch-sql-jdbc-1.4.0.1.jar")
 
   uploader_jars "${ARTIFACTS_BASE[@]}"
   join_array "${S3_PATH_BASE[@]}"
@@ -773,33 +777,13 @@ function Init {
       check_security_group_self_referencing "$security_group_id"
   fi
 
-  if [[ ${params[TARGET_TYPE]} == "memorydb" ]]; then
-    uploader_jars "${ARTIFACTS_MEMORYDB[@]}"
-    S3_PATH_LIBS+=","
-    join_array "${S3_PATH_MEMORYDB[@]}"
-  fi
-
-  if [[ ${params[TARGET_TYPE]} == "opensearch" ]]; then
-    uploader_jars "${ARTIFACTS_OSS[@]}"
-    S3_PATH_LIBS+=","
-    join_array "${S3_PATH_OSS[@]}"
-  fi
-
   # Uploading the config files
   local path_to_conf
   local path_to_scala
   path_to_conf=$(ls -d "${params[BASE_FOLDER]}" | sed 's/bin/conf/g')
   path_to_scala=$(ls -d "${params[BASE_FOLDER]}" | sed 's/bin/sbin/g')"/${params[TARGET_TYPE]}"
 
-  if [[ ${params[TARGET_TYPE]} == "memorydb" ]]; then
-    uploader_helper "RedisConnector.conf" 0 1 5
-  fi
-
-  if [[ ${params[TARGET_TYPE]} == "opensearch" ]]; then
-    uploader_helper "OpenSearchConnector.conf" 0 1 5
-  fi
-
-  # KeyspacesConnector.conf is needed for ledger access (keyspaces, memorydb, opensearch targets)
+  # KeyspacesConnector.conf is needed for ledger access (keyspaces and parquet targets)
   # DynamoDB target uses a DynamoDB-based ledger — no Keyspaces connection needed
   if [[ ${params[TARGET_TYPE]} != "dynamodb" ]]; then
     uploader_helper "KeyspacesConnector.conf" 0 1 5
@@ -925,26 +909,6 @@ function Init {
            "AvailabilityZone":"'${params[AZ]}'"}
            }' --region "${params[AWS_REGION]}" --endpoint https://glue."${params[AWS_REGION]}".amazonaws.com --output json
 
-       if [[ ${params[TARGET_TYPE]} == "opensearch" || ${params[TARGET_TYPE]} == "memorydb" ]]; then
-         check_input "${params[TRG_SUBNET]}" "Error: subnet for ${params[TARGET_TYPE]} is empty, must be provided"
-         check_input "${params[TRG_SG]}" "Error: sg for ${params[TARGET_TYPE]} is empty, must be provided"
-         check_input "${params[TRG_AZ]}" "Error: az for ${params[TARGET_TYPE]} is empty, must be provided"
-         glue_conn_name_oss="cql-replicator-${params[TARGET_TYPE]}-integration"
-         glue_conn_name="$glue_conn_name${params[DEFAULT_ENV]},$glue_conn_name_oss"
-
-         aws glue create-connection --connection-input '{
-          "Name":"'$glue_conn_name_oss${params[DEFAULT_ENV]}'",
-          "Description":"CQLReplicator connection to '${params[TARGET_TYPE]}'",
-          "ConnectionType":"NETWORK",
-          "ConnectionProperties":{
-            "JDBC_ENFORCE_SSL": "false"
-          },
-          "PhysicalConnectionRequirements":{
-            "SubnetId":"'${params[TRG_SUBNET]}'",
-            "SecurityGroupIdList":['${params[TRG_SG]}'],
-            "AvailabilityZone":"'${params[TRG_AZ]}'"}
-          }' --region "${params[AWS_REGION]}" --endpoint https://glue."${params[AWS_REGION]}".amazonaws.com --output json
-       fi
        aws glue create-job \
            --name "${params[JOB_NAME]}${params[DEFAULT_ENV]}" \
            --role "${params[GLUE_IAM_ROLE]}" \
@@ -1403,23 +1367,23 @@ function validate_json() {
 }
 
 function Delete_Stop_Event_D {
-  aws s3api delete-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/discovery/stopRequested" --region "${params[AWS_REGION]}"
+  aws s3api delete-object --bucket "$(landing_zone_bucket)" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/discovery/stopRequested" --region "${params[AWS_REGION]}"
 }
 
 function Delete_Stop_Event_R {
-  aws s3api delete-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$1/stopRequested" --region "${params[AWS_REGION]}"
+  aws s3api delete-object --bucket "$(landing_zone_bucket)" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$1/stopRequested" --region "${params[AWS_REGION]}"
 }
 
 function Request_Stop {
   tile=0
   log_info "Requested a stop for the discovery job"
 
-  if aws s3api put-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/discovery/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
+  if aws s3api put-object --bucket "$(landing_zone_bucket)" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/discovery/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
   then
     while [ $tile -lt ${params[TILES]} ]
     do
       log_info "Requested a stop for the replication tile: $tile"
-      aws s3api put-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$tile/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
+      aws s3api put-object --bucket "$(landing_zone_bucket)" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$tile/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
       ((tile++))
     done
   fi
@@ -1428,7 +1392,7 @@ function Request_Stop {
 function Request_Single_Stop {
   tile=${params[TILE]}
   log_info "Requested a stop for the replication tile: $tile"
-  aws s3api put-object --bucket "${params[S3_LANDING_ZONE]:5}" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$tile/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
+  aws s3api put-object --bucket "$(landing_zone_bucket)" --key "${params[SOURCE_KS]}/${params[SOURCE_TBL]}/replication/$tile/stopRequested" --region "${params[AWS_REGION]}" >/dev/null
 }
 
 calculate_resources() {
@@ -1573,6 +1537,16 @@ while (( "$#" )); do
       shift 2
       ;;
     --target-type|--ttp)
+      # memorydb and opensearch were removed: their Glue scripts and/or
+      # connector confs are no longer in the repo, so init would fail midway
+      # and leave half-provisioned resources. Reject the value up front.
+      case "$2" in
+        keyspaces|dynamodb|parquet) ;;
+        *)
+          log_error "--target-type=$2 is not supported; supported values: keyspaces, dynamodb, parquet"
+          exit 1
+          ;;
+      esac
       params[TARGET_TYPE]="$2"
       params[TARGET_TYPE_PROVIDED]=true
       shift 2
@@ -1849,8 +1823,14 @@ function Gather_Stats() {
    discovery_json=$(aws s3 cp "$stats_base/discovery/$tile/count.json" --region "${params[AWS_REGION]}" - 2>/dev/null)
    if [[ -n "$discovery_json" ]]; then
      local discovered
-     discovered=$(echo "$discovery_json" | jq '.primaryKeys // 0')
-     params[DISCOVERED_TOTAL]=$(( ${params[DISCOVERED_TOTAL]} + discovered ))
+     discovered=$(echo "$discovery_json" | jq '.primaryKeys // 0' 2>/dev/null)
+     # A present-but-malformed count.json leaves $discovered empty; the
+     # unguarded arithmetic then aborts with a bash syntax error.
+     if [[ "$discovered" =~ ^[0-9]+$ ]]; then
+       params[DISCOVERED_TOTAL]=$(( ${params[DISCOVERED_TOTAL]} + discovered ))
+     else
+       log_warn "malformed discovery count.json for tile $tile; skipping it in the totals"
+     fi
    fi
 
    # Fetch replication stats (single S3 call per tile)
@@ -1858,8 +1838,13 @@ function Gather_Stats() {
    replication_json=$(aws s3 cp "$stats_base/replication/$tile/count.json" --region "${params[AWS_REGION]}" - 2>/dev/null)
    if [[ -n "$replication_json" ]]; then
      local replicated
-     replicated=$(echo "$replication_json" | jq '.primaryKeys // 0')
-     params[REPLICATED_TOTAL]=$(( ${params[REPLICATED_TOTAL]} + replicated ))
+     replicated=$(echo "$replication_json" | jq '.primaryKeys // 0' 2>/dev/null)
+     if [[ "$replicated" =~ ^[0-9]+$ ]]; then
+       params[REPLICATED_TOTAL]=$(( ${params[REPLICATED_TOTAL]} + replicated ))
+     else
+       log_warn "malformed replication count.json for tile $tile; skipping it in the totals"
+       return 0
+     fi
 
      if [[ ${params[REPLICATION_STATS_ENABLED]} == true ]]; then
        local inserted updated deleted timestamp
@@ -1944,12 +1929,12 @@ if [[ ${params[STATE]} == reconcile-keys ]]; then
     done
     if (( ${#cleanup_missing[@]} > 0 )); then
       for flag in "${cleanup_missing[@]}"; do
-        log_error "$flag"
+        log_error "the required flag $flag is missing for the reconcile-keys --retention-days cleanup"
       done
       exit 1
     fi
 
-    cleanup_bucket="${params[S3_LANDING_ZONE]:5}"
+    cleanup_bucket="$(landing_zone_bucket)"
     cleanup_prefix="${params[SOURCE_KS]}/${params[SOURCE_TBL]}/reconciliation/"
     cleanup_region="${params[AWS_REGION]}"
     retention_days="${params[RETENTION_DAYS]}"
@@ -2080,7 +2065,7 @@ if [[ ${params[STATE]} == reconcile-keys ]]; then
 
   if (( ${#reconcile_missing[@]} > 0 )); then
     for flag in "${reconcile_missing[@]}"; do
-      log_error "$flag"
+      log_error "the required flag $flag is missing for the reconcile-keys subcommand"
     done
     exit 1
   fi
@@ -2091,7 +2076,7 @@ if [[ ${params[STATE]} == reconcile-keys ]]; then
   fi
 
   # only `keyspaces` is supported in this release. Any other
-  # value (dynamodb, memorydb, opensearch, parquet, etc.) is rejected
+  # value (dynamodb, parquet, etc.) is rejected
   # with a message that names the only supported value, so an operator
   # can quickly correct the invocation.
   if [[ "${params[TARGET_TYPE]}" != "keyspaces" ]]; then

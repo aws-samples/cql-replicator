@@ -42,6 +42,22 @@ class PreFlightCheckException(val message: String, val errorCode: Int, val cause
   override def toString: String = s"PreFlightCheckException($errorCode, $message)"
 }
 
+/**
+ * A phase failure that carries its own failure class and exit code.
+ *
+ * Thrown by the phase helpers (SourceScanner, TargetScanner, DiffEngine,
+ * ReportWriter) instead of calling sys.exit directly, so that runPhase stays
+ * the single place that logs the failure, writes the partial report, runs the
+ * snapshot cleanup, and exits. A sys.exit inside a helper bypassed that
+ * contract and made identical failures behave differently per layer.
+ */
+class ReconciliationPhaseException(
+    val failClass: String,
+    val exitCode: Int,
+    message: String,
+    cause: Throwable = null
+) extends RuntimeException(message, cause)
+
 class UnknownPKTransformRuleException(val rule: String)
   extends RuntimeException(
     s"Unknown PK_Transform rule '$rule'. Accepted rules (case-insensitive): " +
@@ -464,12 +480,13 @@ object SourceScanner {
           .select(projection.map(n => col(CqlIdentifiers.toSparkName(n))): _*)
       } catch {
         case NonFatal(t) =>
-          logger.error(
-            s"ERROR: SOURCE_SCAN_FAIL -- failed to establish the source session or " +
-              s"project the primary-key columns for $srcKs.$srcTbl: " +
-              s"${t.getClass.getName}: ${t.getMessage}"
+          throw new ReconciliationPhaseException(
+            "SOURCE_SCAN_FAIL",
+            PrimaryKeyReconciliation.SOURCE_SCAN_FAIL_EXIT_CODE,
+            s"failed to establish the source session or project the primary-key " +
+              s"columns for $srcKs.$srcTbl: ${t.getClass.getName}: ${t.getMessage}",
+            t
           )
-          sys.exit(PrimaryKeyReconciliation.SOURCE_SCAN_FAIL_EXIT_CODE)
       }
 
     val filteredDf: DataFrame =
@@ -482,12 +499,14 @@ object SourceScanner {
             f
           } catch {
             case NonFatal(t) =>
-              logger.error(
-                s"ERROR: FILTER_EXPR_FAIL -- Filter_Expression failed to parse or " +
-                  s"references a column outside Primary_Key_Columns ∪ Filter_Columns. " +
-                  s"expression='$expr': ${t.getClass.getName}: ${t.getMessage}"
+              throw new ReconciliationPhaseException(
+                "FILTER_EXPR_FAIL",
+                PrimaryKeyReconciliation.FILTER_EXPR_FAIL_EXIT_CODE,
+                s"Filter_Expression failed to parse or references a column outside " +
+                  s"Primary_Key_Columns ∪ Filter_Columns. expression='$expr': " +
+                  s"${t.getClass.getName}: ${t.getMessage}",
+                t
               )
-              sys.exit(PrimaryKeyReconciliation.FILTER_EXPR_FAIL_EXIT_CODE)
           }
       }
 
@@ -499,14 +518,20 @@ object SourceScanner {
       groupedDf.repartition(totalTiles, col("group"))
     } catch {
       case e: UnknownPKTransformRuleException =>
-        logger.error(s"ERROR: JSON_MAPPING_FAIL -- ${e.getMessage}")
-        sys.exit(PrimaryKeyReconciliation.JSON_MAPPING_FAIL_EXIT_CODE)
-      case NonFatal(t) =>
-        logger.error(
-          s"ERROR: SOURCE_SCAN_FAIL -- failed to build the source transform pipeline " +
-            s"for $srcKs.$srcTbl: ${t.getClass.getName}: ${t.getMessage}"
+        throw new ReconciliationPhaseException(
+          "JSON_MAPPING_FAIL",
+          PrimaryKeyReconciliation.JSON_MAPPING_FAIL_EXIT_CODE,
+          e.getMessage,
+          e
         )
-        sys.exit(PrimaryKeyReconciliation.SOURCE_SCAN_FAIL_EXIT_CODE)
+      case NonFatal(t) =>
+        throw new ReconciliationPhaseException(
+          "SOURCE_SCAN_FAIL",
+          PrimaryKeyReconciliation.SOURCE_SCAN_FAIL_EXIT_CODE,
+          s"failed to build the source transform pipeline for $srcKs.$srcTbl: " +
+            s"${t.getClass.getName}: ${t.getMessage}",
+          t
+        )
     }
   }
 }
@@ -556,12 +581,14 @@ object TargetScanner {
         )
       } catch {
         case NonFatal(t) =>
-          logger.error(
-            s"ERROR: THROTTLE_CONFIG_FAIL -- could not apply the target read-throttle " +
-              s"parameter '$ReadThrottleParam'=$maxTargetRcus to the SparkSession: " +
-              s"${t.getClass.getName}: ${t.getMessage}"
+          throw new ReconciliationPhaseException(
+            "THROTTLE_CONFIG_FAIL",
+            PrimaryKeyReconciliation.THROTTLE_CONFIG_FAIL_EXIT_CODE,
+            s"could not apply the target read-throttle parameter " +
+              s"'$ReadThrottleParam'=$maxTargetRcus to the SparkSession: " +
+              s"${t.getClass.getName}: ${t.getMessage}",
+            t
           )
-          sys.exit(PrimaryKeyReconciliation.THROTTLE_CONFIG_FAIL_EXIT_CODE)
       }
     } else {
       logger.info("TargetScanner: target throttling is disabled (MAX_TARGET_RCUS=0)")
@@ -592,23 +619,26 @@ object TargetScanner {
           .select(projection.map(n => col(CqlIdentifiers.toSparkName(n))): _*)
       } catch {
         case NonFatal(t) =>
-          logger.error(
-            s"ERROR: TARGET_SCAN_FAIL -- failed to establish the target session or " +
-              s"project the primary-key columns for $trgKs.$trgTbl: " +
-              s"${t.getClass.getName}: ${t.getMessage}"
+          throw new ReconciliationPhaseException(
+            "TARGET_SCAN_FAIL",
+            PrimaryKeyReconciliation.TARGET_SCAN_FAIL_EXIT_CODE,
+            s"failed to establish the target session or project the primary-key " +
+              s"columns for $trgKs.$trgTbl: ${t.getClass.getName}: ${t.getMessage}",
+            t
           )
-          sys.exit(PrimaryKeyReconciliation.TARGET_SCAN_FAIL_EXIT_CODE)
       }
 
     try {
       applyPipeline(readDf, targetPks, totalTiles)
     } catch {
       case NonFatal(t) =>
-        logger.error(
-          s"ERROR: TARGET_SCAN_FAIL -- failed to build the target tile pipeline " +
-            s"for $trgKs.$trgTbl: ${t.getClass.getName}: ${t.getMessage}"
+        throw new ReconciliationPhaseException(
+          "TARGET_SCAN_FAIL",
+          PrimaryKeyReconciliation.TARGET_SCAN_FAIL_EXIT_CODE,
+          s"failed to build the target tile pipeline for $trgKs.$trgTbl: " +
+            s"${t.getClass.getName}: ${t.getMessage}",
+          t
         )
-        sys.exit(PrimaryKeyReconciliation.TARGET_SCAN_FAIL_EXIT_CODE)
     }
   }
 }
@@ -644,15 +674,6 @@ object DiffEngine {
   ): DataFrame =
     leftDf
       .join(rightDf, joinKeys(effectivePkCols), "left_anti")
-      .dropDuplicates(effectivePkCols)
-
-  def intersectionDistinct(
-      srcDf: DataFrame,
-      trgDf: DataFrame,
-      effectivePkCols: Seq[String]
-  ): DataFrame =
-    srcDf
-      .join(trgDf, joinKeys(effectivePkCols), "inner")
       .dropDuplicates(effectivePkCols)
 
   def distinctCount(df: DataFrame): Long = df.distinct().count()
@@ -719,13 +740,15 @@ object DiffEngine {
       }
     }
 
-    logger.error(
-      s"ERROR: DIFF_WRITE_FAIL -- the diff Parquet write to $path failed after " +
-        s"$MaxDiffWriteAttempts attempt(s): ${lastError.getClass.getName}: " +
-        s"${lastError.getMessage}. No report.json is written for this run."
-    )
     cleanupDiffDir(path, logger)
-    sys.exit(PrimaryKeyReconciliation.DIFF_WRITE_FAIL_EXIT_CODE)
+    throw new ReconciliationPhaseException(
+      "DIFF_WRITE_FAIL",
+      PrimaryKeyReconciliation.DIFF_WRITE_FAIL_EXIT_CODE,
+      s"the diff Parquet write to $path failed after $MaxDiffWriteAttempts " +
+        s"attempt(s): ${lastError.getClass.getName}: ${lastError.getMessage}. " +
+        s"No report.json is written for this run.",
+      lastError
+    )
   }
 
   private def cleanupDiffDir(path: String, logger: GlueLogger): Unit = {
@@ -817,8 +840,10 @@ object DiffEngine {
         (None, None, None)
       }
 
-    val intersectionCount =
-      intersectionDistinct(srcSnapshotDf, trgSnapshotDf, effectivePkCols).count()
+    // Derived, not recomputed: |A ∩ B| = |A| - |A \ B| under the same
+    // distinct-set semantics, which saves one more full join over both
+    // snapshots per run.
+    val intersectionCount = sourceCount - sourceMinusTargetCount
 
     logger.info(
       s"DiffEngine: sourceMinusTargetCount=$sourceMinusTargetCount, " +
@@ -1005,13 +1030,13 @@ object ReportWriter {
       )
     } catch {
       case NonFatal(t) =>
-
-        logger.error(
-          s"ERROR: REPORT_WRITE_FAIL -- failed to serialize or PUT the " +
-            s"Report_Document to s3://$bucket/$reportKey: " +
-            s"${t.getClass.getName}: ${t.getMessage}"
+        throw new ReconciliationPhaseException(
+          "REPORT_WRITE_FAIL",
+          PrimaryKeyReconciliation.REPORT_WRITE_FAIL_EXIT_CODE,
+          s"failed to serialize or PUT the Report_Document to " +
+            s"s3://$bucket/$reportKey: ${t.getClass.getName}: ${t.getMessage}",
+          t
         )
-        sys.exit(PrimaryKeyReconciliation.REPORT_WRITE_FAIL_EXIT_CODE)
     }
   }
 }
@@ -1114,6 +1139,10 @@ object PrimaryKeyReconciliation {
           }
         }
       } match {
+        // A specific preflight failure (missing table/keyspace, no connection)
+        // keeps its own code and message; wrapping it as -4 "connectivity
+        // issue" hid the real cause and the documented codes never surfaced.
+        case Failure(e: PreFlightCheckException) => throw e
         case Failure(r) => {
           val err = s"ERROR: Detected a connectivity issue. Check the conf file. Glue connection for the $dir, the job was aborted"
           logErrorAndExit(s"$err ${r.toString}", -4)
@@ -1358,9 +1387,15 @@ object PrimaryKeyReconciliation {
     "KeyspacesConnector.conf"
   )
 
-  val RequiredJarNames: Seq[String] = Seq(
-    "spark-cassandra-connector-assembly_2.12-3.5.1.jar",
-    "aws-sigv4-auth-cassandra-java-driver-plugin-4.0.9.jar"
+  /**
+   * Required jars are matched by prefix, not by exact versioned name: the
+   * versions are pinned in glue/bin/cqlreplicator (ARTIFACTS_BASE), and a
+   * second copy here silently broke the reconciliation bootstrap on every
+   * version bump in the shell.
+   */
+  val RequiredJarPrefixes: Seq[String] = Seq(
+    "spark-cassandra-connector-assembly_",
+    "aws-sigv4-auth-cassandra-java-driver-plugin-"
   )
 
   /** Resolved bootstrap context returned by [[bootstrap]]. */
@@ -1460,6 +1495,7 @@ object PrimaryKeyReconciliation {
       s3client: AmazonS3,
       bucketName: String,
       requiredNames: Seq[String],
+      requiredPrefixes: Seq[String],
       logger: GlueLogger
   ): Unit = {
     val missing = scala.collection.mutable.ArrayBuffer.empty[String]
@@ -1480,6 +1516,34 @@ object PrimaryKeyReconciliation {
               s"${t.getClass.getName}: ${t.getMessage}"
           )
           missing += name
+      }
+    }
+    requiredPrefixes.foreach { namePrefix =>
+      val keyPrefix = s"artifacts/$namePrefix"
+      val uri = s"s3://$bucketName/$keyPrefix*"
+      Try {
+        s3client
+          .listObjectsV2(
+            new ListObjectsV2Request()
+              .withBucketName(bucketName)
+              .withPrefix(keyPrefix)
+              .withMaxKeys(1)
+          )
+          .getObjectSummaries
+          .asScala
+          .nonEmpty
+      } match {
+        case Success(true) =>
+          ()
+        case Success(false) =>
+          logger.error(s"ERROR: no required artifact matching $uri was found")
+          missing += namePrefix
+        case Failure(t) =>
+          logger.error(
+            s"ERROR: could not list required artifacts under $uri: " +
+              s"${t.getClass.getName}: ${t.getMessage}"
+          )
+          missing += namePrefix
       }
     }
     if (missing.nonEmpty) {
@@ -1531,7 +1595,7 @@ object PrimaryKeyReconciliation {
         s"JSON_MAPPING=$jsonMappingSummary, JOB_RUN_ID=${parsed.jobRunId}"
     )
 
-    verifyArtifacts(s3client, bucketName, RequiredConfNames ++ RequiredJarNames, logger)
+    verifyArtifacts(s3client, bucketName, RequiredConfNames, RequiredJarPrefixes, logger)
     val prefix = computeReconciliationPrefix(
       bucketName = bucketName,
       sourceKs = parsed.sourceKs,
@@ -1592,11 +1656,15 @@ object PrimaryKeyReconciliation {
         preFlightCheck(conn, ks, tbl, side, logger)
       } catch {
         case e: PreFlightCheckException =>
+          // sys.exit(e.errorCode) exited with a negative code (shell sees
+          // 252..255), outside the documented exit-code table. The specific
+          // errorCode stays in this log line; the process exits with
+          // PREFLIGHT_FAIL_EXIT_CODE via runPhase("preflight").
           logger.error(
             s"ERROR: PREFLIGHT_FAIL on the $side side: keyspace=$ks, table=$tbl, " +
               s"errorCode=${e.errorCode}, detail=${e.message}"
           )
-          sys.exit(e.errorCode)
+          throw e
       }
     }
     runPreflight(SourceLabel, sourceConn, parsed.sourceKs, parsed.sourceTbl)
@@ -1726,22 +1794,25 @@ object PrimaryKeyReconciliation {
     digest.map("%02x".format(_)).mkString
   }
 
-  def cleanupSourceSnapshot(
+  /** Best-effort deletion of every object under `<prefix><subdir>`. */
+  def cleanupSnapshotPrefix(
       s3client: AmazonS3,
       prefix: ReconciliationPrefix,
+      subdir: String,
+      what: String,
       logger: GlueLogger
   ): Unit = {
-    val sourceKeyPrefix = s"${prefix.keyPrefix}source/"
+    val keyPrefix = s"${prefix.keyPrefix}$subdir"
     Try {
       var listing = s3client.listObjectsV2(
-        new ListObjectsV2Request().withBucketName(prefix.bucket).withPrefix(sourceKeyPrefix)
+        new ListObjectsV2Request().withBucketName(prefix.bucket).withPrefix(keyPrefix)
       )
       listing.getObjectSummaries.asScala.foreach(obj => s3client.deleteObject(prefix.bucket, obj.getKey))
       while (listing.isTruncated) {
         listing = s3client.listObjectsV2(
           new ListObjectsV2Request()
             .withBucketName(prefix.bucket)
-            .withPrefix(sourceKeyPrefix)
+            .withPrefix(keyPrefix)
             .withContinuationToken(listing.getNextContinuationToken)
         )
         listing.getObjectSummaries.asScala.foreach(obj => s3client.deleteObject(prefix.bucket, obj.getKey))
@@ -1749,16 +1820,23 @@ object PrimaryKeyReconciliation {
     } match {
       case Success(_) =>
         logger.info(
-          s"Removed any partial Source_Snapshot under s3://${prefix.bucket}/$sourceKeyPrefix"
+          s"Removed $what under s3://${prefix.bucket}/$keyPrefix"
         )
       case Failure(t) =>
         logger.warn(
-          s"WARN: best-effort cleanup of partial Source_Snapshot under " +
-            s"s3://${prefix.bucket}/$sourceKeyPrefix failed: " +
+          s"WARN: best-effort cleanup of $what under " +
+            s"s3://${prefix.bucket}/$keyPrefix failed: " +
             s"${t.getClass.getName}: ${t.getMessage}"
         )
     }
   }
+
+  def cleanupSourceSnapshot(
+      s3client: AmazonS3,
+      prefix: ReconciliationPrefix,
+      logger: GlueLogger
+  ): Unit =
+    cleanupSnapshotPrefix(s3client, prefix, "source/", "any partial Source_Snapshot", logger)
 
   def writePartialReport(
       parsed: ResolvedArgs,
@@ -1862,9 +1940,24 @@ object PrimaryKeyReconciliation {
       runStartedAt: Instant,
       logger: GlueLogger
   )(thunk: => T): T = {
+    def safeWritePartialReport(t: Throwable): Unit =
+      Try(maybeWritePartialReport(phase, parsed, bootstrapped, preflighted, runStartedAt, t, logger)) match {
+        case Failure(pt) =>
+          logger.warn(
+            s"WARN: failed to write the partial report for the $phase phase: " +
+              s"${pt.getClass.getName}: ${pt.getMessage}"
+          )
+        case Success(_) => ()
+      }
+
     try {
       thunk
     } catch {
+      // A helper already classified this failure; keep its class and code.
+      case e: ReconciliationPhaseException =>
+        logger.error(s"ERROR: ${e.failClass} -- ${e.getMessage}")
+        safeWritePartialReport(e)
+        sys.exit(e.exitCode)
       case NonFatal(t) =>
         val (failClass, detail) = phase match {
           case "preflight" =>
@@ -1889,7 +1982,7 @@ object PrimaryKeyReconciliation {
         logger.error(
           s"ERROR: $failClass -- $detail: ${t.getClass.getName}: ${t.getMessage}"
         )
-        maybeWritePartialReport(phase, parsed, bootstrapped, preflighted, runStartedAt, t, logger)
+        safeWritePartialReport(t)
         sys.exit(phaseExitCode(phase))
     }
   }
@@ -2040,6 +2133,16 @@ object PrimaryKeyReconciliation {
     runSourceScanPhase(parsed, bootstrapped, preflighted, runStartedAt, logger)
     runTargetScanPhase(parsed, bootstrapped, preflighted, runStartedAt, logger)
     runDiffAndReportPhase(parsed, bootstrapped, preflighted, runStartedAt, logger)
+
+    // KEEP_SNAPSHOTS=false removes the source/ and target/ Parquet snapshots
+    // once the report is written; the diff artifacts and report.json stay.
+    // Best-effort: a cleanup failure must not fail a completed run.
+    if (!parsed.keepSnapshots) {
+      cleanupSnapshotPrefix(
+        bootstrapped.s3client, bootstrapped.prefix, "source/", "the Source_Snapshot (KEEP_SNAPSHOTS=false)", logger)
+      cleanupSnapshotPrefix(
+        bootstrapped.s3client, bootstrapped.prefix, "target/", "the Target_Snapshot (KEEP_SNAPSHOTS=false)", logger)
+    }
 
     logger.info(
       s"PrimaryKeyReconciliation: run ${parsed.runId} completed successfully; " +

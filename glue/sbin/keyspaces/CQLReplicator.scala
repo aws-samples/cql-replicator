@@ -1900,13 +1900,22 @@ object GlueApp {
     /**
      * Writes primary keys to the per-tile Iceberg table.
      * Overwrites the entire table content for this tile.
+     *
+     * Deliberately a full overwrite rather than `overwritePartitions()`. The tile table always
+     * holds the complete current primary-key set for its tile, so replacing everything is the
+     * intended semantics — and Iceberg skips a dynamic-overwrite commit outright when no data
+     * files are produced (`SparkWrite.DynamicOverwrite.commit`: "Dynamic overwrite is empty,
+     * skipping commit"). That left the snapshot frozen once a tile's key set went empty, so
+     * `prev` and `curr` converged on the same snapshot id and the deletes that emptied the tile
+     * could never be computed. `OverwriteByFilter` has no such guard and commits a correct
+     * "all rows removed" snapshot.
      */
     def writeIcebergTileSnapshot(
       spark: SparkSession,
       tileDf: DataFrame,
       tableName: String
     ): Unit = {
-      tileDf.writeTo(tableName).overwritePartitions()
+      tileDf.writeTo(tableName).overwrite(lit(true))
     }
 
     /**

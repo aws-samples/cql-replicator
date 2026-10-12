@@ -116,8 +116,8 @@ YELLOW='\033[1;33m'
 CMD_PARAMS="$@"
 
 log_info() { echo -e "${LIGHT_GREEN}INFO [$(date -Iseconds)]${NC} $*"; }
-log_error() { echo -e "${RED}ERROR [$(date -Iseconds)]${NC} $*"; }
-log_warn() { echo -e "${YELLOW}WARN [$(date -Iseconds)]${NC} $*"; }
+log_error() { echo -e "${RED}ERROR [$(date -Iseconds)]${NC} $*" >&2; }
+log_warn() { echo -e "${YELLOW}WARN [$(date -Iseconds)]${NC} $*" >&2; }
 
 if [[ "${params[OS]}" == "Linux" || "${params[OS]}" == "Darwin" ]]; then
   log_info "OS: ${params[OS]}"
@@ -136,6 +136,38 @@ function check_input() {
       exit 1
   fi
   return 0
+}
+
+# Normalizes a CQL keyspace/table name to its internal (exact-case, unquoted) form.
+function normalize_cql_identifier() {
+  local raw=$1
+  if [[ ${#raw} -ge 2 && ${raw:0:1} == '"' && ${raw: -1} == '"' ]]; then
+    raw=${raw:1:${#raw}-2}
+  fi
+  # Reject characters that cannot be carried through the JSON arguments payload.
+  if [[ $raw == *'"'* || $raw == *\\* ]]; then
+    log_error "Error: unsupported character in CQL identifier '$raw' (double quotes and backslashes are not supported)"
+    exit 1
+  fi
+  printf '%s' "$raw"
+}
+
+# Normalizes a comma-separated list of CQL identifiers, e.g. --writetime-column
+# accepts '"Col1","Col2"'. Normalizing the list as a single identifier would
+# mangle it, so each element is normalized independently.
+function normalize_cql_identifier_list() {
+  local raw=$1
+  local out=""
+  local item
+  local IFS=','
+  for item in $raw; do
+    # Trim surrounding whitespace before stripping quotes.
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    item="$(normalize_cql_identifier "$item")" || exit 1
+    if [[ -z $out ]]; then out="$item"; else out="$out,$item"; fi
+  done
+  printf '%s' "$out"
 }
 
 function max_value() {
@@ -1465,27 +1497,27 @@ while (( "$#" )); do
       shift 1
       ;;
     --writetime-column|--wc)
-      params[WRITETIME_COLUMN]="$2"
+      params[WRITETIME_COLUMN]="$(normalize_cql_identifier_list "$2")" || exit 1
       shift 2
       ;;
     --ttl-column|--tc)
-      params[TTL_COLUMN]="$2"
+      params[TTL_COLUMN]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --src-keyspace|--sk)
-      params[SOURCE_KS]="$2"
+      params[SOURCE_KS]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --src-table|--st)
-      params[SOURCE_TBL]="$2"
+      params[SOURCE_TBL]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --trg-keyspace|--tk)
-      params[TARGET_KS]="$2"
+      params[TARGET_KS]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --trg-table|--tt)
-      params[TARGET_TBL]="$2"
+      params[TARGET_TBL]="$(normalize_cql_identifier "$2")" || exit 1
       shift 2
       ;;
     --inc-traffic|--it)

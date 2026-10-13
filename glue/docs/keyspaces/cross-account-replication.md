@@ -52,6 +52,14 @@ no extra flags are needed.
 Create a role in **account A** that account B's Glue job role can assume, with
 read-only access to the source table.
 
+> **Order matters.** The Glue job role in account B must already exist before
+> you run this step. IAM validates a role-ARN principal when it writes the
+> trust policy, and a reference to a role that does not exist fails with
+> `MalformedPolicyDocument: Invalid principal`. In a fresh account B, create
+> the Glue job role first (see [README.MD](README.MD)), then come back here.
+> IAM also pins the principal to the role's internal unique ID: if you delete
+> and recreate the Glue job role later, re-apply this trust policy.
+
 ```bash
 # Run these in account A.
 # B_ACCOUNT = the account CQLReplicator runs in

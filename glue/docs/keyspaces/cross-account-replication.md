@@ -10,6 +10,9 @@ reached over the VPC and the only AWS-authenticated endpoint is the target. Here
 so the source connection has to authenticate as a role it can only reach through
 `sts:AssumeRole`.
 
+> **Quickstart.** For a numbered, copy-paste deployment procedure across two
+> accounts, see [cross-account-quickstart.md](cross-account-quickstart.md).
+
 > **Scope.** This document covers Keyspaces → Keyspaces across accounts only. If
 > you are migrating from Apache Cassandra to Amazon Keyspaces, follow
 > [README.MD](README.MD) instead — none of the configuration below applies, and

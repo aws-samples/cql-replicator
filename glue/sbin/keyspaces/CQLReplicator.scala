@@ -212,10 +212,13 @@ object CqlIdentifiers {
 // =====================================================================
 package com.amazon.cqlreplicator {
 
+  import com.datastax.oss.driver.api.core.CqlSession
   import com.datastax.oss.driver.api.core.auth.{AuthProvider, Authenticator}
-  import com.datastax.oss.driver.api.core.config.DriverOption
+  import com.datastax.oss.driver.api.core.config.{DriverConfigLoader, DriverOption}
   import com.datastax.oss.driver.api.core.context.DriverContext
   import com.datastax.oss.driver.api.core.metadata.EndPoint
+  import com.datastax.spark.connector.cql.{CassandraConnectionFactory, CassandraConnectorConf, DefaultConnectionFactory, MultiplexingSchemaListener, ProfileFileBasedContactInfo}
+  import org.apache.spark.SparkEnv
   import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider
   import software.aws.mcs.auth.SigV4AuthProvider
 
@@ -295,6 +298,21 @@ package com.amazon.cqlreplicator {
 
     val ProviderFqn = "com.amazon.cqlreplicator.CrossAccountSigV4AuthProvider"
     val StockProviderFqn = "software.aws.mcs.auth.SigV4AuthProvider"
+
+    val ConnectionFactoryParam = "spark.cassandra.connection.factory"
+    val ConnectionFactoryFqn = "com.amazon.cqlreplicator.CrossAccountConnectionFactory"
+
+    /**
+     * The loader that holds this script's classes. Sessions must resolve
+     * advanced.auth-provider.class through it: without
+     * CqlSessionBuilder.withClassLoader the driver uses its own loader, which
+     * on Glue executors cannot see the script jar (Spark adds that jar per
+     * task, in a child loader). The provider then fails to load with
+     * "Can't find class com.amazon.cqlreplicator.CrossAccountSigV4AuthProvider",
+     * on executors only. This loader delegates to its parent, so the driver's
+     * own classes resolve exactly as before.
+     */
+    def classLoader: ClassLoader = classOf[CrossAccountSigV4AuthProvider].getClassLoader
 
     private val StsClientClass = "software.amazon.awssdk.services.sts.StsClient"
     private val AssumeRoleRequestClass = "software.amazon.awssdk.services.sts.model.AssumeRoleRequest"
@@ -397,6 +415,36 @@ package com.amazon.cqlreplicator {
         case "long" => arg.isInstanceOf[java.lang.Long]
         case _ => false
       }
+  }
+
+  /**
+   * spark-cassandra-connector session factory for a cross-account source.
+   *
+   * Identical to DefaultConnectionFactory for a profile-file conf, except that
+   * the session resolves configured class names through
+   * CrossAccountSigV4AuthProvider.classLoader (see there for why executors
+   * need it). Any other contact-info kind is delegated unchanged.
+   *
+   * Selected through spark.cassandra.connection.factory. The connector resolves
+   * the name on the Spark driver, where the script jar is visible, and ships
+   * this object to executors inside CassandraConnectorConf; Spark deserializes
+   * it with the task loader, which can see the script jar. getScanner is
+   * inherited: DefaultConnectionFactory overrides it only for DSE continuous
+   * paging, which Amazon Keyspaces does not support.
+   */
+  object CrossAccountConnectionFactory extends CassandraConnectionFactory {
+    override def createSession(conf: CassandraConnectorConf): CqlSession = conf.contactInfo match {
+      case ProfileFileBasedContactInfo(path) =>
+        val appName = Option(SparkEnv.get).map(_.conf.getAppId).getOrElse("NoAppID")
+        CqlSession.builder()
+          .withClassLoader(CrossAccountSigV4AuthProvider.classLoader)
+          .withConfigLoader(DriverConfigLoader.fromUrl(DefaultConnectionFactory.maybeGetLocalFile(path)))
+          .withApplicationName(s"Spark-Cassandra-Connector-$appName")
+          .withSchemaChangeListener(new MultiplexingSchemaListener())
+          .build()
+      case _ =>
+        DefaultConnectionFactory.createSession(conf)
+    }
   }
 }
 
@@ -715,7 +763,11 @@ object GlueApp {
 
     def getDBConnection(connectionConfName: String, bucketName: String, s3client: AmazonS3): CqlSession = {
       val connectorConf = s3client.getObjectAsString(bucketName, s"artifacts/$connectionConfName")
-      val connection = CqlSession.builder.withConfigLoader(DriverConfigLoader.fromString(connectorConf))
+      // Also opened per partition on executors, where the driver's own loader
+      // cannot see a provider class defined in this script.
+      val connection = CqlSession.builder
+        .withClassLoader(CrossAccountAuth.classLoader)
+        .withConfigLoader(DriverConfigLoader.fromString(connectorConf))
         .build()
       connection
     }
@@ -741,8 +793,9 @@ object GlueApp {
      *
      * Warn-only -- a parse failure must never block a replication run.
      */
+    /** Returns the configured advanced.auth-provider.class, or "" if unreadable. */
     def checkAuthProviderConfig(connectionConfName: String, bucketName: String,
-                                s3client: AmazonS3, logger: GlueLogger): Unit = Try {
+                                s3client: AmazonS3, logger: GlueLogger): String = Try {
       val conf = s3client.getObjectAsString(bucketName, s"artifacts/$connectionConfName")
       val profile = DriverConfigLoader.fromString(conf).getInitialConfig.getDefaultProfile
 
@@ -786,10 +839,12 @@ object GlueApp {
             s"only against $driverAuthPackage, so this will fail to load. Use a fully-qualified " +
             s"class name -- e.g. ${CrossAccountAuth.ProviderFqn} for cross-account access.")
       }
+      providerClass
     } match {
       case Failure(t) =>
         logger.info(s"Could not inspect auth-provider settings in $connectionConfName: ${t.getMessage}")
-      case Success(_) => ()
+        ""
+      case Success(providerClass) => providerClass
     }
 
     // The column arguments are quoted where required: inside CQL statement text
@@ -1050,8 +1105,16 @@ object GlueApp {
     // Inspected BEFORE the connections are opened: an ignored aws-role-arn is
     // what makes a cross-account misconfiguration fail, so the warning has to be
     // in the log ahead of the failure it explains.
-    checkAuthProviderConfig("CassandraConnector.conf", bcktName, s3client, logger)
+    val sourceAuthProvider = checkAuthProviderConfig("CassandraConnector.conf", bcktName, s3client, logger)
     checkAuthProviderConfig("KeyspacesConnector.conf", bcktName, s3client, logger)
+
+    // Only a cross-account source switches connector sessions to the factory
+    // that can load the provider on executors; other sources keep the default.
+    val crossAccountSource = sourceAuthProvider == CrossAccountAuth.ProviderFqn
+    if (crossAccountSource) {
+      sparkSession.conf.set(CrossAccountAuth.ConnectionFactoryParam, CrossAccountAuth.ConnectionFactoryFqn)
+      logger.info(s"Cross-account source: connector sessions use ${CrossAccountAuth.ConnectionFactoryFqn}")
+    }
 
     val internalConnectionToSource = getDBConnection("CassandraConnector.conf", bcktName, s3client)
     val internalConnectionToTarget = getDBConnection("KeyspacesConnector.conf", bcktName, s3client)
@@ -2573,11 +2636,12 @@ object GlueApp {
       logger.info(s"RDD select columns: ${rddSelectColumns.mkString(", ")}")
 
       // Configure Cassandra connector for RDD API
-      val cassandraConnector = CassandraConnector(
-        sparkContext.getConf
-          .set("spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
-          .set("spark.cassandra.input.consistency.level", jsonMapping4s.replication.readConfiguration.consistencyLevel)
-      )
+      val rddConf = sparkContext.getConf
+        .set("spark.cassandra.connection.config.profile.path", "CassandraConnector.conf")
+        .set("spark.cassandra.input.consistency.level", jsonMapping4s.replication.readConfiguration.consistencyLevel)
+      // getConf is a copy of the SparkConf and does not see session-level settings.
+      if (crossAccountSource) rddConf.set(CrossAccountAuth.ConnectionFactoryParam, CrossAccountAuth.ConnectionFactoryFqn)
+      val cassandraConnector = CassandraConnector(rddConf)
       
       val cassandraRDD = sparkContext.cassandraTable(srcKeyspaceName, srcTableForDiscovery)
         .withConnector(cassandraConnector)

@@ -550,7 +550,10 @@ validate_iam_role_permissions() {
         log_error "Error: Unable to find role $role_name"
         return 1
     fi
-    local keyspaces_actions=("cassandra:Insert" "cassandra:Update" "cassandra:Select" "cassandra:Delete")
+    # Amazon Keyspaces evaluates cassandra:Select/Modify/Create/Alter/Drop.
+    # Insert/Update/Delete are not real actions: simulating them gave a false
+    # ✅ for policies that cannot write (no cassandra:Modify).
+    local keyspaces_actions=("cassandra:Select" "cassandra:Modify" "cassandra:Create" "cassandra:Alter")
     local dynamodb_actions=("dynamodb:PutItem" "dynamodb:UpdateItem" "dynamodb:BatchWriteItem" "dynamodb:DeleteItem")
     local s3_actions=("s3:ListBucket" "s3:PutObject" "s3:DeleteObject" "s3:GetObject")
     local glue_catalog_actions=("glue:CreateDatabase" "glue:GetDatabase" "glue:CreateTable" "glue:GetTable" "glue:UpdateTable" "glue:DeleteTable" "glue:GetTables")

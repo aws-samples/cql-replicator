@@ -69,7 +69,7 @@ For a test account, a wide grant is acceptable:
 ```bash
 aws iam put-role-policy --role-name GlueKeyspacesRole --policy-name CQLReplicatorDataAccess \
   --policy-document '{"Version":"2012-10-17","Statement":[
-    {"Effect":"Allow","Action":["cassandra:Select","cassandra:Insert","cassandra:Update","cassandra:Delete","cassandra:Create","cassandra:Alter"],"Resource":"*"},
+    {"Effect":"Allow","Action":["cassandra:Select","cassandra:Modify","cassandra:Create","cassandra:Alter","cassandra:Drop"],"Resource":"*"},
     {"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket"],"Resource":"*"}]}'
 ```
 

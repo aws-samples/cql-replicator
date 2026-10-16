@@ -1,20 +1,19 @@
 # Cross-account replication: step-by-step deployment
 
 This procedure deploys CQLReplicator across two AWS accounts and replicates one
-Amazon Keyspaces table. It is written in Simplified Technical English. For the
-full background, read [cross-account-replication.md](cross-account-replication.md).
+Amazon Keyspaces table. For the full background, read [cross-account-replication.md](cross-account-replication.md).
 
 **Names used in this procedure.** Replace them with your values.
 
-| Item | Value |
-|---|---|
-| Source account (has the data) | `111111111111` |
-| Target account (runs CQLReplicator) | `222222222222` |
-| Region | `us-east-1` |
+| Item | Value                                        |
+|---|----------------------------------------------|
+| Source account (has the data) | `XXXXXXXXXXXX`                               |
+| Target account (runs CQLReplicator) | `YYYYYYYYYYYY`                               |
+| Region | `us-east-1`                                  |
 | Keyspace and table | `ks_test_cql_replicator.test_cql_replicator` |
-| Glue job role, in the target account | `GlueKeyspacesRole` |
-| Source-read role, in the source account | `CQLReplicatorSourceRole` |
-| Environment name | `cr2` |
+| Glue job role, in the target account | `GlueKeyspacesRole`                          |
+| Source-read role, in the source account | `CQLReplicatorSourceRole`                    |
+| Environment name | `dev`                                        |
 
 The tool runs in the **target** account. It reads from the source account
 through one IAM role. All steps say which account to use.
@@ -48,27 +47,6 @@ although all quotas show unused capacity.
 
 Do this test. The test needs a role that Glue can assume. If the account has no
 such role yet, do Step 2 first and use `GlueKeyspacesRole`.
-
-```bash
-PROBE_BUCKET=glue-probe-$RANDOM-$R
-echo 'print("ok")' > /tmp/noop.py
-aws s3 mb "s3://$PROBE_BUCKET" --region "$R"
-aws s3 cp /tmp/noop.py "s3://$PROBE_BUCKET/noop.py" --region "$R"
-aws glue create-job --name glue-probe --role GlueKeyspacesRole --glue-version "5.1" \
-  --worker-type G.1X --number-of-workers 2 \
-  --command "Name=glueetl,ScriptLocation=s3://$PROBE_BUCKET/noop.py,PythonVersion=3" \
-  --region "$R"
-aws glue start-job-run --job-name glue-probe --region "$R"
-```
-
-If the run does not start, resolve the account activation first. Make sure that
-the payment method is verified. If the error continues, open an AWS Support
-case. Do not continue before a probe run starts. Then remove the probe:
-
-```bash
-aws glue delete-job --job-name glue-probe --region "$R"
-aws s3 rb "s3://$PROBE_BUCKET" --force --region "$R"
-```
 
 ### Step 2. Create the Glue job role
 
@@ -109,7 +87,7 @@ bucket.
 
 ```bash
 aws iam put-role-policy --role-name GlueKeyspacesRole --policy-name AssumeCQLReplicatorSourceRole \
-  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"arn:aws:iam::111111111111:role/CQLReplicatorSourceRole"}]}'
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"arn:aws:iam::XXXXXXXXXXXX:role/CQLReplicatorSourceRole"}]}'
 ```
 
 Both trust directions are necessary. This grant alone is not sufficient; Phase 2
@@ -200,10 +178,10 @@ Do this step in the **source** account.
 
 ```bash
 aws iam create-role --role-name CQLReplicatorSourceRole --max-session-duration 3600 \
-  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::222222222222:role/GlueKeyspacesRole"},"Action":"sts:AssumeRole"}]}'
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::YYYYYYYYYYYY:role/GlueKeyspacesRole"},"Action":"sts:AssumeRole"}]}'
 
 aws iam put-role-policy --role-name CQLReplicatorSourceRole --policy-name KeyspacesSourceRead \
-  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["cassandra:Select"],"Resource":["arn:aws:cassandra:us-east-1:111111111111:/keyspace/ks_test_cql_replicator/table/test_cql_replicator","arn:aws:cassandra:us-east-1:111111111111:/keyspace/system*/table/*"]}]}'
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["cassandra:Select"],"Resource":["arn:aws:cassandra:us-east-1:XXXXXXXXXXXX:/keyspace/ks_test_cql_replicator/table/test_cql_replicator","arn:aws:cassandra:us-east-1:XXXXXXXXXXXX:/keyspace/system*/table/*"]}]}'
 ```
 
 Rules:
@@ -231,7 +209,7 @@ section 4). The key block:
 advanced.auth-provider = {
   class        = com.amazon.cqlreplicator.CrossAccountSigV4AuthProvider
   aws-region   = us-east-1
-  aws-role-arn = "arn:aws:iam::111111111111:role/CQLReplicatorSourceRole"
+  aws-role-arn = "arn:aws:iam::XXXXXXXXXXXXX:role/CQLReplicatorSourceRole"
 }
 ```
 
@@ -266,9 +244,9 @@ Notes:
 
 ```bash
 ./glue/sbin/keyspaces/smoke/run-cross-account-probe.sh \
-  --landing-zone s3://cql-replicator-222222222222-us-east-1-cr2 --region us-east-1 \
+  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-cr2 --region us-east-1 \
   --glue-iam-role GlueKeyspacesRole \
-  --role-arn arn:aws:iam::111111111111:role/CQLReplicatorSourceRole
+  --role-arn arn:aws:iam::XXXXXXXXXXXX:role/CQLReplicatorSourceRole
 ```
 
 The probe performs the `AssumeRole` and confirms that the identity belongs to
@@ -278,7 +256,7 @@ the source account. It opens no Keyspaces session.
 
 ```bash
 ./cqlreplicator --state run --max-wcu-traffic 20000 --tiles 4 \
-  --landing-zone s3://cql-replicator-222222222222-us-east-1-cr2 --region us-east-1 \
+  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-cr2 --region us-east-1 \
   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
   --env cr2 --target-type keyspaces
@@ -296,7 +274,7 @@ Rules:
 
 ```bash
 ./cqlreplicator --state stats \
-  --landing-zone s3://cql-replicator-222222222222-us-east-1-cr2 --region us-east-1 \
+  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-cr2 --region us-east-1 \
   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env cr2
 ```
 
@@ -322,7 +300,7 @@ Rules:
 
 ```bash
 ./cqlreplicator --state request-stop ...   # stop the jobs first
-./cqlreplicator --state cleanup --landing-zone s3://cql-replicator-222222222222-us-east-1-cr2 \
+./cqlreplicator --state cleanup --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-cr2 \
   --region us-east-1 --env cr2
 ```
 

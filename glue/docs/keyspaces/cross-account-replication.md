@@ -15,7 +15,7 @@ so the source connection has to authenticate as a role it can only reach through
 
 > **Scope.** This document covers Keyspaces → Keyspaces across accounts only. If
 > you are migrating from Apache Cassandra to Amazon Keyspaces, follow
-> [README.MD](README.MD) instead — none of the configuration below applies, and
+> [README.MD](README.MD) instead - none of the configuration below applies, and
 > you should leave `CassandraConnector.conf` as it is.
 
 ---
@@ -23,10 +23,6 @@ so the source connection has to authenticate as a role it can only reach through
 ## Deployment topology
 
 **CQLReplicator is deployed in the target account, B, and reads from A.**
-
-```
-  account A (source) ◀─────  CQLReplicatorSourceRole trusts B's Glue role  cassandra:Select─────account B (target)
-```
 
 Why the job belongs in B, not A:
 
@@ -39,11 +35,11 @@ Why the job belongs in B, not A:
 | Cost of a misconfigured role | A failed read | A partial write |
 
 Deploying in B puts the single cross-account hop on the *read* path and keeps
-everything that writes — target table, ledger, S3, Catalog — local. All
+everything that writes - target table, ledger, S3, Catalog - local. All
 `cqlreplicator` commands (`init`, `run`, `stats`, `cleanup`) are run in account
 B.
 
-The ledger lives in account B, which is the default once the deployment is in B —
+The ledger lives in account B, which is the default once the deployment is in B -
 no extra flags are needed.
 
 **Deploy in the source table's region.** A Glue job with a VPC connection reaches
@@ -107,7 +103,7 @@ EOF
 )"
 ```
 
-`cassandra:Select` is the only action the source connection needs — the read
+`cassandra:Select` is the only action the source connection needs - the read
 path never writes to A. Narrow `Resource` to the specific keyspace and table
 ARNs (`arn:aws:cassandra:<region>:<A>:/keyspace/<ks>/table/<tbl>`) plus
 `/keyspace/system*/table/*` for the driver's metadata reads.
@@ -189,7 +185,7 @@ at `WARN` level. For the full commands, see
 ### 4. Source connection: `glue/conf/CassandraConnector.conf`
 
 The source is now Amazon Keyspaces in account A, so this file must be rewritten
-from its shipped Cassandra defaults into a Keyspaces profile — TLS, the
+from its shipped Cassandra defaults into a Keyspaces profile - TLS, the
 Keyspaces endpoint, and the cross-account auth provider:
 
 ```hocon
@@ -233,7 +229,7 @@ Notes:
   in different regions, this differs from `KeyspacesConnector.conf`'s region and
   from `--region`.
 - `local-datacenter` must equal the source region.
-- Do not use `${AWS_DEFAULT_REGION}` here when A's region differs from B's — in
+- Do not use `${AWS_DEFAULT_REGION}` here when A's region differs from B's - in
   Glue that variable resolves to the region the *job* runs in.
 - `advanced.ssl-engine-factory` is required. The shipped Cassandra defaults have
   no TLS; Keyspaces will not accept a plaintext connection on 9142.
@@ -272,7 +268,7 @@ To change a conf file after `init`, edit it and re-upload, then start a new run:
 
 ## Usage
 
-The replication commands are unchanged — cross-account access is entirely a
+The replication commands are unchanged - cross-account access is entirely a
 property of the conf:
 
 ```shell
@@ -301,7 +297,7 @@ key set alone, but **updates require `--writetime-column`**:
                  --env dev --target-type keyspaces
 ```
 
-Read [Limitations](#limitations) first — `writetime()` behaves differently on a
+Read [Limitations](#limitations) first - `writetime()` behaves differently on a
 Keyspaces source than on Cassandra, and it constrains which columns are usable
 here.
 
@@ -361,7 +357,7 @@ second copy alongside the bundle risks a split-version `NoSuchMethodError`.
 
 On an image without that bundle, a conf with `aws-role-arn` fails at startup
 with an explicit message rather than a bare `ClassNotFoundException`. A conf
-*without* `aws-role-arn` is unaffected on any image — STS is never referenced.
+*without* `aws-role-arn` is unaffected on any image - STS is never referenced.
 
 ### `writetime()` on a Keyspaces source
 
@@ -378,7 +374,7 @@ are explicitly enabled. Consequences for a Keyspaces **source**:
 - If they **are** enabled, `writetime()` reflects the timestamp the client
   supplied. Rows written before the setting was turned on have no usable value,
   so early updates can be missed even after enabling it.
-- `writetime()` cannot be read for collection columns or primary-key columns —
+- `writetime()` cannot be read for collection columns or primary-key columns -
   on Keyspaces as on Cassandra. Pick a regularly-updated non-key scalar column.
 
 Verify the setting on the source table before planning on update capture (via
@@ -400,7 +396,7 @@ timestamps end to end needs the feature enabled on **both** sides.
 The spark-cassandra-connector sizes its token-range splits from
 `system.size_estimates`. Amazon Keyspaces populates that table differently from
 Cassandra, so the derived split count can be a poor fit for the real data
-distribution — usually manifesting as a few very long-running Spark tasks while
+distribution - usually manifesting as a few very long-running Spark tasks while
 most finish quickly.
 
 If you see that, override the split size through `--json-mapping`:
@@ -434,7 +430,7 @@ and every discovery pass and full scan reads through it. Before a large run:
 | | Status |
 |---|---|
 | Keyspaces source in account A → Keyspaces target in account B | Supported |
-| Cassandra source → Keyspaces target, same account | Supported — see [README.MD](README.MD); do not apply this document |
+| Cassandra source → Keyspaces target, same account | Supported - see [README.MD](README.MD); do not apply this document |
 | Cross-account **target** (job in A, writing to B) | Not supported. `KeyspacesConnector.conf` covers both the target and the ledger, so one role ARN cannot address a foreign target and a local ledger. |
 | `--target-type parquet` / `dynamodb` with a cross-account Keyspaces source | Not supported. The provider ships only in `glue/sbin/keyspaces/CQLReplicator.scala`. |
 | `--cmd reconcile-keys` against a cross-account source | Not yet. `PrimaryKeyReconciliation` is a separate Glue script that does not yet carry the provider, so a conf naming it by FQN will not load there. Reconciliation remains available for same-account sources. |
@@ -449,7 +445,7 @@ and every discovery pass and full scan reads through it. Before a large run:
 - **Session name is fixed** at `cqlreplicator`. If you scope CloudTrail alarms or
   IAM conditions on `sts:RoleSessionName`, use that value.
 - **The conf is read on every run**, so a role ARN change takes effect on the
-  next job start with no `init` needed — but the file must be re-uploaded to
+  next job start with no `init` needed - but the file must be re-uploaded to
   `s3://<landing-zone>/artifacts/`, since editing the local copy alone has no
   effect.
 - **Deleting the source role mid-run** does not fail immediately. Because

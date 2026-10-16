@@ -46,6 +46,12 @@ B.
 The ledger lives in account B, which is the default once the deployment is in B —
 no extra flags are needed.
 
+**Deploy in the source table's region.** A Glue job with a VPC connection reaches
+Keyspaces through an interface VPC endpoint, and that endpoint serves only its
+own region. Deploy B's Glue job, VPC endpoints, and target table in the region of
+the source table in A, unless the subnet has a NAT path. See
+[Network](#3-network-security-group-and-vpc-endpoints).
+
 ---
 
 ## Configuration
@@ -143,13 +149,44 @@ authorized to perform: sts:AssumeRole on resource:
 arn:aws:iam::<A>:role/CQLReplicatorSourceRole (Status Code: 403)
 ```
 
-The Glue job role in B also needs its usual target-side permissions —
-`cassandra:Select`, `cassandra:Insert`, `cassandra:Update`, `cassandra:Delete`,
-the S3 landing-zone actions, and the Glue Data Catalog actions listed in
-[README.MD](README.MD). `cqlreplicator init` reports these via
+The Glue job role in B also needs its usual target-side permissions:
+`cassandra:Select`, `cassandra:Modify`, `cassandra:Create`, and
+`cassandra:Alter` on the target keyspace, the `migration` keyspace (the ledger),
+and `system*`; the S3 landing-zone actions; and the Glue Data Catalog actions
+listed in [README.MD](README.MD). `cqlreplicator init` reports these via
 `iam:SimulatePrincipalPolicy`.
 
-### 3. Source connection: `glue/conf/CassandraConnector.conf`
+> Amazon Keyspaces has no `cassandra:Insert`, `cassandra:Update`, or
+> `cassandra:Delete` actions. All data writes are `cassandra:Modify`. A role
+> without it fails at the first ledger write with
+> `no cassandra:Modify permission on table ledger`.
+
+### 3. Network: security group and VPC endpoints
+
+The Glue job connects through a Glue network connection, so its network
+interfaces get no public IP address. Prepare the following in account B, in the
+source table's region, and pass `--region` on every `aws ec2` and `aws glue`
+command:
+
+- **A security group with a self-referencing inbound rule** (all traffic, source
+  is the security group itself). `init` checks for this rule.
+- **VPC endpoints:** an S3 gateway endpoint on the subnet's route table, and
+  interface endpoints with private DNS for `cassandra`, `sts`, `glue`,
+  `monitoring`, and `logs`. With private DNS, the one `cassandra` endpoint
+  serves both the cross-account source and the local target; authentication
+  stays SigV4.
+- **`ec2:DescribeNetworkInterfaces` and `ec2:DescribeVpcEndpoints`** on the Glue
+  job role, which Keyspaces needs for connections through a VPC endpoint.
+
+The interface endpoint for `cassandra` serves only its own region. If the source
+table is in another region, its hostname resolves to a public IP address, which
+the job cannot reach without a NAT path. The driver then retries the connection
+indefinitely (`advanced.reconnect-on-init = true`): the run stays in `RUNNING`,
+and the only evidence is `ConnectTimeoutException ... cassandra.<region>.amazonaws.com:9142`
+at `WARN` level. For the full commands, see
+[cross-account-quickstart.md](cross-account-quickstart.md), steps 5 and 6.
+
+### 4. Source connection: `glue/conf/CassandraConnector.conf`
 
 The source is now Amazon Keyspaces in account A, so this file must be rewritten
 from its shipped Cassandra defaults into a Keyspaces profile — TLS, the
@@ -201,14 +238,14 @@ Notes:
 - `advanced.ssl-engine-factory` is required. The shipped Cassandra defaults have
   no TLS; Keyspaces will not accept a plaintext connection on 9142.
 
-### 4. Target and ledger connection: `glue/conf/KeyspacesConnector.conf`
+### 5. Target and ledger connection: `glue/conf/KeyspacesConnector.conf`
 
 Leave this file as shipped. The target and the ledger are in account B, where
 the Glue job's own credentials already apply, so the stock
 `software.aws.mcs.auth.SigV4AuthProvider` with `aws-region = ${AWS_DEFAULT_REGION}`
 is correct. Do not add `aws-role-arn` here.
 
-### 5. Deploy
+### 6. Deploy
 
 Both files are uploaded to `s3://<landing-zone>/artifacts/` by `cqlreplicator
 init`, and are re-read on every job run. Run all commands in account B, exactly
@@ -279,8 +316,23 @@ misconfigurations that would otherwise fail confusingly. Search the Glue
 | Warning | Meaning |
 |---|---|
 | `sets advanced.auth-provider.aws-role-arn but class is software.aws.mcs.auth.SigV4AuthProvider, which IGNORES it` | The stock provider is still configured. The job is authenticating as B's Glue role, not the role in A. |
-| `requests cross-account auth but the AWS SDK v2 STS module is not on the classpath` | The Glue image does not bundle the AWS SDK. Use Glue 5.0. |
+| `requests cross-account auth but the AWS SDK v2 STS module is not on the classpath` | The Glue image does not bundle the AWS SDK. Use Glue 5.0 or later. |
 | `is not fully qualified and is not a built-in driver provider` | `class` is missing the `com.amazon.cqlreplicator.` prefix and will not load. |
+
+A correctly configured run also logs this line at startup:
+
+```
+Cross-account source: connector sessions use com.amazon.cqlreplicator.CrossAccountConnectionFactory
+```
+
+The line confirms that the connector reads the source through
+`CrossAccountConnectionFactory`. The factory exists because the provider is
+compiled into the Glue script: the driver loads `advanced.auth-provider.class`
+with its own class loader, and on Glue executors that loader cannot see the
+script jar. Without the factory, every executor read fails with
+`Can't find class com.amazon.cqlreplicator.CrossAccountSigV4AuthProvider`, while
+the Glue driver works. The job enables the factory only when
+`CassandraConnector.conf` names the cross-account provider.
 
 For an independent check of the IAM setup before running a replication job, the
 harness at `glue/sbin/keyspaces/smoke/` submits a read-only probe that performs
@@ -299,13 +351,13 @@ job:
 
 ## Limitations
 
-### Requires Glue 5.0
+### Requires Glue 5.0 or later
 
-The provider needs the AWS SDK v2 STS module at runtime. Glue 5.0 supplies the
-whole SDK as a single bundle
-(`/usr/share/aws/aws-java-sdk-v2/aws-sdk-java-bundle-2.29.52.jar`), and
-CQLReplicator deliberately ships **no** SDK jars of its own, since a second copy
-alongside the bundle risks a split-version `NoSuchMethodError`.
+The provider needs the AWS SDK v2 STS module at runtime. Glue 5.0 and 5.1 supply
+the whole SDK as a single bundle under `/usr/share/aws/aws-java-sdk-v2/`
+(`aws-sdk-java-bundle-2.29.52.jar` on 5.0, `aws-sdk-java-bundle-2.35.5.jar` on
+5.1), and CQLReplicator deliberately ships **no** SDK jars of its own, since a
+second copy alongside the bundle risks a split-version `NoSuchMethodError`.
 
 On an image without that bundle, a conf with `aws-role-arn` fails at startup
 with an explicit message rather than a bare `ClassNotFoundException`. A conf
@@ -386,7 +438,7 @@ and every discovery pass and full scan reads through it. Before a large run:
 | Cross-account **target** (job in A, writing to B) | Not supported. `KeyspacesConnector.conf` covers both the target and the ledger, so one role ARN cannot address a foreign target and a local ledger. |
 | `--target-type parquet` / `dynamodb` with a cross-account Keyspaces source | Not supported. The provider ships only in `glue/sbin/keyspaces/CQLReplicator.scala`. |
 | `--cmd reconcile-keys` against a cross-account source | Not yet. `PrimaryKeyReconciliation` is a separate Glue script that does not yet carry the provider, so a conf naming it by FQN will not load there. Reconciliation remains available for same-account sources. |
-| Cross-**region** source and target | Works, but every read crosses regions: expect higher latency, inter-region data transfer charges, and no VPC endpoint for the source. Set `aws-region` and `local-datacenter` to A's region and size splits conservatively. |
+| Cross-**region** source and target | Works only with a NAT path from the Glue subnet: a VPC endpoint serves only its own region, so with endpoints alone the job hangs while it connects (see [Network](#3-network-security-group-and-vpc-endpoints)). Every read crosses regions: expect higher latency and inter-region data transfer charges. Set `aws-region` and `local-datacenter` to A's region and size splits conservatively. |
 | IAM external ID, MFA, or a role chain on the source role | Not supported. The provider requests a plain `AssumeRole` with session name `cqlreplicator` and a 3600-second duration. |
 
 ### Operational notes
@@ -403,3 +455,16 @@ and every discovery pass and full scan reads through it. Before a large run:
 - **Deleting the source role mid-run** does not fail immediately. Because
   credentials are resolved per authentication, existing connections continue
   until their next re-authentication.
+- **Occasional `Lost connection to remote peer` task failures are expected.**
+  Keyspaces closes connections from time to time. The source session knows only
+  one node (`All 1 node(s) tried`), so the driver's default policy has no other
+  node to retry on, and the task fails; Spark runs it again
+  (`spark.task.maxFailures=64`) and the stage completes. Glue's exception
+  analysis logs these at `ERROR` level as
+  `Stage completed successfully with Transient tasks failure`. Reads are
+  idempotent, so the data is not affected. If the failures become frequent, add
+  `AmazonKeyspacesExponentialRetryPolicy`, which retries on the same node, as
+  described under *Handling Amazon Keyspaces throttling during reconciliation*
+  in [README.MD](README.MD), with two changes: put the `advanced.retry-policy`
+  block in `CassandraConnector.conf`, and add the jar to the `--extra-jars` of
+  the `CQLReplicator<env>` job.

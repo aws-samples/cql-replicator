@@ -19,6 +19,21 @@ full background, read [cross-account-replication.md](cross-account-replication.m
 The tool runs in the **target** account. It reads from the source account
 through one IAM role. All steps say which account to use.
 
+> **Use the region of the source table for all target resources.** Create the
+> VPC endpoints, the Glue job, and the target table in the same region as the
+> source table. A VPC endpoint serves only its own region. If the job runs in a
+> different region, it cannot reach the source without a NAT path, and the job
+> stays in `RUNNING` with no clear error.
+>
+> Set the region once, and pass it to every `aws ec2` and `aws glue` command.
+> If you do not, the AWS CLI uses its default region. A Gateway endpoint
+> request in the wrong region fails with
+> `Endpoint type (Gateway) does not match available service types ([Interface])`.
+>
+> ```bash
+> export AWS_REGION=us-east-1 R=us-east-1
+> ```
+
 ---
 
 ## Phase 1 — Prepare the target account
@@ -31,22 +46,29 @@ A new AWS account cannot always start Glue job runs immediately. Each
 `StartJobRun` call then fails with `ResourceNumberLimitExceededException`,
 although all quotas show unused capacity.
 
-Do this test:
+Do this test. The test needs a role that Glue can assume. If the account has no
+such role yet, do Step 2 first and use `GlueKeyspacesRole`.
 
 ```bash
+PROBE_BUCKET=glue-probe-$RANDOM-$R
 echo 'print("ok")' > /tmp/noop.py
-aws s3 mb s3://glue-probe-$RANDOM-us-east-1 2>/dev/null || true  # or use an existing bucket
-aws s3 cp /tmp/noop.py s3://<a-bucket-you-own>/noop.py
-aws glue create-job --name glue-probe --role <any-glue-role> --glue-version "5.1" \
+aws s3 mb "s3://$PROBE_BUCKET" --region "$R"
+aws s3 cp /tmp/noop.py "s3://$PROBE_BUCKET/noop.py" --region "$R"
+aws glue create-job --name glue-probe --role GlueKeyspacesRole --glue-version "5.1" \
   --worker-type G.1X --number-of-workers 2 \
-  --command "Name=glueetl,ScriptLocation=s3://<a-bucket-you-own>/noop.py,PythonVersion=3"
-aws glue start-job-run --job-name glue-probe
+  --command "Name=glueetl,ScriptLocation=s3://$PROBE_BUCKET/noop.py,PythonVersion=3" \
+  --region "$R"
+aws glue start-job-run --job-name glue-probe --region "$R"
 ```
 
 If the run does not start, resolve the account activation first. Make sure that
 the payment method is verified. If the error continues, open an AWS Support
-case. Do not continue before a probe run starts. Delete the probe job after the
-test.
+case. Do not continue before a probe run starts. Then remove the probe:
+
+```bash
+aws glue delete-job --job-name glue-probe --region "$R"
+aws s3 rb "s3://$PROBE_BUCKET" --force --region "$R"
+```
 
 ### Step 2. Create the Glue job role
 
@@ -98,21 +120,21 @@ adds the matching trust policy in the source account.
 `init` requires a security group with a self-referencing inbound rule.
 
 ```bash
-VPC_ID=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true \
+VPC_ID=$(aws ec2 describe-vpcs --region "$R" --filters Name=isDefault,Values=true \
   --query 'Vpcs[0].VpcId' --output text)
 
-SG_ID=$(aws ec2 create-security-group --group-name cql-replicator-sg \
+SG_ID=$(aws ec2 create-security-group --region "$R" --group-name cql-replicator-sg \
   --description "CQLReplicator Glue connection" --vpc-id "$VPC_ID" \
   --query GroupId --output text)
 
-aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
+aws ec2 authorize-security-group-ingress --region "$R" --group-id "$SG_ID" \
   --protocol -1 --source-group "$SG_ID"
 ```
 
 Select a subnet and record its Availability Zone:
 
 ```bash
-aws ec2 describe-subnets --filters Name=vpc-id,Values="$VPC_ID" \
+aws ec2 describe-subnets --region "$R" --filters Name=vpc-id,Values="$VPC_ID" \
   --query 'Subnets[].[SubnetId,AvailabilityZone]' --output table
 SUBNET_ID=<your choice>
 AZ=<its availability zone>
@@ -125,16 +147,16 @@ reach S3, STS, Glue, CloudWatch, and Keyspaces through VPC endpoints (or through
 a NAT gateway — then skip this step).
 
 ```bash
-RT_ID=$(aws ec2 describe-route-tables \
+RT_ID=$(aws ec2 describe-route-tables --region "$R" \
   --filters Name=vpc-id,Values="$VPC_ID" Name=association.main,Values=true \
   --query 'RouteTables[0].RouteTableId' --output text)
 
-aws ec2 create-vpc-endpoint --vpc-id "$VPC_ID" --vpc-endpoint-type Gateway \
-  --service-name com.amazonaws.us-east-1.s3 --route-table-ids "$RT_ID"
+aws ec2 create-vpc-endpoint --region "$R" --vpc-id "$VPC_ID" --vpc-endpoint-type Gateway \
+  --service-name "com.amazonaws.$R.s3" --route-table-ids "$RT_ID"
 
 for svc in cassandra sts glue monitoring logs; do
-  aws ec2 create-vpc-endpoint --vpc-id "$VPC_ID" --vpc-endpoint-type Interface \
-    --service-name com.amazonaws.us-east-1.$svc \
+  aws ec2 create-vpc-endpoint --region "$R" --vpc-id "$VPC_ID" --vpc-endpoint-type Interface \
+    --service-name "com.amazonaws.$R.$svc" \
     --subnet-ids "$SUBNET_ID" --security-group-ids "$SG_ID" --private-dns-enabled
 done
 ```
@@ -144,6 +166,8 @@ Notes:
 - The `cassandra` endpoint serves both connections. With private DNS enabled,
   `cassandra.us-east-1.amazonaws.com` resolves to it. Authentication stays
   SigV4, so the cross-account read is not affected.
+- The endpoint serves only its own region. The source table must be in the
+  same region (see the note at the top of this procedure).
 - `monitoring` is CloudWatch metrics. `logs` is CloudWatch Logs. Glue continuous
   logging needs `logs`.
 - Keyspaces through a VPC endpoint needs two extra permissions on the Glue role:
@@ -156,7 +180,8 @@ aws iam put-role-policy --role-name GlueKeyspacesRole --policy-name KeyspacesVpc
 Wait until all endpoints show `available`:
 
 ```bash
-aws ec2 describe-vpc-endpoints --query 'VpcEndpoints[].[ServiceName,State]' --output table
+aws ec2 describe-vpc-endpoints --region "$R" \
+  --query 'VpcEndpoints[].[ServiceName,State]' --output table
 ```
 
 ### Step 7. Create the target schema
@@ -200,7 +225,7 @@ Do the steps of this phase with **target**-account credentials, from
 
 Replace `glue/conf/CassandraConnector.conf` with the Keyspaces cross-account
 profile (full template: [cross-account-replication.md](cross-account-replication.md),
-section 3). The key block:
+section 4). The key block:
 
 ```hocon
 advanced.auth-provider = {
@@ -278,6 +303,15 @@ Rules:
 - Search the Glue `/aws-glue/jobs/output` log stream for the preflight warnings
   listed in [cross-account-replication.md](cross-account-replication.md). No
   warning means the cross-account provider loaded.
+- Make sure that the log contains this line:
+  `Cross-account source: connector sessions use com.amazon.cqlreplicator.CrossAccountConnectionFactory`.
+  If it is missing, the executors cannot load the provider.
+- If the job stays in `RUNNING` and the log shows `ConnectTimeoutException` for
+  `cassandra.<region>.amazonaws.com:9142`, the job cannot reach the source.
+  Make sure that the job and the VPC endpoints are in the source table's region.
+- A few `Lost connection to remote peer` task failures are normal. Spark runs
+  the failed tasks again. For details, see the operational notes in
+  [cross-account-replication.md](cross-account-replication.md).
 - Expect Discovered = Replicated = the source row count. The replicated counter
   is cumulative across cycles; a job restart can make it larger than the source
   row count without data damage.

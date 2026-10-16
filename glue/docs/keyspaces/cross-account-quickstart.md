@@ -226,7 +226,7 @@ Rules:
 
 ```bash
 ./cqlreplicator --state init --sg "\"$SG_ID\"" --subnet "$SUBNET_ID" --az "$AZ" \
-  --region us-east-1 --env cr2 --glue-iam-role GlueKeyspacesRole \
+  --region us-east-1 --env dev --glue-iam-role GlueKeyspacesRole \
   --target-type keyspaces
 ```
 
@@ -244,7 +244,7 @@ Notes:
 
 ```bash
 ./glue/sbin/keyspaces/smoke/run-cross-account-probe.sh \
-  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-cr2 --region us-east-1 \
+  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-dev --region us-east-1 \
   --glue-iam-role GlueKeyspacesRole \
   --role-arn arn:aws:iam::XXXXXXXXXXXX:role/CQLReplicatorSourceRole
 ```
@@ -256,10 +256,10 @@ the source account. It opens no Keyspaces session.
 
 ```bash
 ./cqlreplicator --state run --max-wcu-traffic 20000 --tiles 4 \
-  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-cr2 --region us-east-1 \
+  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-dev --region us-east-1 \
   --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator \
   --trg-keyspace ks_test_cql_replicator --trg-table test_cql_replicator \
-  --env cr2 --target-type keyspaces
+  --env dev --target-type keyspaces
 ```
 
 Rules:
@@ -274,8 +274,8 @@ Rules:
 
 ```bash
 ./cqlreplicator --state stats \
-  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-cr2 --region us-east-1 \
-  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env cr2
+  --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-dev --region us-east-1 \
+  --src-keyspace ks_test_cql_replicator --src-table test_cql_replicator --env dev
 ```
 
 - Search the Glue `/aws-glue/jobs/output` log stream for the preflight warnings
@@ -300,8 +300,8 @@ Rules:
 
 ```bash
 ./cqlreplicator --state request-stop ...   # stop the jobs first
-./cqlreplicator --state cleanup --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-cr2 \
-  --region us-east-1 --env cr2
+./cqlreplicator --state cleanup --landing-zone s3://cql-replicator-YYYYYYYYYYYY-us-east-1-dev \
+  --region us-east-1 --env dev
 ```
 
 Also delete the VPC interface endpoints (each costs about $0.01 per hour), the
